@@ -124,6 +124,7 @@ def display_startup_message(
     update_available: bool = False,
     current_version: str = "",
     latest_version: str = "",
+    http_port: int = 8080,
 ) -> None:
     current_time = time.strftime("%Y-%m-%d %H:%M:%S")
 
@@ -173,8 +174,8 @@ def display_startup_message(
     print("")
     print(f"{Fore.MAGENTA}{folder} URLs:{Style.RESET_ALL}")
     print(f"{Fore.CYAN}   Tool Server IP: {LOCAL_IP}{Style.RESET_ALL}")
-    print(f"{Fore.CYAN}   Web Interface Local: http://localhost:8080/{Style.RESET_ALL}")
-    print(f"{Fore.CYAN}   Web Interface On Network: http://{LOCAL_IP}:8080/{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}   Web Interface Local: http://localhost:{http_port}/{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}   Web Interface On Network: http://{LOCAL_IP}:{http_port}/{Style.RESET_ALL}")
     print(f"{Fore.CYAN}   Logs Directory: {log_folder}{Style.RESET_ALL}")
     print("")
     print(f"{Fore.GREEN}{checkmark} Web Server initialized successfully{Style.RESET_ALL}")
@@ -190,6 +191,7 @@ config: Optional[Config] = None
 log_folder: Optional[Path] = None
 log_positions: Dict[str, int] = {}
 last_tool_status: Dict[str, str] = {}
+toolbox_port: int = 1010
 logger = logging.getLogger(__name__)
 
 
@@ -282,7 +284,7 @@ async def get_tool_status() -> List[Dict[str, Any]]:
         {
             "name": "Tool Box",
             "type": "toolbox",
-            "port": 1010,
+            "port": toolbox_port,
             "status": "running" if toolbox_running else "stopped",
             "image": "toolbox.png",
         }
@@ -455,7 +457,7 @@ async def start_tool(tool_name: str, tool_type: str, port: int) -> bool:
 
 async def start_toolbox() -> bool:
     """Start the toolbox server"""
-    return await start_tool("Tool Box", "toolbox", 1010)
+    return await start_tool("Tool Box", "toolbox", toolbox_port)
 
 
 async def stop_tool(tool_name: str) -> bool:
@@ -876,9 +878,9 @@ class CustomHTTPRequestHandler(SimpleHTTPRequestHandler):
         super().do_GET()
 
 
-def run_http_server(port: int = 8080) -> None:
+def run_http_server(port: int = 8080, host: str = "localhost") -> None:
     """Run HTTP server in a separate thread"""
-    server = HTTPServer(("localhost", port), CustomHTTPRequestHandler)
+    server = HTTPServer((host, port), CustomHTTPRequestHandler)
     server.serve_forever()
 
 
@@ -898,16 +900,36 @@ def parse_arguments() -> argparse.Namespace:
         default=None,
         help="API URL for the Galago backend (default: http://localhost:3010/api)",
     )
+    parser.add_argument(
+        "--http-port",
+        type=int,
+        default=8080,
+        help="Port for the web interface (default: 8080)",
+    )
+    parser.add_argument(
+        "--host",
+        type=str,
+        default="localhost",
+        help="Address to bind the web interface and WebSocket to (default: localhost). "
+        "Use 0.0.0.0 to allow access from other machines.",
+    )
+    parser.add_argument(
+        "--toolbox-port",
+        type=int,
+        default=1010,
+        help="Port for the Tool Box server (default: 1010)",
+    )
 
     return parser.parse_args()
 
 
 async def main() -> None:
     """Main function"""
-    global config, log_folder, last_tool_status
+    global config, log_folder, last_tool_status, toolbox_port
 
     try:
         args = parse_arguments()
+        toolbox_port = args.toolbox_port
         log_folder = setup_logging()
 
         # Set API URL if provided via command line
@@ -923,7 +945,9 @@ async def main() -> None:
         update_available, current_version, latest_version = check_for_updates()
 
         # Display startup message
-        display_startup_message(log_folder, update_available, current_version, latest_version)
+        display_startup_message(
+            log_folder, update_available, current_version, latest_version, args.http_port
+        )
 
         # Initialize config
         config = Config()
@@ -934,12 +958,12 @@ async def main() -> None:
         last_tool_status = {tool["name"]: tool["status"] for tool in initial_status}
 
         # Start HTTP server in background thread
-        http_port = 8080
-        http_thread = threading.Thread(target=run_http_server, args=(http_port,), daemon=True)
+        http_port = args.http_port
+        http_thread = threading.Thread(target=run_http_server, args=(http_port, args.host), daemon=True)
         http_thread.start()
 
         # Start WebSocket server
-        server = await websockets.serve(websocket_handler, "localhost", 8765)
+        server = await websockets.serve(websocket_handler, args.host, 8765)
 
         # Start monitoring tasks
         asyncio.create_task(monitor_log_files())
