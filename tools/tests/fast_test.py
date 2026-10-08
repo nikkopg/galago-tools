@@ -1,3 +1,4 @@
+import ast
 import importlib.metadata
 import json
 import os
@@ -39,7 +40,7 @@ from fast_mcp.results import (
 from fast_mcp.service import FastService, TransferRequest
 from fast_mcp.transport import InstrumentHTTPError
 
-from tools.fast.server import COMMAND_TO_SERVICE_METHOD, FastServer
+from tools.fast.server import COMMAND_TO_SERVICE_METHOD, FastServer, _check_args
 from tools.grpc_interfaces import controller_pb2, fast_pb2, tool_base_pb2
 from tools.grpc_interfaces.tool_base_pb2 import (
     ERROR_FROM_TOOL,
@@ -60,6 +61,15 @@ _ALL_TRANSFER_FIELDS: dict[str, Any] = dict(
     source_start_row="A", source_start_col=1, dest_start_row="A", dest_start_col=1,
     num_rows=8, num_cols=1, volume=10.0, tip_reuse="fresh",
 )
+
+# Copied verbatim from fast-mcp's fixtures/protocol-examples/example1.csv so this
+# fork test does not depend on the fast-mcp checkout's location (4 task rows:
+# PickTip, Aspirate, Dispense, EjectTip).
+EXAMPLE1_CSV = """PlateList,1,,1
+PickTip,2,8,12
+Aspirate,1,8,12,A,1,10
+Dispense,3,8,12,A,1,10
+EjectTip"""
 
 
 def _free_tcp_port() -> int:
@@ -691,6 +701,238 @@ class TestRegistration(unittest.TestCase):
     def test_config_oneof_registration(self) -> None:
         field = tool_base_pb2.Config.DESCRIPTOR.fields_by_name["fast"]
         self.assertEqual(field.containing_oneof.name, "config")
+
+
+class TestCheckArgs(unittest.TestCase):
+    """D-15: pure, instrument-free structural argument checks (both modes)."""
+
+    def test_fully_valid_transfer_gives_no_problems(self) -> None:
+        command = fast_pb2.Command.Transfer(**_ALL_TRANSFER_FIELDS)
+        self.assertEqual(_check_args(command), [])
+
+    def test_each_single_bad_field_gives_exactly_one_problem(self) -> None:
+        cases: list[tuple[str, Any, str]] = [
+            ("source_deck", 0, "must be 1-6"),
+            ("dest_deck", 7, "must be 1-6"),
+            ("source_plate_id", 0, "source_plate_id"),
+            ("source_start_col", 0, "source_start_col"),
+            ("num_rows", 0, "num_rows"),
+            ("num_cols", 0, "num_cols"),
+            ("source_start_row", "A1", "1-2 letters"),
+            ("dest_start_row", "", "1-2 letters"),
+            ("dest_start_row", "ABC", "1-2 letters"),
+            ("volume", 0.0, "positive number"),
+            ("volume", -1.0, "positive number"),
+            ("volume", float("nan"), "positive number"),
+            ("volume", float("inf"), "positive number"),
+            ("tip_reuse", "always", "one of fresh, reuse"),
+        ]
+        for field_name, bad_value, fragment in cases:
+            with self.subTest(field=field_name, value=bad_value):
+                command = fast_pb2.Command.Transfer(
+                    **dict(_ALL_TRANSFER_FIELDS, **{field_name: bad_value}))
+                problems = _check_args(command)
+                self.assertEqual(len(problems), 1, problems)
+                self.assertIn(fragment, problems[0])
+
+    def test_only_tip_reuse_set_gives_eleven_missing_fields_in_order(self) -> None:
+        command = fast_pb2.Command.Transfer(tip_reuse="fresh")
+        expected = [f.name for f in fields(TransferRequest) if f.name != "tip_reuse"]
+        self.assertEqual(len(expected), 11)
+        self.assertEqual(_check_args(command), expected)
+
+    def test_expected_tray_id_negative_or_zero_adds_no_problem(self) -> None:
+        for value in (-1, 0):
+            with self.subTest(expected_tray_id=value):
+                command = fast_pb2.Command.Transfer(
+                    **dict(_ALL_TRANSFER_FIELDS, expected_tray_id=value))
+                self.assertEqual(_check_args(command), [])
+
+    def test_run_protocol_and_validate_protocol_csv_checks(self) -> None:
+        for message_cls in (fast_pb2.Command.RunProtocol, fast_pb2.Command.ValidateProtocol):
+            with self.subTest(message=message_cls.__name__):
+                self.assertEqual(_check_args(message_cls(csv="")), ["csv is required"])
+                problems = _check_args(message_cls(csv="Hello,1"))
+                self.assertEqual(len(problems), 1)
+                self.assertIn("csv does not parse: ValueError", problems[0])
+                self.assertEqual(_check_args(message_cls(csv=EXAMPLE1_CSV)), [])
+
+    def test_run_protocol_timeout_s_must_be_positive(self) -> None:
+        for bad_timeout in (0.0, float("nan")):
+            with self.subTest(timeout_s=bad_timeout):
+                command = fast_pb2.Command.RunProtocol(csv=EXAMPLE1_CSV, timeout_s=bad_timeout)
+                self.assertEqual(
+                    _check_args(command),
+                    ["timeout_s must be a positive number of seconds"])
+
+    def test_read_and_recovery_commands_give_no_problems(self) -> None:
+        for command in (
+            fast_pb2.Command.GetStatus(), fast_pb2.Command.GetTipStatus(),
+            fast_pb2.Command.ScanTips(), fast_pb2.Command.EjectTray(),
+        ):
+            with self.subTest(command=type(command).__name__):
+                self.assertEqual(_check_args(command), [])
+
+
+class TestRealModeArgumentCheck(unittest.TestCase):
+    """D-15: the same _check_args gate runs in real mode too, via the
+    FastServer._dispatchCommand override, before any FastService call."""
+
+    def setUp(self) -> None:
+        self.server = FastServer()
+        self.server.simulated = False
+        self.server.status = READY
+        self.server.service = MagicMock(spec=FastService)
+        self.server.config = fast_pb2.Config(host="h")
+
+    def test_invalid_transfer_rejected_before_reaching_service(self) -> None:
+        command = fast_pb2.Command.Transfer(**dict(_ALL_TRANSFER_FIELDS, volume=0.0))
+        reply = self.server._dispatchCommand(command)
+        self.assertEqual(reply.response, INVALID_ARGUMENTS)
+        self.assertEqual(MessageToDict(reply.meta_data)["kind"], "needsInput")
+        cast(MagicMock, self.server.service).run_transfer.assert_not_called()
+
+    def test_valid_transfer_reaches_service_exactly_once(self) -> None:
+        cast(MagicMock, self.server.service).run_transfer.return_value = Ran(
+            outcome=RunOutcome(state="idle", done=True, percent=100))
+        command = fast_pb2.Command.Transfer(**_ALL_TRANSFER_FIELDS)
+        reply = self.server._dispatchCommand(command)
+        self.assertEqual(reply.response, SUCCESS)
+        cast(MagicMock, self.server.service).run_transfer.assert_called_once()
+
+
+class TestEstimates(unittest.TestCase):
+    """D-16: named, documented estimate constants; every method returns an
+    int >= 1 and never raises, even on malformed/empty input (the
+    EstimateDuration RPC bypasses _check_args entirely)."""
+
+    def setUp(self) -> None:
+        self.server = FastServer()
+
+    def test_estimate_transfer_values(self) -> None:
+        cases = [
+            (10.0, 80), (25.0, 100), (13.0, 80), (13.5, 100),
+        ]
+        for volume, expected in cases:
+            with self.subTest(volume=volume):
+                command = fast_pb2.Command.Transfer(
+                    **dict(_ALL_TRANSFER_FIELDS, volume=volume))
+                self.assertEqual(self.server.EstimateTransfer(command), expected)
+
+        with self.subTest(volume="unset"):
+            command = fast_pb2.Command.Transfer(
+                **{k: v for k, v in _ALL_TRANSFER_FIELDS.items() if k != "volume"})
+            self.assertEqual(self.server.EstimateTransfer(command), 80)
+
+        with self.subTest(volume="nan"):
+            command = fast_pb2.Command.Transfer(
+                **dict(_ALL_TRANSFER_FIELDS, volume=float("nan")))
+            self.assertEqual(self.server.EstimateTransfer(command), 80)
+
+    def test_estimate_run_protocol_values(self) -> None:
+        cases = [
+            (EXAMPLE1_CSV, 120),
+            ("", 75),
+            ("garbage\nline2\nline3", 90),
+        ]
+        for csv, expected in cases:
+            with self.subTest(csv=csv[:20]):
+                command = fast_pb2.Command.RunProtocol(csv=csv)
+                self.assertEqual(self.server.EstimateRunProtocol(command), expected)
+
+    def test_read_and_motion_estimate_values(self) -> None:
+        self.assertEqual(
+            self.server.EstimateValidateProtocol(fast_pb2.Command.ValidateProtocol()), 1)
+        self.assertEqual(self.server.EstimateGetStatus(fast_pb2.Command.GetStatus()), 1)
+        self.assertEqual(self.server.EstimateGetTipStatus(fast_pb2.Command.GetTipStatus()), 1)
+        self.assertEqual(self.server.EstimateScanTips(fast_pb2.Command.ScanTips()), 30)
+        self.assertEqual(self.server.EstimateEjectTray(fast_pb2.Command.EjectTray()), 15)
+
+    def test_no_estimate_method_raises_for_an_empty_message_of_its_type(self) -> None:
+        empty_messages = [
+            fast_pb2.Command.Transfer(),
+            fast_pb2.Command.RunProtocol(),
+            fast_pb2.Command.ValidateProtocol(),
+            fast_pb2.Command.GetStatus(),
+            fast_pb2.Command.GetTipStatus(),
+            fast_pb2.Command.ScanTips(),
+            fast_pb2.Command.EjectTray(),
+        ]
+        estimate_methods: dict[str, Any] = {
+            "Transfer": self.server.EstimateTransfer,
+            "RunProtocol": self.server.EstimateRunProtocol,
+            "ValidateProtocol": self.server.EstimateValidateProtocol,
+            "GetStatus": self.server.EstimateGetStatus,
+            "GetTipStatus": self.server.EstimateGetTipStatus,
+            "ScanTips": self.server.EstimateScanTips,
+            "EjectTray": self.server.EstimateEjectTray,
+        }
+        for message in empty_messages:
+            name = type(message).__name__
+            with self.subTest(command=name):
+                estimate = estimate_methods[name](message)
+                self.assertIsInstance(estimate, int)
+                self.assertGreaterEqual(estimate, 1)
+
+
+class TestAdapterInvariant(unittest.TestCase):
+    """The adapter's core-only, open_service-only, no-abort, no-passthrough
+    shape, held mechanically (mirrors fast_mcp/tests/test_service.py's
+    test_adapter_server_is_pure style for the MCP entry)."""
+
+    def test_adapter_obtains_service_only_through_open_service(self) -> None:
+        server_path = Path(__file__).resolve().parents[1] / "fast" / "server.py"
+        tree = ast.parse(server_path.read_text())
+
+        allowed_modules = {
+            "fast_mcp.composition", "fast_mcp.service", "fast_mcp.results",
+            "fast_mcp.run_control", "fast_mcp.model", "fast_mcp.authoring",
+            "fast_mcp.transport",
+        }
+        exact_names = {
+            "fast_mcp.model": {"Protocol"},
+            "fast_mcp.authoring": {"_TIP_REUSE_MODES"},
+            "fast_mcp.transport": {"InstrumentHTTPError"},
+        }
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                module = node.module or ""
+                if module == "fast_mcp" or module.startswith("fast_mcp."):
+                    self.assertIn(module, allowed_modules, module)
+                    if module in exact_names:
+                        names = {alias.name for alias in node.names}
+                        self.assertEqual(names, exact_names[module], module)
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    self.assertFalse(
+                        alias.name == "fast_mcp" or alias.name.startswith("fast_mcp."),
+                        alias.name)
+
+        banned_calls = {"FastService", "InstrumentSession", "RestInstrumentClient"}
+        open_service_called = False
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                self.assertNotIn(node.func.id, banned_calls, node.func.id)
+                if node.func.id == "open_service":
+                    open_service_called = True
+        self.assertTrue(open_service_called, "open_service must be called at least once")
+
+        banned_attrs = {
+            "abort", "pause", "resume", "verify_deck_layout", "active_tray",
+            "plate_definitions", "dispense_report", "start_run", "wait",
+        }
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Attribute):
+                self.assertNotIn(node.attr, banned_attrs, node.attr)
+                if isinstance(node.value, ast.Name) and node.value.id == "httpx":
+                    self.assertEqual(node.attr, "HTTPError", node.attr)
+
+        banned_substrings = (":5003", "/manualoperation", "/protocol/", "/sim/")
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                for substring in banned_substrings:
+                    self.assertNotIn(substring, node.value, (substring, node.value))
 
 
 class TestRequirementsPin(unittest.TestCase):
