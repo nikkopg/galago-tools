@@ -15,32 +15,52 @@ from typing import Any, cast
 from unittest.mock import MagicMock, call, patch
 
 import grpc
-import httpx
 from google.protobuf.json_format import MessageToDict
 
-from fast_mcp.errors import Finding
-from fast_mcp.orchestration import RunOutcome
-from fast_mcp.results import (
-    Aborted,
-    Cancelled,
-    DeckMove,
-    DeckSuggestion,
-    NeedsConfirmation,
-    NeedsInput,
-    Paused,
-    Ran,
-    Refused,
-    Rejected,
-    TimedOut,
-    TipRescan,
-    TipScan,
-    TrayEjected,
-    ValidationReport,
-)
-from fast_mcp.service import FastService, TransferRequest
-from fast_mcp.transport import InstrumentHTTPError
+# Item 6 (PROJECT.md "Fork CI GitLab credential"): option approve-all-ci-skip (6b).
+# The private fast-mcp core (tools/fast/requirements.txt, a git+https install
+# against an internal GitLab) is not reachable from a GitHub-hosted CI runner
+# (RESEARCH.md Pitfall 4) and no deploy-token secret is created for it. Every
+# import that depends on that core -- including httpx, which is pulled in only
+# transitively through fast_mcp's own install, never by this fork's own
+# requirements.txt -- is collected into this one try block so a missing core
+# skips these tests with a clear reason instead of erroring with a raw import
+# traceback. The local Python 3.10 `bin/make test` run (core installed) stays
+# the authoritative gate.
+try:
+    import httpx
 
-from tools.fast.server import COMMAND_TO_SERVICE_METHOD, FastServer, _check_args
+    from fast_mcp.errors import Finding
+    from fast_mcp.orchestration import RunOutcome
+    from fast_mcp.results import (
+        Aborted,
+        Cancelled,
+        DeckMove,
+        DeckSuggestion,
+        NeedsConfirmation,
+        NeedsInput,
+        Paused,
+        Ran,
+        Refused,
+        Rejected,
+        TimedOut,
+        TipRescan,
+        TipScan,
+        TrayEjected,
+        ValidationReport,
+    )
+    from fast_mcp.service import FastService, TransferRequest
+    from fast_mcp.transport import InstrumentHTTPError
+
+    from tools.fast.server import COMMAND_TO_SERVICE_METHOD, FastServer, _check_args
+except ModuleNotFoundError as exc:
+    if exc.name and exc.name.split(".")[0] in ("fast_mcp", "httpx"):
+        raise unittest.SkipTest(
+            "fast_mcp core is not installed (private GitLab dependency, see "
+            "tools/fast/requirements.txt); the local Python 3.10 bin/make test run "
+            "is the authoritative gate") from exc
+    raise
+
 from tools.grpc_interfaces import controller_pb2, fast_pb2, tool_base_pb2
 from tools.grpc_interfaces.tool_base_pb2 import (
     ERROR_FROM_TOOL,
