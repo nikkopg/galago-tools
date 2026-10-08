@@ -47,6 +47,11 @@ from tools.grpc_interfaces.tool_base_pb2 import (
 
 DEFAULT_PORT = 5003
 
+_NOT_CONNECTED_MESSAGE = (
+    "fast tool is not connected to an instrument: restart the tool server and "
+    "Configure it with simulated off")
+_BUSY_MESSAGE = "another motion command is in progress on this tool"
+
 MOTION_COMMANDS = frozenset({"Transfer", "RunProtocol", "ScanTips", "EjectTray"})
 
 COMMAND_TO_SERVICE_METHOD = {
@@ -215,13 +220,11 @@ class FastServer(ToolServer):
         return self.config.expected_tray_id or None
 
     def Transfer(self, params: "Command.Transfer") -> ExecuteCommandReply:
-        if self.service is None:
-            return _reply(
-                NOT_READY,
-                message=("fast tool is not connected to an instrument: restart the tool "
-                         "server and Configure it with simulated off"))
+        service = self.service
+        if service is None:
+            return _reply(NOT_READY, message=_NOT_CONNECTED_MESSAGE)
         if not self._motion_lock.acquire(blocking=False):
-            return _reply(NOT_READY, message="another motion command is in progress on this tool")
+            return _reply(NOT_READY, message=_BUSY_MESSAGE)
         try:
             request = TransferRequest(**{
                 f.name: getattr(params, f.name) if params.HasField(f.name) else None
@@ -229,12 +232,113 @@ class FastServer(ToolServer):
             })
             expected = self._expected_tray_id(params)
             try:
-                result = self.service.run_transfer(
+                result = service.run_transfer(
                     request, expected_tray_id=expected,
                     options=RunOptions(timeout_s=self._timeout(None), on_progress=self._log_progress))
             except (InstrumentHTTPError, httpx.HTTPError) as exc:
                 return _transport_error_reply(exc)
             return _result_reply(result, expected)
+        finally:
+            self._motion_lock.release()
+
+    def RunProtocol(self, params: "Command.RunProtocol") -> ExecuteCommandReply:
+        service = self.service
+        if service is None:
+            return _reply(NOT_READY, message=_NOT_CONNECTED_MESSAGE)
+        if not self._motion_lock.acquire(blocking=False):
+            return _reply(NOT_READY, message=_BUSY_MESSAGE)
+        try:
+            per_command = params.timeout_s if params.HasField("timeout_s") else None
+            try:
+                result = service.run_protocol(
+                    params.csv, verify_layout=True,
+                    options=RunOptions(timeout_s=self._timeout(per_command),
+                                       on_progress=self._log_progress))
+            except (InstrumentHTTPError, httpx.HTTPError) as exc:
+                return _transport_error_reply(exc)
+            return _result_reply(result)
+        finally:
+            self._motion_lock.release()
+
+    def ValidateProtocol(self, params: "Command.ValidateProtocol") -> ExecuteCommandReply:
+        service = self.service
+        if service is None:
+            return _reply(NOT_READY, message=_NOT_CONNECTED_MESSAGE)
+        report = service.validate(params.csv)
+        if report.valid:
+            return _reply(SUCCESS, meta=report.to_dict())
+        parts = "; ".join(f"{f.code} {f.name}: {f.message}" for f in report.findings)
+        return _reply(INVALID_ARGUMENTS,
+                     message=_one_line(f"validation findings: {parts}", 500),
+                     meta=report.to_dict())
+
+    def GetStatus(self, *args: object) -> object:  # type: ignore[override]
+        """Dual-purpose, by necessity: `ToolDriverServicer.GetStatus(request,
+        context) -> StatusReply` is the generic tool-health RPC that every
+        registered tool exposes (galago-core polls it on a heartbeat,
+        `controller/server/tools.ts:fetchStatus`) -- it is bound by
+        `add_ToolDriverServicer_to_server` directly to `self.GetStatus`, by
+        attribute name, in generated code we cannot edit (base_server.py and
+        tool_driver_pb2_grpc.py). `Command.GetStatus {}` is this adapter's
+        own read-status intent command, dispatched by
+        `ToolServer._dispatchCommand`'s `getattr(self,
+        command.__class__.__name__)` -- which is ALSO literally "GetStatus".
+        Both bind to the same attribute. The gRPC-generated stub always calls
+        the health RPC with exactly two positional args (request, context);
+        `_dispatchCommand` always calls the intent command with exactly one
+        (the command). Arity is therefore a safe, stable discriminator."""
+        if len(args) == 2:
+            return super().GetStatus(*args)  # type: ignore[arg-type]
+        (params,) = args
+        return self._get_status(params)  # type: ignore[arg-type]
+
+    def _get_status(self, params: "Command.GetStatus") -> ExecuteCommandReply:
+        service = self.service
+        if service is None:
+            return _reply(NOT_READY, message=_NOT_CONNECTED_MESSAGE)
+        try:
+            status = service.status()
+        except (InstrumentHTTPError, httpx.HTTPError) as exc:
+            return _transport_error_reply(exc)
+        return _reply(SUCCESS, meta=status)
+
+    def GetTipStatus(self, params: "Command.GetTipStatus") -> ExecuteCommandReply:
+        service = self.service
+        if service is None:
+            return _reply(NOT_READY, message=_NOT_CONNECTED_MESSAGE)
+        try:
+            result = service.tip_status()
+        except (InstrumentHTTPError, httpx.HTTPError) as exc:
+            return _transport_error_reply(exc)
+        return _result_reply(result)
+
+    def ScanTips(self, params: "Command.ScanTips") -> ExecuteCommandReply:
+        service = self.service
+        if service is None:
+            return _reply(NOT_READY, message=_NOT_CONNECTED_MESSAGE)
+        if not self._motion_lock.acquire(blocking=False):
+            return _reply(NOT_READY, message=_BUSY_MESSAGE)
+        try:
+            try:
+                result = service.scan_tips(is_tip_broken=params.is_tip_broken)
+            except (InstrumentHTTPError, httpx.HTTPError) as exc:
+                return _transport_error_reply(exc)
+            return _result_reply(result)
+        finally:
+            self._motion_lock.release()
+
+    def EjectTray(self, params: "Command.EjectTray") -> ExecuteCommandReply:
+        service = self.service
+        if service is None:
+            return _reply(NOT_READY, message=_NOT_CONNECTED_MESSAGE)
+        if not self._motion_lock.acquire(blocking=False):
+            return _reply(NOT_READY, message=_BUSY_MESSAGE)
+        try:
+            try:
+                result = service.eject_tray()
+            except (InstrumentHTTPError, httpx.HTTPError) as exc:
+                return _transport_error_reply(exc)
+            return _result_reply(result)
         finally:
             self._motion_lock.release()
 

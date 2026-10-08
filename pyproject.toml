@@ -27,3 +27,8 @@ exclude = ['.*pb2.*', 'pyi$', 'cytation.py', "teach_pendant","opentrons", "CLARI
 [[tool.mypy.overrides]]
 module = ""
 ignore_missing_imports = true
+
+# fast_mcp ships no py.typed marker (core-only package, Phase 5 D-01/D-03).
+[[tool.mypy.overrides]]
+module = ["fast_mcp", "fast_mcp.*"]
+ignore_missing_imports = true
