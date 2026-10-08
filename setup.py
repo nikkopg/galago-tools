@@ -143,7 +143,7 @@ setup(
                             },
     url='https://github.com/sciencecorp/galago-tools',
     author='Science Corporation',
-    python_requires=">=3.9",
+    python_requires=">=3.10",
     author_email='',
     long_description_content_type="text/markdown",
     entry_points={

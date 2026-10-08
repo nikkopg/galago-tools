@@ -7,7 +7,7 @@ ENV_NAME="galago"
 
 build_env() {
     echo "Creating conda environment '$ENV_NAME'..."
-    mamba create --name $ENV_NAME python=3.9.12
+    mamba create --name $ENV_NAME python=3.10.12
     echo "Conda environment '$ENV_NAME' created."
 }
 
