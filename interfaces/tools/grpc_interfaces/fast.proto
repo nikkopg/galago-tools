@@ -1,0 +1,60 @@
+syntax = 'proto3';
+
+package com.science.foundry.tools.grpc_interfaces.fast;
+
+message Command {
+  oneof command {
+    Transfer transfer = 1;
+    RunProtocol run_protocol = 2;
+    ValidateProtocol validate_protocol = 3;
+    GetStatus get_status = 4;
+    GetTipStatus get_tip_status = 5;
+    ScanTips scan_tips = 6;
+    EjectTray eject_tray = 7;
+  }
+
+  message Transfer {
+    optional int32 source_deck = 1;
+    optional int32 dest_deck = 2;
+    optional int32 source_plate_id = 3;
+    optional int32 dest_plate_id = 4;
+    optional string source_start_row = 5;
+    optional int32 source_start_col = 6;
+    optional string dest_start_row = 7;
+    optional int32 dest_start_col = 8;
+    optional int32 num_rows = 9;
+    optional int32 num_cols = 10;
+    optional double volume = 11;
+    optional string tip_reuse = 12;
+    optional int32 expected_tray_id = 13;
+  }
+
+  message RunProtocol {
+    string csv = 1;
+    optional double timeout_s = 2;
+  }
+
+  message ValidateProtocol {
+    string csv = 1;
+  }
+
+  message GetStatus {
+  }
+
+  message GetTipStatus {
+  }
+
+  message ScanTips {
+    bool is_tip_broken = 1;
+  }
+
+  message EjectTray {
+  }
+}
+
+message Config {
+  string host = 1;
+  int32 port = 2;
+  int32 expected_tray_id = 3;
+  double run_timeout_s = 4;
+}
