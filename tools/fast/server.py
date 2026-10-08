@@ -10,14 +10,18 @@ fast_mcp.composition.open_service (D-04).
 import argparse
 import logging
 import math
+import re
 import threading
 from dataclasses import fields
-from typing import Optional
+from typing import Any, Optional, cast
 
 import httpx
+from google.protobuf import message
 from google.protobuf.struct_pb2 import Struct
 
+from fast_mcp.authoring import _TIP_REUSE_MODES
 from fast_mcp.composition import OwnedService, endpoint_key, open_service
+from fast_mcp.model import Protocol
 from fast_mcp.results import (
     Aborted,
     Cancelled,
@@ -80,6 +84,22 @@ _RESPONSE_FOR_KIND = {
     "tipRescan": SUCCESS,
 }
 
+# D-16 ASSUMED PLACEHOLDERS: no live timing evidence exists yet (RESEARCH.md
+# Pitfall 7). The GAL-05 live run records the observed duration against
+# EstimateTransfer and compares it with this formula; per-plate-format
+# calibration is deferred unless that comparison is off by more than x2.
+_DECK_SLOTS = 6  # fast_mcp.authoring._plate_list_for builds a 6-slot PlateList
+_ROW_RE = re.compile(r"[A-Za-z]{1,2}")
+
+EST_READ_S = 1
+EST_SCAN_TIPS_S = 30
+EST_EJECT_TRAY_S = 15
+EST_TRANSFER_OVERHEAD_S = 60
+EST_TRANSFER_PER_CYCLE_S = 20
+EST_TIP_MAX_VOLUME_UL = 13.0
+EST_RUN_PROTOCOL_OVERHEAD_S = 60
+EST_RUN_PROTOCOL_PER_TASK_S = 15
+
 
 def _one_line(text: str, limit: int) -> str:
     """Collapse all whitespace runs to single spaces, then truncate to
@@ -88,6 +108,85 @@ def _one_line(text: str, limit: int) -> str:
     if len(collapsed) > limit:
         return collapsed[: max(limit - 3, 0)] + "..."
     return collapsed
+
+
+def _check_args(command: "message.Message") -> list[str]:
+    """Pure, instrument-free structural argument checks (D-15, RESEARCH
+    Pattern 1). Returns a list of problem strings; an empty list means the
+    command is well-formed. Called from FastServer._dispatchCommand before
+    delegating to super(), so it runs identically in simulated and real mode
+    -- bad arguments never reach the instrument and never come back as
+    DRIVER_ERROR in simulated mode (base_server._estimateDuration's error
+    slot is structurally always None, see RESEARCH.md).
+
+    `command` is one of the seven generated oneof message types, which have
+    no shared base beyond google.protobuf.message.Message -- cast to Any
+    once here (not Message itself) so the per-field checks below can access
+    each concrete message's own fields."""
+    cmd = cast(Any, command)
+    name = type(command).__name__
+    if name == "Transfer":
+        missing = [f.name for f in fields(TransferRequest) if not cmd.HasField(f.name)]
+        if missing:
+            return missing
+        problems: list[str] = []
+        if not (1 <= cmd.source_deck <= _DECK_SLOTS):
+            problems.append(f"source_deck must be 1-{_DECK_SLOTS} (got {cmd.source_deck})")
+        if not (1 <= cmd.dest_deck <= _DECK_SLOTS):
+            problems.append(f"dest_deck must be 1-{_DECK_SLOTS} (got {cmd.dest_deck})")
+        if cmd.source_plate_id < 1:
+            problems.append(f"source_plate_id must be >= 1 (got {cmd.source_plate_id})")
+        if cmd.dest_plate_id < 1:
+            problems.append(f"dest_plate_id must be >= 1 (got {cmd.dest_plate_id})")
+        if cmd.source_start_col < 1:
+            problems.append(f"source_start_col must be >= 1 (got {cmd.source_start_col})")
+        if cmd.dest_start_col < 1:
+            problems.append(f"dest_start_col must be >= 1 (got {cmd.dest_start_col})")
+        if cmd.num_rows < 1:
+            problems.append(f"num_rows must be >= 1 (got {cmd.num_rows})")
+        if cmd.num_cols < 1:
+            problems.append(f"num_cols must be >= 1 (got {cmd.num_cols})")
+        if not _ROW_RE.fullmatch(cmd.source_start_row):
+            problems.append(
+                f"source_start_row must be 1-2 letters (got {cmd.source_start_row!r})")
+        if not _ROW_RE.fullmatch(cmd.dest_start_row):
+            problems.append(
+                f"dest_start_row must be 1-2 letters (got {cmd.dest_start_row!r})")
+        if not (math.isfinite(cmd.volume) and cmd.volume > 0):
+            problems.append(f"volume must be a positive number of uL (got {cmd.volume})")
+        if cmd.tip_reuse not in _TIP_REUSE_MODES:
+            problems.append(
+                f"tip_reuse must be one of {', '.join(_TIP_REUSE_MODES)} "
+                f"(got {cmd.tip_reuse!r})")
+        return problems
+    if name in ("RunProtocol", "ValidateProtocol"):
+        problems = []
+        csv = cmd.csv
+        if not csv.strip():
+            problems.append("csv is required")
+        else:
+            try:
+                Protocol.from_csv(csv)
+            except Exception as exc:
+                # Structural parse only -- plate knowledge needs the live instrument.
+                problems.append(
+                    f"csv does not parse: {type(exc).__name__}: {_one_line(str(exc), 200)}")
+        if name == "RunProtocol" and cmd.HasField("timeout_s"):
+            if not (math.isfinite(cmd.timeout_s) and cmd.timeout_s > 0):
+                problems.append("timeout_s must be a positive number of seconds")
+        return problems
+    return []
+
+
+def _transfer_cycles(params: "Command.Transfer") -> int:
+    """A 96/384 head moves the whole block in one pass, so the block size
+    does not multiply the cycles -- only the per-tip volume does."""
+    if not params.HasField("volume"):
+        return 1
+    volume = params.volume
+    if not (math.isfinite(volume) and volume > 0):
+        return 1
+    return max(1, math.ceil(volume / EST_TIP_MAX_VOLUME_UL))
 
 
 def _reply(code: ResponseCode, *, message: str = "",
@@ -184,6 +283,24 @@ class FastServer(ToolServer):
         self._owned: Optional[OwnedService] = None
         self.service: Optional[FastService] = None
         self._motion_lock = threading.Lock()
+
+    def _dispatchCommand(self, command: "message.Message") -> ExecuteCommandReply:
+        """Override of ToolServer._dispatchCommand (RESEARCH Pattern 1, D-15).
+
+        Runs in both simulated and real mode, before any instrument contact.
+        base_server's simulated-mode dispatch never validates arguments and
+        its _estimateDuration error slot is structurally always None, so bad
+        arguments must be rejected here or they either sleep through
+        unchecked (simulated) or surface as the wrong error code entirely.
+        Never edits tools/base_server.py."""
+        problems = _check_args(command)
+        if problems:
+            return _reply(
+                INVALID_ARGUMENTS,
+                message=_one_line("invalid arguments: " + "; ".join(problems), 500),
+                meta=NeedsInput(missing=problems).to_dict(),
+            )
+        return super()._dispatchCommand(command)
 
     def _configure(self, config: Config) -> None:
         host = config.host.strip()
@@ -341,6 +458,44 @@ class FastServer(ToolServer):
             return _result_reply(result)
         finally:
             self._motion_lock.release()
+
+    # -- D-16 estimate methods -------------------------------------------
+    # Every Estimate<Cmd> method is called from two places: base_server's
+    # simulated-mode _dispatchCommand (after _check_args has already
+    # passed), and the EstimateDuration RPC, which bypasses _check_args
+    # entirely (RESEARCH.md: "parseCommand -> _estimateDuration ... does
+    # NOT go through _dispatchCommand"). Every method below must therefore
+    # never raise, even given malformed input, and always return an int >= 1.
+
+    def EstimateTransfer(self, params: "Command.Transfer") -> int:
+        try:
+            cycles = _transfer_cycles(params)
+            return EST_TRANSFER_OVERHEAD_S + EST_TRANSFER_PER_CYCLE_S * cycles
+        except Exception:
+            return EST_TRANSFER_OVERHEAD_S + EST_TRANSFER_PER_CYCLE_S
+
+    def EstimateRunProtocol(self, params: "Command.RunProtocol") -> int:
+        try:
+            n = len(Protocol.from_csv(params.csv).tasks)
+        except Exception:
+            lines = [ln for ln in params.csv.splitlines() if ln.strip()]
+            n = max(0, len(lines) - 1)
+        return EST_RUN_PROTOCOL_OVERHEAD_S + EST_RUN_PROTOCOL_PER_TASK_S * max(1, n)
+
+    def EstimateValidateProtocol(self, params: "Command.ValidateProtocol") -> int:
+        return EST_READ_S
+
+    def EstimateGetStatus(self, params: "Command.GetStatus") -> int:
+        return EST_READ_S
+
+    def EstimateGetTipStatus(self, params: "Command.GetTipStatus") -> int:
+        return EST_READ_S
+
+    def EstimateScanTips(self, params: "Command.ScanTips") -> int:
+        return EST_SCAN_TIPS_S
+
+    def EstimateEjectTray(self, params: "Command.EjectTray") -> int:
+        return EST_EJECT_TRAY_S
 
 
 if __name__ == "__main__":

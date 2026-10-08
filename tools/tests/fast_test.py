@@ -4,12 +4,14 @@ import os
 import socket
 import tempfile
 import threading
+import time
+import types
 import unittest
 from concurrent import futures
 from dataclasses import fields
 from pathlib import Path
 from typing import Any, cast
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import grpc
 import httpx
@@ -127,6 +129,114 @@ class TestTransferEndToEndOverGrpc(unittest.TestCase):
         second_reply = second.Configure(config_request, None)  # type: ignore[arg-type]
         self.assertEqual(second_reply.response, tool_base_pb2.NOT_READY)
         self.assertIn("galago", second_reply.error_message)
+
+
+class TestSimulatedTransferOverGrpc(unittest.TestCase):
+    """GAL-03 tracer: a simulated tool validates arguments, sleeps the named
+    D-16 estimate and never builds a FastService or takes the owner lock,
+    over a real in-process gRPC server (RESEARCH Pattern 1)."""
+
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self._env_patcher = patch.dict(os.environ, {"FAST_MCP_LOCK_DIR": self._tmpdir.name})
+        self._env_patcher.start()
+        self.addCleanup(self._env_patcher.stop)
+        self.addCleanup(self._tmpdir.cleanup)
+
+        self._open_service_patcher = patch("tools.fast.server.open_service")
+        self.mock_open_service = self._open_service_patcher.start()
+        self.addCleanup(self._open_service_patcher.stop)
+
+        self.fake_sleep = MagicMock()
+        self._time_patcher = patch(
+            "tools.base_server.time",
+            types.SimpleNamespace(time=time.time, sleep=self.fake_sleep))
+        self._time_patcher.start()
+        self.addCleanup(self._time_patcher.stop)
+
+        self.fs = FastServer()
+        self._grpc_port = _free_tcp_port()
+        self._server = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
+        add_ToolDriverServicer_to_server(self.fs, self._server)
+        self._server.add_insecure_port(f"127.0.0.1:{self._grpc_port}")
+        self._server.start()
+        self.addCleanup(self._server.stop, None)
+
+        self._channel = grpc.insecure_channel(f"127.0.0.1:{self._grpc_port}")
+        self.addCleanup(self._channel.close)
+        self.stub = ToolDriverStub(self._channel)
+
+        config_request = tool_base_pb2.Config(
+            simulated=True, toolId="fast-sim",
+            fast=fast_pb2.Config(host="sim-no-contact.invalid"))
+        reply = self.stub.Configure(config_request)
+        self.assertEqual(reply.response, tool_base_pb2.SUCCESS)
+
+    def _valid_transfer_command(self) -> tool_base_pb2.Command:
+        return tool_base_pb2.Command(
+            fast=fast_pb2.Command(transfer=fast_pb2.Command.Transfer(**_ALL_TRANSFER_FIELDS)))
+
+    def test_simulated_transfer_sleeps_estimate_without_service_or_lock(self) -> None:
+        exec_reply = self.stub.ExecuteCommand(self._valid_transfer_command())
+        self.assertEqual(exec_reply.response, SUCCESS)
+        self.fake_sleep.assert_called_once_with(80.0)
+
+        estimate_reply = self.stub.EstimateDuration(self._valid_transfer_command())
+        self.assertEqual(estimate_reply.response, SUCCESS)
+        self.assertEqual(estimate_reply.estimated_duration_seconds, 80)
+
+        self.mock_open_service.assert_not_called()
+        self.assertIsNone(self.fs.service)
+        self.assertEqual(
+            [f for f in os.listdir(self._tmpdir.name) if not f.startswith(".")], [])
+
+    def test_simulated_transfer_is_idempotent(self) -> None:
+        for _ in range(2):
+            exec_reply = self.stub.ExecuteCommand(self._valid_transfer_command())
+            self.assertEqual(exec_reply.response, SUCCESS)
+        self.assertEqual(self.fake_sleep.call_args_list, [call(80.0), call(80.0)])
+        self.mock_open_service.assert_not_called()
+        self.assertIsNone(self.fs.service)
+        self.assertEqual(
+            [f for f in os.listdir(self._tmpdir.name) if not f.startswith(".")], [])
+
+    def test_simulated_invalid_args_rejected_while_another_simulated_command_is_in_flight(
+            self) -> None:
+        entered = threading.Event()
+        release = threading.Event()
+
+        def _blocking_sleep(duration: float) -> None:
+            entered.set()
+            release.wait(timeout=10)
+
+        self.fake_sleep.side_effect = _blocking_sleep
+
+        result: dict[str, Any] = {}
+
+        def _run_a() -> None:
+            result["reply"] = self.stub.ExecuteCommand(self._valid_transfer_command())
+
+        thread_a = threading.Thread(target=_run_a)
+        thread_a.start()
+        self.assertTrue(entered.wait(timeout=5))
+
+        bad_fields = dict(_ALL_TRANSFER_FIELDS)
+        del bad_fields["volume"]
+        bad_command = tool_base_pb2.Command(
+            fast=fast_pb2.Command(transfer=fast_pb2.Command.Transfer(**bad_fields)))
+        bad_reply = self.stub.ExecuteCommand(bad_command)
+        self.assertEqual(bad_reply.response, INVALID_ARGUMENTS)
+        self.assertIn("volume", bad_reply.error_message)
+        self.assertEqual(MessageToDict(bad_reply.meta_data)["kind"], "needsInput")
+
+        self.assertTrue(thread_a.is_alive())
+
+        release.set()
+        thread_a.join(timeout=5)
+        self.assertFalse(thread_a.is_alive())
+        self.assertEqual(result["reply"].response, SUCCESS)
+
+        self.mock_open_service.assert_not_called()
 
 
 class TestTransferMapping(unittest.TestCase):
