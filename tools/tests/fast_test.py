@@ -49,7 +49,10 @@ try:
         TrayEjected,
         ValidationReport,
     )
+    from fast_mcp.resources import default_openapi_path
+    from fast_mcp.run_control import RunHandle
     from fast_mcp.service import FastService, TransferRequest
+    from fast_mcp.session import InstrumentSession
     from fast_mcp.transport import InstrumentHTTPError
 
     from tools.fast.server import COMMAND_TO_SERVICE_METHOD, FastServer, _check_args
@@ -300,9 +303,11 @@ class TestTransferMapping(unittest.TestCase):
 
 class _MockedFastServerTestCase(unittest.TestCase):
     """Shared setUp/tearDown for tests driving FastServer against a
-    MagicMock(spec=FastService). D-18 (Task 2 behavior #11): abort/pause/resume
-    must never be called by this adapter, enforced once per test class in
-    tearDown."""
+    MagicMock(spec=FastService). D-18 (Task 2 behavior #11), as amended by
+    dual-frontend section 11 #1: abort/pause/resume are never called on the
+    adapter's own initiative -- only the operator's Abort/Resume commands may
+    call them, and those are tested in TestRecoveryCommands, which does not
+    use this base. Enforced once per test class in tearDown."""
 
     def setUp(self) -> None:
         self.server = FastServer()
@@ -340,7 +345,8 @@ class TestResultMapping(_MockedFastServerTestCase):
             ("refused", Refused(reason="instrument not idle", state="running"),
              NOT_READY, "instrument not ready"),
             ("paused", Paused(outcome=RunOutcome(state="paused", done=False, percent=40)),
-             ERROR_FROM_TOOL, "run paused"),
+             ERROR_FROM_TOOL,
+             "fix the deck, then send Resume (is_tip_broken) or Abort (return_liquid)"),
             ("aborted", Aborted(outcome=RunOutcome(state="aborted", done=False, percent=40)),
              ERROR_FROM_TOOL, "run aborted"),
             ("timedOut", TimedOut(outcome=RunOutcome(state="timeout", done=False, percent=40)),
@@ -570,6 +576,14 @@ class TestMotionSerialization(_MockedFastServerTestCase):
             reply = self.server.EjectTray(fast_pb2.Command.EjectTray())
             self.assertEqual(reply.response, NOT_READY)
 
+            reply = self.server.Abort(fast_pb2.Command.Abort(return_liquid="no"))
+            self.assertEqual(reply.response, NOT_READY)
+            self.assertIn("another motion command is in progress", reply.error_message)
+
+            reply = self.server.Resume(fast_pb2.Command.Resume(is_tip_broken="no"))
+            self.assertEqual(reply.response, NOT_READY)
+            self.assertIn("another motion command is in progress", reply.error_message)
+
             # Not gated by the motion lock.
             reply = self.server.GetTipStatus(fast_pb2.Command.GetTipStatus())
             self.assertEqual(reply.response, SUCCESS)
@@ -632,6 +646,8 @@ class TestNotConfigured(unittest.TestCase):
             ("GetTipStatus", fast_pb2.Command.GetTipStatus()),
             ("ScanTips", fast_pb2.Command.ScanTips()),
             ("EjectTray", fast_pb2.Command.EjectTray()),
+            ("Abort", fast_pb2.Command.Abort(return_liquid="no")),
+            ("Resume", fast_pb2.Command.Resume(is_tip_broken="no")),
         ]
         for name, params in checks:
             with self.subTest(command=name):
@@ -718,6 +734,10 @@ class TestOneToOneSurface(unittest.TestCase):
         service.tip_status.return_value = TipScan(tips={})
         service.scan_tips.return_value = TipRescan(response={})
         service.eject_tray.return_value = TrayEjected(response={})
+        service.abort.return_value = {"errorCode": 0}
+        service.resume.return_value = {"errorCode": 0}
+        service.wait.return_value = Ran(
+            outcome=RunOutcome(state="idle", done=True, percent=100))
 
         calls = {
             "Transfer": (fast_pb2.Command.Transfer(**_ALL_TRANSFER_FIELDS),),
@@ -727,7 +747,10 @@ class TestOneToOneSurface(unittest.TestCase):
             "GetTipStatus": (fast_pb2.Command.GetTipStatus(),),
             "ScanTips": (fast_pb2.Command.ScanTips(),),
             "EjectTray": (fast_pb2.Command.EjectTray(),),
+            "Abort": (fast_pb2.Command.Abort(return_liquid="no"),),
+            "Resume": (fast_pb2.Command.Resume(is_tip_broken="no"),),
         }
+        self.assertEqual(set(calls), set(COMMAND_TO_SERVICE_METHOD))
         for command_name, args in calls.items():
             with self.subTest(command=command_name):
                 service.reset_mock()
@@ -901,6 +924,8 @@ class TestEstimates(unittest.TestCase):
         self.assertEqual(self.server.EstimateGetTipStatus(fast_pb2.Command.GetTipStatus()), 1)
         self.assertEqual(self.server.EstimateScanTips(fast_pb2.Command.ScanTips()), 30)
         self.assertEqual(self.server.EstimateEjectTray(fast_pb2.Command.EjectTray()), 15)
+        self.assertEqual(self.server.EstimateAbort(fast_pb2.Command.Abort()), 15)
+        self.assertEqual(self.server.EstimateResume(fast_pb2.Command.Resume()), 15)
 
     def test_no_estimate_method_raises_for_an_empty_message_of_its_type(self) -> None:
         empty_messages = [
@@ -911,6 +936,8 @@ class TestEstimates(unittest.TestCase):
             fast_pb2.Command.GetTipStatus(),
             fast_pb2.Command.ScanTips(),
             fast_pb2.Command.EjectTray(),
+            fast_pb2.Command.Abort(),
+            fast_pb2.Command.Resume(),
         ]
         estimate_methods: dict[str, Any] = {
             "Transfer": self.server.EstimateTransfer,
@@ -920,6 +947,8 @@ class TestEstimates(unittest.TestCase):
             "GetTipStatus": self.server.EstimateGetTipStatus,
             "ScanTips": self.server.EstimateScanTips,
             "EjectTray": self.server.EstimateEjectTray,
+            "Abort": self.server.EstimateAbort,
+            "Resume": self.server.EstimateResume,
         }
         for message in empty_messages:
             name = type(message).__name__
@@ -927,6 +956,185 @@ class TestEstimates(unittest.TestCase):
                 estimate = estimate_methods[name](message)
                 self.assertIsInstance(estimate, int)
                 self.assertGreaterEqual(estimate, 1)
+
+
+class TestRecoveryCommands(unittest.TestCase):
+    """Operator-issued Abort and Resume (dual-frontend section 11 #1, amended).
+    The core owns the state gate; these tests use the real FastService around
+    a stub transport wherever the gate itself is the point, so "refused"
+    proves no recovery request reached the instrument."""
+
+    def setUp(self) -> None:
+        self._openapi = default_openapi_path()
+        openapi_path = self._openapi.__enter__()
+        self.addCleanup(self._openapi.__exit__, None, None, None)
+        self.transport = MagicMock()
+        self.service = FastService(InstrumentSession(self.transport, openapi_path),
+                                   sleep=lambda _s: None, poll_interval_s=0.01)
+        self.server = FastServer()
+        self.server.service = self.service
+        self.server.config = fast_pb2.Config(host="h")
+        self.server.status = READY
+
+    def _statuses(self, *states: dict) -> None:
+        self.transport.get_status.side_effect = list(states)
+
+    def test_abort_while_paused_is_success_and_passes_the_decision(self) -> None:
+        for value, expected in (("yes", True), ("no", False), (" YES ", True)):
+            with self.subTest(return_liquid=value):
+                self.transport.reset_mock()
+                self._statuses({"currentState": "paused"})
+                self.transport.abort.return_value = {"errorCode": 0}
+                reply = self.server.Abort(fast_pb2.Command.Abort(return_liquid=value))
+                self.assertEqual(reply.response, SUCCESS)
+                self.transport.abort.assert_called_once_with(return_liquid=expected)
+
+    def test_abort_while_idle_is_refused_without_an_abort_call(self) -> None:
+        self._statuses({"currentState": "idle"})
+        reply = self.server.Abort(fast_pb2.Command.Abort(return_liquid="no"))
+        self.assertEqual(reply.response, ERROR_FROM_TOOL)
+        self.assertEqual(
+            reply.error_message,
+            "instrument not ready: no running or paused protocol to abort (state idle)")
+        self.assertEqual(MessageToDict(reply.meta_data)["kind"], "refused")
+        self.transport.abort.assert_not_called()
+
+    def test_abort_nonzero_error_code_is_error_from_tool(self) -> None:
+        self._statuses({"currentState": "paused"})
+        self.transport.abort.return_value = {"errorCode": -1}
+        reply = self.server.Abort(fast_pb2.Command.Abort(return_liquid="no"))
+        self.assertEqual(reply.response, ERROR_FROM_TOOL)
+        self.assertIn("instrument rejected abort: errorCode -1", reply.error_message)
+
+    def test_abort_reply_without_error_code_is_not_success(self) -> None:
+        self._statuses({"currentState": "paused"})
+        self.transport.abort.return_value = {}
+        reply = self.server.Abort(fast_pb2.Command.Abort(return_liquid="no"))
+        self.assertEqual(reply.response, ERROR_FROM_TOOL)
+
+    def test_resume_while_paused_waits_for_the_run_and_reports_ran(self) -> None:
+        self._statuses(
+            {"currentState": "paused"},  # core state gate
+            {"currentState": "running", "percentProgress": 50},
+            {"currentState": "idle", "percentProgress": 100,
+             "lastEvent": {"messageType": 5, "payload": {"errorCode": 0}}},
+        )
+        self.transport.resume.return_value = {"errorCode": 0}
+        reply = self.server.Resume(fast_pb2.Command.Resume(is_tip_broken="yes"))
+        self.assertEqual(reply.response, SUCCESS)
+        self.assertEqual(MessageToDict(reply.meta_data)["kind"], "ran")
+        self.transport.resume.assert_called_once_with(is_tip_broken=True)
+        self.transport.abort.assert_not_called()
+
+    def test_resume_wait_uses_a_fresh_handle_and_transfer_options(self) -> None:
+        service = MagicMock(spec=FastService)
+        service.resume.return_value = {"errorCode": 0}
+        service.wait.return_value = Ran(outcome=RunOutcome(state="idle", done=True, percent=100))
+        self.server.service = service
+        self.server.config = fast_pb2.Config(host="h", run_timeout_s=300)
+        self.server.Resume(fast_pb2.Command.Resume(is_tip_broken="no"))
+        handle = service.wait.call_args.args[0]
+        self.assertEqual(handle, RunHandle(plates=None, stale_done=False))
+        self.assertEqual(service.wait.call_args.kwargs["timeout_s"], 300)
+        self.assertEqual(service.wait.call_args.kwargs["on_progress"],
+                         self.server._log_progress)
+        service.abort.assert_not_called()
+
+    def test_resume_that_pauses_again_reports_the_actionable_paused_message(self) -> None:
+        self._statuses(
+            {"currentState": "paused"},
+            {"currentState": "running", "percentProgress": 10},
+            {"currentState": "paused", "percentProgress": 10,
+             "lastEvent": {"messageType": 1, "payload": {"errorCode": -645}}},
+        )
+        self.transport.resume.return_value = {"errorCode": 0}
+        reply = self.server.Resume(fast_pb2.Command.Resume(is_tip_broken="no"))
+        self.assertEqual(reply.response, ERROR_FROM_TOOL)
+        self.assertIn("run paused at 10%", reply.error_message)
+        self.assertIn("then send Resume (is_tip_broken) or Abort (return_liquid)",
+                      reply.error_message)
+        self.transport.abort.assert_not_called()
+
+    def test_resume_known_limitation_leading_paused_poll_reads_as_paused(self) -> None:
+        """Pins the documented limitation on FastServer.Resume: if the
+        instrument still says paused on the first poll after accepting the
+        resume, the wait reports Paused. Change this test if the core's wait
+        learns to ignore a leading paused."""
+        self._statuses({"currentState": "paused"}, {"currentState": "paused"})
+        self.transport.resume.return_value = {"errorCode": 0}
+        reply = self.server.Resume(fast_pb2.Command.Resume(is_tip_broken="no"))
+        self.assertEqual(reply.response, ERROR_FROM_TOOL)
+        self.assertEqual(MessageToDict(reply.meta_data)["kind"], "paused")
+
+    def test_resume_while_idle_is_refused_without_a_resume_call(self) -> None:
+        self._statuses({"currentState": "idle"})
+        reply = self.server.Resume(fast_pb2.Command.Resume(is_tip_broken="no"))
+        self.assertEqual(reply.response, ERROR_FROM_TOOL)
+        self.assertEqual(
+            reply.error_message,
+            "instrument not ready: no paused protocol to resume (state idle)")
+        self.transport.resume.assert_not_called()
+
+    def test_resume_rejected_by_instrument_does_not_wait(self) -> None:
+        service = MagicMock(spec=FastService)
+        service.resume.return_value = {"errorCode": -2}
+        self.server.service = service
+        reply = self.server.Resume(fast_pb2.Command.Resume(is_tip_broken="no"))
+        self.assertEqual(reply.response, ERROR_FROM_TOOL)
+        self.assertIn("instrument rejected resume: errorCode -2", reply.error_message)
+        service.wait.assert_not_called()
+
+    def test_missing_or_unclear_decision_is_invalid_arguments_in_real_mode(self) -> None:
+        self.server.simulated = False
+        cases = [
+            ("Abort", fast_pb2.Command.Abort(), "return_liquid"),
+            ("Abort", fast_pb2.Command.Abort(return_liquid=""), "return_liquid"),
+            ("Abort", fast_pb2.Command.Abort(return_liquid="false"), "return_liquid"),
+            ("Resume", fast_pb2.Command.Resume(), "is_tip_broken"),
+            ("Resume", fast_pb2.Command.Resume(is_tip_broken=""), "is_tip_broken"),
+            ("Resume", fast_pb2.Command.Resume(is_tip_broken="maybe"), "is_tip_broken"),
+        ]
+        for name, command, field_name in cases:
+            with self.subTest(command=name, value=getattr(command, field_name)):
+                reply = self.server._dispatchCommand(command)
+                self.assertEqual(reply.response, INVALID_ARGUMENTS)
+                self.assertIn(f"{field_name} must be 'yes' or 'no'", reply.error_message)
+                # Called directly, the method itself also refuses to default.
+                direct = getattr(self.server, name)(command)
+                self.assertEqual(direct.response, INVALID_ARGUMENTS)
+        self.transport.get_status.assert_not_called()
+        self.transport.abort.assert_not_called()
+        self.transport.resume.assert_not_called()
+
+    def test_check_args_recovery_decisions(self) -> None:
+        self.assertEqual(_check_args(fast_pb2.Command.Abort(return_liquid="yes")), [])
+        self.assertEqual(_check_args(fast_pb2.Command.Resume(is_tip_broken="No")), [])
+        self.assertEqual(_check_args(fast_pb2.Command.Abort()),
+                         ["return_liquid must be 'yes' or 'no' (got 'unset')"])
+        self.assertEqual(_check_args(fast_pb2.Command.Resume(is_tip_broken="")),
+                         ["is_tip_broken must be 'yes' or 'no' (got '')"])
+
+    def test_simulated_mode_checks_decisions_and_sleeps_the_estimate(self) -> None:
+        fake_sleep = MagicMock()
+        with patch("tools.base_server.time",
+                   types.SimpleNamespace(time=time.time, sleep=fake_sleep)):
+            server = FastServer()
+            server.config = fast_pb2.Config(host="sim-no-contact.invalid")
+            server.status = READY
+            server.simulated = True
+            for name, bad, good in (
+                ("Abort", fast_pb2.Command.Abort(),
+                 fast_pb2.Command.Abort(return_liquid="no")),
+                ("Resume", fast_pb2.Command.Resume(is_tip_broken="nope"),
+                 fast_pb2.Command.Resume(is_tip_broken="yes")),
+            ):
+                with self.subTest(command=name):
+                    fake_sleep.reset_mock()
+                    self.assertEqual(server._dispatchCommand(bad).response, INVALID_ARGUMENTS)
+                    fake_sleep.assert_not_called()
+                    self.assertEqual(server._dispatchCommand(good).response, SUCCESS)
+                    fake_sleep.assert_called_once_with(15.0)
+        self.assertIsNone(server.service)
 
 
 class TestAdapterInvariant(unittest.TestCase):
@@ -973,12 +1181,30 @@ class TestAdapterInvariant(unittest.TestCase):
         self.assertTrue(open_service_called, "open_service must be called at least once")
 
         banned_attrs = {
-            "abort", "pause", "resume", "verify_deck_layout", "active_tray",
-            "plate_definitions", "dispense_report", "start_run", "wait",
+            "pause", "verify_deck_layout", "active_tray",
+            "plate_definitions", "dispense_report", "start_run",
+        }
+        # Dual-frontend section 11 #1 (amended): abort/resume/wait exist only
+        # inside the operator's own Abort/Resume commands, so the adapter can
+        # never abort or resume on its own initiative.
+        scoped_attrs = {"abort": "Abort", "resume": "Resume", "wait": "Resume"}
+        recovery_defs = {
+            node.name: node for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name in ("Abort", "Resume")
+        }
+        self.assertEqual(set(recovery_defs), {"Abort", "Resume"})
+        allowed_nodes = {
+            attr: {id(n) for n in ast.walk(recovery_defs[owner])}
+            for attr, owner in scoped_attrs.items()
         }
         for node in ast.walk(tree):
             if isinstance(node, ast.Attribute):
                 self.assertNotIn(node.attr, banned_attrs, node.attr)
+                if node.attr in scoped_attrs:
+                    self.assertTrue(
+                        id(node) in allowed_nodes[node.attr],
+                        f".{node.attr} at line {node.lineno} is outside "
+                        f"{scoped_attrs[node.attr]}()")
                 if isinstance(node.value, ast.Name) and node.value.id == "httpx":
                     self.assertEqual(node.attr, "HTTPError", node.attr)
 
