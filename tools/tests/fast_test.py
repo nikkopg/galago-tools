@@ -379,12 +379,12 @@ class TestResultMapping(_MockedFastServerTestCase):
                 self.assertTrue(reply.return_reply)
                 self.assertEqual(MessageToDict(reply.meta_data)["kind"], kind)
 
-    def test_run_protocol_always_verify_layout_true_and_no_cancel(self) -> None:
+    def test_run_protocol_passes_no_verify_layout_and_no_cancel(self) -> None:
         self.service.run_protocol.return_value = Ran(
             outcome=RunOutcome(state="idle", done=True, percent=100))
         self.server.RunProtocol(fast_pb2.Command.RunProtocol(csv="x"))
         call = self.service.run_protocol.call_args
-        self.assertTrue(call.kwargs["verify_layout"])
+        self.assertNotIn("verify_layout", call.kwargs)
         self.assertIsNone(call.kwargs["options"].cancel)
 
     def test_run_protocol_timeout_resolution(self) -> None:

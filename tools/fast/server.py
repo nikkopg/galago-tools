@@ -2,7 +2,8 @@
 
 It maps the seven intent-level commands 1:1 onto FastService methods and
 holds no instrument policy of its own -- every decision (idle gate,
-validate -> vision -> run sequencing, tray confirmation, timeouts) lives in
+validate -> run sequencing (the instrument detects plates and the tip
+caddy in-run, Phase 5 D-29), tray confirmation, timeouts) lives in
 fast_mcp.service.FastService. This module never imports the MCP adapter
 subpackage (fast_mcp.mcp) -- it obtains its FastService only through
 fast_mcp.composition.open_service (D-04).
@@ -373,7 +374,7 @@ class FastServer(ToolServer):
             per_command = params.timeout_s if params.HasField("timeout_s") else None
             try:
                 result = service.run_protocol(
-                    params.csv, verify_layout=True,
+                    params.csv,
                     options=RunOptions(timeout_s=self._timeout(per_command),
                                        on_progress=self._log_progress))
             except (InstrumentHTTPError, httpx.HTTPError) as exc:
