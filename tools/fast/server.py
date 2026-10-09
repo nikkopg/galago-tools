@@ -1,10 +1,16 @@
 """The Galago adapter for the Formulatrix F.A.S.T. liquid handler.
 
-It maps the seven intent-level commands 1:1 onto FastService methods and
+It maps the nine intent-level commands 1:1 onto FastService methods and
 holds no instrument policy of its own -- every decision (idle gate,
 validate -> run sequencing (the instrument detects plates and the tip
-caddy in-run, Phase 5 D-29), tray confirmation, timeouts) lives in
-fast_mcp.service.FastService. This module never imports the MCP adapter
+caddy in-run, Phase 5 D-29), tray confirmation, timeouts, and which
+instrument states allow Abort and Resume) lives in
+fast_mcp.service.FastService.
+
+Abort and Resume are operator-issued recovery commands for a run the
+instrument has paused (dual-frontend section 11 #1, amended). The adapter
+only ever calls abort/resume from those two commands: a paused, timed-out
+or cancelled run is reported, never aborted on the adapter's own initiative. This module never imports the MCP adapter
 subpackage (fast_mcp.mcp) -- it obtains its FastService only through
 fast_mcp.composition.open_service (D-04).
 """
@@ -35,7 +41,7 @@ from fast_mcp.results import (
     RunResult,
     TimedOut,
 )
-from fast_mcp.run_control import RunOptions
+from fast_mcp.run_control import RunHandle, RunOptions
 from fast_mcp.service import FastService, TransferRequest
 from fast_mcp.transport import InstrumentHTTPError
 
@@ -57,7 +63,8 @@ _NOT_CONNECTED_MESSAGE = (
     "Configure it with simulated off")
 _BUSY_MESSAGE = "another motion command is in progress on this tool"
 
-MOTION_COMMANDS = frozenset({"Transfer", "RunProtocol", "ScanTips", "EjectTray"})
+MOTION_COMMANDS = frozenset(
+    {"Transfer", "RunProtocol", "ScanTips", "EjectTray", "Abort", "Resume"})
 
 COMMAND_TO_SERVICE_METHOD = {
     "Transfer": "run_transfer",
@@ -67,7 +74,15 @@ COMMAND_TO_SERVICE_METHOD = {
     "GetTipStatus": "tip_status",
     "ScanTips": "scan_tips",
     "EjectTray": "eject_tray",
+    "Abort": "abort",
+    "Resume": "resume",
 }
+
+# The physical decision each recovery command must carry explicitly. A
+# "yes"/"no" string, never a bool: galago-core fills an untouched boolean
+# form field with false, so only a string can fail closed when blank.
+_RECOVERY_DECISION_FIELD = {"Abort": "return_liquid", "Resume": "is_tip_broken"}
+_YES_NO = {"yes": True, "no": False}
 
 _RESPONSE_FOR_KIND = {
     "ran": SUCCESS,
@@ -95,6 +110,11 @@ _ROW_RE = re.compile(r"[A-Za-z]{1,2}")
 EST_READ_S = 1
 EST_SCAN_TIPS_S = 30
 EST_EJECT_TRAY_S = 15
+EST_ABORT_S = 15
+# Resume waits for the resumed run to finish, but how much of the run is
+# left is unknown from the command alone, so this is the same flat
+# placeholder as Abort.
+EST_RESUME_S = 15
 EST_TRANSFER_OVERHEAD_S = 60
 EST_TRANSFER_PER_CYCLE_S = 20
 EST_TIP_MAX_VOLUME_UL = 13.0
@@ -120,7 +140,7 @@ def _check_args(command: "message.Message") -> list[str]:
     DRIVER_ERROR in simulated mode (base_server._estimateDuration's error
     slot is structurally always None, see RESEARCH.md).
 
-    `command` is one of the seven generated oneof message types, which have
+    `command` is one of the nine generated oneof message types, which have
     no shared base beyond google.protobuf.message.Message -- cast to Any
     once here (not Message itself) so the per-field checks below can access
     each concrete message's own fields."""
@@ -176,7 +196,22 @@ def _check_args(command: "message.Message") -> list[str]:
             if not (math.isfinite(cmd.timeout_s) and cmd.timeout_s > 0):
                 problems.append("timeout_s must be a positive number of seconds")
         return problems
+    if name in _RECOVERY_DECISION_FIELD:
+        field_name = _RECOVERY_DECISION_FIELD[name]
+        if _decision(cmd, field_name) is None:
+            got = getattr(cmd, field_name) if cmd.HasField(field_name) else "unset"
+            return [f"{field_name} must be 'yes' or 'no' (got {got!r})"]
+        return []
     return []
+
+
+def _decision(cmd: Any, field_name: str) -> Optional[bool]:
+    """The operator's explicit yes/no for a recovery command, or None when
+    the field is unset, blank or anything other than yes/no. None is never
+    turned into a default."""
+    if not cmd.HasField(field_name):
+        return None
+    return _YES_NO.get(getattr(cmd, field_name).strip().lower())
 
 
 def _transfer_cycles(params: "Command.Transfer") -> int:
@@ -273,6 +308,22 @@ def _transport_error_reply(exc: Exception) -> ExecuteCommandReply:
     else:
         message = f"instrument unreachable: {type(exc).__name__}: " + _one_line(str(exc), 200)
     return _reply(ERROR_FROM_TOOL, message=message)
+
+
+def _recovery_reply(action: str, result: "dict | Refused") -> ExecuteCommandReply:
+    """Map FastService.abort/resume's `dict | Refused`. Refused means the
+    core sent nothing to the instrument (wrong state); the dict is the
+    instrument's reply, which only counts as success with errorCode 0. A
+    missing errorCode is treated as a failure."""
+    if isinstance(result, Refused):
+        return _reply(ERROR_FROM_TOOL, message=_message_for(result, None),
+                      meta=result.to_dict())
+    code = result.get("errorCode")
+    if code == 0:
+        return _reply(SUCCESS, meta=result)
+    return _reply(ERROR_FROM_TOOL,
+                  message=_one_line(f"instrument rejected {action}: errorCode {code}", 500),
+                  meta=result)
 
 
 class FastServer(ToolServer):
@@ -465,6 +516,66 @@ class FastServer(ToolServer):
         finally:
             self._motion_lock.release()
 
+    def Abort(self, params: "Command.Abort") -> ExecuteCommandReply:
+        """Operator-issued abort of a running or paused run. The core
+        refuses in any other state without contacting the instrument. Moves
+        the head, so it takes the motion lock. Returns once the instrument
+        has accepted the abort; it does not wait for the head to park."""
+        return_liquid = _decision(params, "return_liquid")
+        if return_liquid is None:
+            return _reply(INVALID_ARGUMENTS,
+                          message="return_liquid must be 'yes' or 'no'")
+        service = self.service
+        if service is None:
+            return _reply(NOT_READY, message=_NOT_CONNECTED_MESSAGE)
+        if not self._motion_lock.acquire(blocking=False):
+            return _reply(NOT_READY, message=_BUSY_MESSAGE)
+        try:
+            try:
+                result = service.abort(return_liquid=return_liquid)
+            except (InstrumentHTTPError, httpx.HTTPError) as exc:
+                return _transport_error_reply(exc)
+            return _recovery_reply("abort", result)
+        finally:
+            self._motion_lock.release()
+
+    def Resume(self, params: "Command.Resume") -> ExecuteCommandReply:
+        """Operator-issued resume of a paused run. The core refuses unless
+        the instrument is paused, without contacting it. On an accepted
+        resume this WAITS for the resumed run to reach a terminal state,
+        with the same timeout and progress logging as Transfer, so the
+        protocol step reports the run's real outcome (Ran, Paused again,
+        Aborted, TimedOut). Holds the motion lock for the whole wait.
+
+        Known limitation: the wait treats `paused` as terminal on any poll.
+        If the instrument still reports `paused` on the first status poll
+        after accepting the resume, this returns Paused although the run is
+        resuming. Not observed live yet; a supervised check should confirm
+        the state flips before the first poll (or the core's wait should
+        ignore a leading `paused`)."""
+        is_tip_broken = _decision(params, "is_tip_broken")
+        if is_tip_broken is None:
+            return _reply(INVALID_ARGUMENTS,
+                          message="is_tip_broken must be 'yes' or 'no'")
+        service = self.service
+        if service is None:
+            return _reply(NOT_READY, message=_NOT_CONNECTED_MESSAGE)
+        if not self._motion_lock.acquire(blocking=False):
+            return _reply(NOT_READY, message=_BUSY_MESSAGE)
+        try:
+            try:
+                accepted = service.resume(is_tip_broken=is_tip_broken)
+                if isinstance(accepted, Refused) or accepted.get("errorCode") != 0:
+                    return _recovery_reply("resume", accepted)
+                result = service.wait(
+                    RunHandle(plates=None, stale_done=False),
+                    on_progress=self._log_progress, timeout_s=self._timeout(None))
+            except (InstrumentHTTPError, httpx.HTTPError) as exc:
+                return _transport_error_reply(exc)
+            return _result_reply(result)
+        finally:
+            self._motion_lock.release()
+
     # -- D-16 estimate methods -------------------------------------------
     # Every Estimate<Cmd> method is called from two places: base_server's
     # simulated-mode _dispatchCommand (after _check_args has already
@@ -502,6 +613,12 @@ class FastServer(ToolServer):
 
     def EstimateEjectTray(self, params: "Command.EjectTray") -> int:
         return EST_EJECT_TRAY_S
+
+    def EstimateAbort(self, params: "Command.Abort") -> int:
+        return EST_ABORT_S
+
+    def EstimateResume(self, params: "Command.Resume") -> int:
+        return EST_RESUME_S
 
 
 if __name__ == "__main__":
