@@ -284,7 +284,8 @@ def _message_for(result: RunResult, expected_tray_id: Optional[int]) -> str:
     elif isinstance(result, Refused):
         text = f"instrument not ready: {result.reason} (state {result.state})"
     elif isinstance(result, Paused):
-        text = f"run paused at {result.percent}%: {_outcome_text(result.outcome)}"
+        text = (f"run paused at {result.percent}%: {_outcome_text(result.outcome)}; "
+                "fix the deck, then send Resume (is_tip_broken) or Abort (return_liquid)")
     elif isinstance(result, Aborted):
         text = f"run aborted at {result.percent}%: {_outcome_text(result.outcome)}"
     elif isinstance(result, TimedOut):
