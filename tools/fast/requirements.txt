@@ -1,2 +1,2 @@
 # F.A.S.T. core only (no [mcp] extra), pinned to a fast-mcp commit SHA; bump deliberately (Phase 5 D-03)
-fast-mcp @ git+https://gitlab.formulatrix.com/nikkopg/fast-mcp.git@664f3c44ea209c6915cb8d2e8fb3ed60feab1fd6
+fast-mcp @ git+https://gitlab.formulatrix.com/nikkopg/fast-mcp.git@76f8c3fee41b0a2df3519aa74b022152df673824
