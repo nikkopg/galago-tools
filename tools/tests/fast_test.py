@@ -501,6 +501,40 @@ class TestExpectedTrayId(_MockedFastServerTestCase):
         self.assertEqual(
             self.service.run_transfer.call_args.kwargs["expected_tray_id"], 91)
 
+    def test_per_command_zero_falls_back_to_config(self) -> None:
+        """D-26, GAL-05 F2: galago-core's blank form field arrives as a
+        per-command expected_tray_id of 0, which must fall back to Config
+        (the live runbook B5 failure, attempts 1-2)."""
+        self.server.config = fast_pb2.Config(host="h", expected_tray_id=90)
+        self.service.run_transfer.return_value = Ran(
+            outcome=RunOutcome(state="idle", done=True, percent=100))
+        fields_with_zero = dict(_ALL_TRANSFER_FIELDS, expected_tray_id=0)
+        self.server.Transfer(fast_pb2.Command.Transfer(**fields_with_zero))
+        self.assertEqual(
+            self.service.run_transfer.call_args.kwargs["expected_tray_id"], 90)
+
+    def test_per_command_zero_and_config_zero_gives_none(self) -> None:
+        """D-26: both unset (0 means unset on both sides) passes None."""
+        self.server.config = fast_pb2.Config(host="h", expected_tray_id=0)
+        self.service.run_transfer.return_value = Ran(
+            outcome=RunOutcome(state="idle", done=True, percent=100))
+        fields_with_zero = dict(_ALL_TRANSFER_FIELDS, expected_tray_id=0)
+        self.server.Transfer(fast_pb2.Command.Transfer(**fields_with_zero))
+        self.assertIsNone(
+            self.service.run_transfer.call_args.kwargs["expected_tray_id"])
+
+    def test_blank_per_command_with_no_config_is_error_from_tool(self) -> None:
+        """D-26: both unset gives None passed to run_transfer, which still
+        fails closed -- an installed tray with no expected tray configured
+        comes back as ERROR_FROM_TOOL, not a silent auto-confirm."""
+        self.server.config = fast_pb2.Config(host="h", expected_tray_id=0)
+        self.service.run_transfer.return_value = NeedsConfirmation(
+            tray_id=90, caddy_deck=None)
+        fields_with_zero = dict(_ALL_TRANSFER_FIELDS, expected_tray_id=0)
+        reply = self.server.Transfer(fast_pb2.Command.Transfer(**fields_with_zero))
+        self.assertEqual(reply.response, ERROR_FROM_TOOL)
+        self.assertIn("no expected tray configured", reply.error_message)
+
 
 class TestMotionSerialization(_MockedFastServerTestCase):
     def test_second_motion_command_refused_while_first_in_flight(self) -> None:

@@ -332,7 +332,12 @@ class FastServer(ToolServer):
         return None
 
     def _expected_tray_id(self, params: "Command.Transfer") -> Optional[int]:
-        if params.HasField("expected_tray_id"):
+        """D-26, GAL-05 F2: 0 means unset for both the per-command field and
+        Config, because galago-core's command form sends 0 for a blank field
+        (runbook B5 -- the live attempts 1-2 failure). A non-zero
+        per-command value overrides Config (D-14). Negative values pass
+        through unchanged and fail the tray-id gate closed."""
+        if params.HasField("expected_tray_id") and params.expected_tray_id != 0:
             return params.expected_tray_id
         return self.config.expected_tray_id or None
 
