@@ -11,6 +11,8 @@ message Command {
     GetTipStatus get_tip_status = 5;
     ScanTips scan_tips = 6;
     EjectTray eject_tray = 7;
+    Abort abort = 8;
+    Resume resume = 9;
   }
 
   message Transfer {
@@ -49,6 +51,18 @@ message Command {
   }
 
   message EjectTray {
+  }
+
+  // Operator recovery from an instrument pause. The physical decision is a
+  // required "yes"/"no" string, not a bool: galago-core's command form turns
+  // an untouched boolean into false, so a bool could not tell "no" from
+  // "never chosen". Unset or any other value is rejected as INVALID_ARGUMENTS.
+  message Abort {
+    optional string return_liquid = 1;
+  }
+
+  message Resume {
+    optional string is_tip_broken = 1;
   }
 }
 
