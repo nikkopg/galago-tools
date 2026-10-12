@@ -383,6 +383,25 @@ class _PauseInfoLike(t.Protocol):
     def to_dict(self) -> dict[str, Any]: ...
 
 
+class _DictPauseInfo:
+    """Wraps a plain dict so FastServer.simulate_pause (D-20) can feed the
+    same _record_pause that Phase 2 wires as RunOptions(on_pause=...):
+    _PauseInfoLike only requires to_dict(). Stores and returns a copy, so
+    the caller's dict and the recorded one never alias."""
+
+    def __init__(self, data: dict[str, Any]) -> None:
+        self._data = dict(data)
+
+    def to_dict(self) -> dict[str, Any]:
+        return dict(self._data)
+
+
+# Simulated-only (D-20): a SUCCESS reply from one of these clears a pause
+# recorded by the simulate_pause test hook, mirroring a real Resume/Abort
+# accepting the recovery. A simulated Pause is deliberately absent.
+_PAUSE_CLEARING_COMMANDS = frozenset({"Resume", "Abort"})
+
+
 class FastServer(ToolServer):
     toolType = "fast"
     config: Config
@@ -408,15 +427,23 @@ class FastServer(ToolServer):
         arguments must be rejected here or they either sleep through
         unchecked (simulated) or surface as the wrong error code entirely.
 
-        A simulated LONG_RUNNING_COMMANDS run is marked in flight for the
-        whole of base_server's simulated sleep (D-18, D-19), once
-        _check_args has already passed -- base_server does the sleeping,
-        this override only brackets it with _run_in_flight() so run_state
-        reads running for its duration and idle once it returns.
-        _run_in_flight is a counter, so two overlapping simulated runs stay
-        running until the last one ends. Every other simulated command, and
-        every real-mode command (Transfer/RunProtocol enter _run_in_flight
-        themselves), is unaffected. Never edits tools/base_server.py."""
+        Two simulated-only behaviors layer on top of the plain dispatch
+        (D-18, D-19, D-20), both only once _check_args has already passed:
+        - A LONG_RUNNING_COMMANDS run is marked in flight for the whole of
+          base_server's simulated sleep -- base_server does the sleeping,
+          this override only brackets it with _run_in_flight() so run_state
+          reads running for its duration and idle once it returns.
+          _run_in_flight is a counter, so two overlapping simulated runs
+          stay running until the last one ends.
+        - A successful simulated Resume or Abort clears a pause recorded by
+          the simulate_pause test hook (D-20); an INVALID_ARGUMENTS reply
+          never reaches this because _check_args already returned above, and
+          a simulated Pause is never in _PAUSE_CLEARING_COMMANDS so it never
+          clears.
+
+        Real mode is unchanged: Transfer and RunProtocol enter
+        _run_in_flight themselves, and a real pause is never cleared from
+        here. Never edits tools/base_server.py."""
         problems = _check_args(command)
         if problems:
             return _reply(
@@ -424,10 +451,15 @@ class FastServer(ToolServer):
                 message=_one_line("invalid arguments: " + "; ".join(problems), 500),
                 meta=NeedsInput(missing=problems).to_dict(),
             )
-        if self.simulated and type(command).__name__ in LONG_RUNNING_COMMANDS:
+        name = type(command).__name__
+        if self.simulated and name in LONG_RUNNING_COMMANDS:
             with self._run_in_flight():
                 return super()._dispatchCommand(command)
-        return super()._dispatchCommand(command)
+        reply = super()._dispatchCommand(command)
+        if (self.simulated and name in _PAUSE_CLEARING_COMMANDS
+                and reply.response == SUCCESS):
+            self._clear_pause()
+        return reply
 
     def ExecuteCommand(
         self, request: ToolCommand, context: grpc.ServicerContext
@@ -519,6 +551,30 @@ class FastServer(ToolServer):
             percent = _run_percent(pause.get("percent"))
             if percent is not None:
                 self._run_record["percent"] = percent
+
+    def _clear_pause(self) -> None:
+        """Clears any recorded pause (D-20): used by _dispatchCommand when a
+        simulated Resume/Abort succeeds, and by simulate_pause(None).
+        Records only -- no service call, no control method (D-16)."""
+        with self._run_state_lock:
+            self._run_record["pause"] = None
+
+    def simulate_pause(self, pause: Optional[dict[str, Any]]) -> None:
+        """In-process test hook (D-20, ADP-10), simulated mode only. Lets
+        galago-core exercise its pause prompt and controls against this tool
+        server running under a dev script or test, with no instrument
+        contact and no new gRPC command -- fast.proto's 1:1 command surface
+        is unchanged. `pause=None` clears a hooked pause, as a successful
+        Resume/Abort would; a dict is wrapped as _DictPauseInfo and fed to
+        the same _record_pause that Phase 2 wires as
+        RunOptions(on_pause=...). An out-of-process trigger (a gRPC command
+        or an env var) is a deferred idea, not built here."""
+        if not self.simulated:
+            raise RuntimeError("simulate_pause is only available in simulated mode")
+        if pause is None:
+            self._clear_pause()
+        else:
+            self._record_pause(_DictPauseInfo(pause))
 
     def _build_run_state(self) -> Optional[dict[str, Any]]:
         """The health GetStatus's run_state source (D-12, D-14, D-19, D-20).

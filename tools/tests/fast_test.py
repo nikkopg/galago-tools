@@ -359,7 +359,12 @@ class TestSimulatedTransferOverGrpc(unittest.TestCase):
         threads = [threading.Thread(target=_run) for _ in range(2)]
         for th in threads:
             th.start()
-        self.addCleanup(lambda: [t.join(10) for t in threads])
+
+        def _join_all() -> None:
+            for t in threads:
+                t.join(10)
+
+        self.addCleanup(_join_all)
         self.assertTrue(both_entered.wait(timeout=5))
 
         self.assertEqual(
@@ -416,6 +421,104 @@ class TestSimulatedTransferOverGrpc(unittest.TestCase):
         thread.join(timeout=10)
         self.assertFalse(thread.is_alive())
         self.assertEqual(result["reply"].response, SUCCESS)
+
+    def test_hooked_pause_reads_paused_with_its_detail(self) -> None:
+        """D-20: the simulate_pause hook drives run_state to paused with the
+        hooked dict's detail; simulate_pause(None) clears it back to idle.
+        The health status stays SIMULATED throughout."""
+        self.fs.simulate_pause(dict(_WRONG_PLATE_PAUSE))
+        run_state = self._run_state()
+        self.assertEqual(run_state["state"], "paused")
+        self.assertEqual(run_state["percent"], 0)
+        self.assertEqual(
+            set(run_state["pause"]),
+            {"errorCode", "errorName", "percent", "eventPayload", "since"})
+        self.assertEqual(
+            self.stub.GetStatus(empty_pb2.Empty()).status, tool_base_pb2.SIMULATED)
+
+        self.fs.simulate_pause(None)
+        self.assertEqual(
+            self._run_state(), {"state": "idle", "percent": None, "pause": None})
+
+    def test_simulated_resume_or_abort_clears_a_hooked_pause_and_invalid_args_do_not(
+            self) -> None:
+        """D-20: a simulated Resume/Abort that returns SUCCESS clears a
+        hooked pause; a Resume rejected as INVALID_ARGUMENTS, and a
+        simulated Pause, leave it in place."""
+        self.fs.simulate_pause(dict(_WRONG_PLATE_PAUSE))
+
+        reply = self.stub.ExecuteCommand(
+            tool_base_pb2.Command(fast=fast_pb2.Command(
+                resume=fast_pb2.Command.Resume(is_tip_broken=""))))
+        self.assertEqual(reply.response, INVALID_ARGUMENTS)
+        self.assertEqual(self._run_state()["state"], "paused")
+
+        reply = self.stub.ExecuteCommand(
+            tool_base_pb2.Command(fast=fast_pb2.Command(pause=fast_pb2.Command.Pause())))
+        self.assertEqual(reply.response, SUCCESS, reply.error_message)
+        self.assertEqual(self._run_state()["state"], "paused")
+
+        reply = self.stub.ExecuteCommand(
+            tool_base_pb2.Command(fast=fast_pb2.Command(
+                resume=fast_pb2.Command.Resume(is_tip_broken="no"))))
+        self.assertEqual(reply.response, SUCCESS, reply.error_message)
+        self.assertEqual(
+            self._run_state(), {"state": "idle", "percent": None, "pause": None})
+
+        self.fs.simulate_pause(dict(_WRONG_PLATE_PAUSE))
+        reply = self.stub.ExecuteCommand(
+            tool_base_pb2.Command(fast=fast_pb2.Command(
+                abort=fast_pb2.Command.Abort(return_liquid="yes"))))
+        self.assertEqual(reply.response, SUCCESS, reply.error_message)
+        self.assertEqual(
+            self._run_state(), {"state": "idle", "percent": None, "pause": None})
+
+    def test_pause_prompt_round_trip_without_hardware(self) -> None:
+        """D-20, ADP-10: galago-core's prompt round trip without hardware --
+        a simulated Transfer sleeping reads running, the hook makes it
+        paused, a simulated Resume makes it running again, and the end of
+        the sleep makes it idle with the Transfer SUCCESS."""
+        entered = threading.Event()
+        release = threading.Event()
+
+        def _blocking_sleep(duration: float) -> None:
+            if duration == 80.0:
+                entered.set()
+                release.wait(timeout=10)
+
+        self.fake_sleep.side_effect = _blocking_sleep
+
+        result: dict[str, Any] = {}
+
+        def _run_transfer() -> None:
+            result["reply"] = self.stub.ExecuteCommand(self._valid_transfer_command())
+
+        thread = threading.Thread(target=_run_transfer)
+        thread.start()
+        self.addCleanup(thread.join, 10)
+        self.addCleanup(release.set)
+        self.assertTrue(entered.wait(timeout=5))
+
+        self.assertEqual(
+            self._run_state(), {"state": "running", "percent": None, "pause": None})
+
+        self.fs.simulate_pause(dict(_WRONG_PLATE_PAUSE))
+        self.assertEqual(self._run_state()["state"], "paused")
+
+        reply = self.stub.ExecuteCommand(
+            tool_base_pb2.Command(fast=fast_pb2.Command(
+                resume=fast_pb2.Command.Resume(is_tip_broken="no"))))
+        self.assertEqual(reply.response, SUCCESS, reply.error_message)
+        self.assertEqual(
+            self._run_state(), {"state": "running", "percent": None, "pause": None})
+
+        release.set()
+        thread.join(timeout=10)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(result["reply"].response, SUCCESS)
+        self.assertEqual(
+            self._run_state(), {"state": "idle", "percent": None, "pause": None})
+        self.mock_open_service.assert_not_called()
 
     def test_simulated_transfer_sleeps_estimate_without_service_or_lock(self) -> None:
         exec_reply = self.stub.ExecuteCommand(self._valid_transfer_command())
@@ -1494,6 +1597,28 @@ class TestRunState(unittest.TestCase):
         spy.acquire.assert_not_called()
 
 
+class TestSimulatePauseHook(unittest.TestCase):
+    """D-20, T-01-21: the in-process simulate_pause hook raises outside
+    simulated mode before recording anything, and is not a gRPC command."""
+
+    def test_hook_raises_in_real_mode_and_records_nothing(self) -> None:
+        server = FastServer()
+        service = MagicMock(spec=FastService)
+        server.service = service
+        server.config = fast_pb2.Config(host="h")
+        server.status = READY
+        with self.assertRaises(RuntimeError):
+            server.simulate_pause(dict(_WRONG_PLATE_PAUSE))
+        self.assertIsNone(server._run_record["pause"])
+        self.assertEqual(service.method_calls, [])
+
+    def test_hook_is_not_a_grpc_command(self) -> None:
+        oneof_fields = fast_pb2.Command.DESCRIPTOR.oneofs_by_name["command"].fields
+        field_names = {f.name for f in oneof_fields}
+        self.assertNotIn("simulate_pause", field_names)
+        self.assertNotIn("SimulatePause", COMMAND_TO_SERVICE_METHOD)
+
+
 class TestTransportErrors(_MockedFastServerTestCase):
     def test_instrument_http_error_is_error_from_tool_single_line_bounded(self) -> None:
         body = "boom\n at Vendor.Stack()\n" + "x" * 400
@@ -2071,7 +2196,8 @@ _SCOPED_ATTRS: dict[str, frozenset[str]] = {
 # D-16: functions that may only record observed state -- no access to
 # .service, and no call naming a control or motion method. Plan 01-05 adds
 # the simulated hook's two functions here.
-_RECORD_ONLY_FUNCTIONS = frozenset({"_record_pause", "_log_progress"})
+_RECORD_ONLY_FUNCTIONS = frozenset(
+    {"_record_pause", "_log_progress", "simulate_pause", "_clear_pause"})
 # D-14: the only functions allowed to call service.status().
 _STATUS_READERS = frozenset({"_get_status", "_build_run_state"})
 # D-08: functions on the control path, which must never compare against an
@@ -2365,6 +2491,8 @@ class TestAdapterInvariant(unittest.TestCase):
             ("_build_run_state", "self.service.abort(return_liquid=False)", "_build_run_state"),
             ("Abort", "service.status()", ".status"),
             ("Resume", "if state == \"paused\":\n    pass", "Resume"),
+            ("simulate_pause", "self.service.pause(hard=False)", "simulate_pause"),
+            ("_clear_pause", "self._dispatchCommand(None)", "_clear_pause"),
         ]
         for function, statement, fragment in cases:
             with self.subTest(function=function, statement=statement):
