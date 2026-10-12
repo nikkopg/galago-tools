@@ -128,9 +128,14 @@ EST_ABORT_S = 15
 # for the head, so it takes the read-sized flat value, not EST_ABORT_S's --
 # this also keeps a simulated Pause quick for galago-core's UI tests.
 EST_PAUSE_S = 1
-# Resume waits for the resumed run to finish, but how much of the run is
-# left is unknown from the command alone, so this is the same flat
-# placeholder as Abort.
+# D-16 ASSUMED PLACEHOLDER, now stale for the common case (RESEARCH.md
+# Pitfall 8): Resume only waits on the crash-recovery path (no run in
+# flight) -- mid-run it returns as soon as the instrument accepts. A single
+# flat value therefore over-states the common in-flight case and
+# under-states the rarer crash-recovery wait, which can run as long as the
+# remainder of the run. Kept flat anyway, like the other D-16 placeholders
+# (CONTEXT.md "Claude's Discretion"); splitting it into an in-flight vs.
+# crash-recovery pair is a deferred idea, not built here.
 EST_RESUME_S = 15
 EST_TRANSFER_OVERHEAD_S = 60
 EST_TRANSFER_PER_CYCLE_S = 20

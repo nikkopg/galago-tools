@@ -733,6 +733,132 @@ class TestMotionSerialization(_MockedFastServerTestCase):
         self.assertEqual(reply.response, SUCCESS)
 
 
+class TestControlCommandsBypassMotionLock(unittest.TestCase):
+    """D-06/D-07/ADP-04: Resume's two paths and the lock-free guarantee for
+    Pause and Abort, driven directly against FastServer (TestControlCommandsOverGrpc
+    covers the same guarantees through the gRPC override). Does not inherit
+    _MockedFastServerTestCase: it calls control methods on purpose and
+    manipulates _motion_lock directly."""
+
+    def setUp(self) -> None:
+        self.server = FastServer()
+        self.service = MagicMock(spec=FastService)
+        self.server.service = self.service
+        self.server.config = fast_pb2.Config(host="h")
+        self.server.status = READY
+
+    def test_pause_and_abort_never_touch_the_motion_lock(self) -> None:
+        spy = MagicMock(wraps=threading.Lock())
+        self.server._motion_lock = spy
+        self.service.pause.return_value = {"errorCode": 0}
+        self.service.abort.return_value = {"errorCode": 0}
+
+        reply = self.server.Pause(fast_pb2.Command.Pause())
+        self.assertEqual(reply.response, SUCCESS, reply.error_message)
+        reply = self.server.Abort(fast_pb2.Command.Abort(return_liquid="no"))
+        self.assertEqual(reply.response, SUCCESS, reply.error_message)
+
+        spy.acquire.assert_not_called()
+        spy.release.assert_not_called()
+
+    def test_pause_and_abort_succeed_while_another_command_holds_the_lock(self) -> None:
+        self.server._motion_lock.acquire()
+        self.addCleanup(self.server._motion_lock.release)
+        self.service.pause.return_value = {"errorCode": 0}
+        self.service.abort.return_value = {"errorCode": 0}
+
+        reply = self.server.Pause(fast_pb2.Command.Pause())
+        self.assertEqual(reply.response, SUCCESS, reply.error_message)
+        reply = self.server.Abort(fast_pb2.Command.Abort(return_liquid="no"))
+        self.assertEqual(reply.response, SUCCESS, reply.error_message)
+
+        self.service.pause.assert_called_once_with(hard=False)
+        self.service.abort.assert_called_once_with(return_liquid=False)
+
+    def test_resume_with_a_run_in_flight_returns_on_acceptance_without_waiting(self) -> None:
+        self.server._motion_lock.acquire()
+        self.addCleanup(self.server._motion_lock.release)
+        self.service.resume.return_value = {"errorCode": 0}
+
+        reply = self.server.Resume(fast_pb2.Command.Resume(is_tip_broken="yes"))
+
+        self.assertEqual(reply.response, SUCCESS, reply.error_message)
+        self.service.resume.assert_called_once_with(is_tip_broken=True)
+        self.service.wait.assert_not_called()
+        self.assertTrue(self.server._motion_lock.locked())
+
+    def test_resume_in_flight_failures_never_wait_or_release_the_owners_lock(self) -> None:
+        self.server._motion_lock.acquire()
+        self.addCleanup(self.server._motion_lock.release)
+
+        cases: list[tuple[str, Any, str]] = [
+            ("refused", Refused(reason="no paused protocol to resume", state="running"),
+             "instrument not ready: no paused protocol to resume (state running)"),
+            ("rejected", {"errorCode": -2}, "instrument rejected resume: errorCode -2"),
+        ]
+        for name, outcome, fragment in cases:
+            with self.subTest(case=name):
+                self.service.reset_mock()
+                self.service.resume.return_value = outcome
+                reply = self.server.Resume(fast_pb2.Command.Resume(is_tip_broken="no"))
+                self.assertEqual(reply.response, ERROR_FROM_TOOL)
+                if name == "refused":
+                    self.assertEqual(reply.error_message, fragment)
+                else:
+                    self.assertIn(fragment, reply.error_message)
+                self.service.wait.assert_not_called()
+                self.assertTrue(self.server._motion_lock.locked())
+
+        with self.subTest(case="unreachable"):
+            self.service.reset_mock()
+            self.service.resume.side_effect = httpx.ConnectError("refused")
+            reply = self.server.Resume(fast_pb2.Command.Resume(is_tip_broken="no"))
+            self.assertEqual(reply.response, ERROR_FROM_TOOL)
+            self.assertEqual(
+                reply.error_message, "instrument unreachable: ConnectError: refused")
+            self.service.wait.assert_not_called()
+            self.assertTrue(self.server._motion_lock.locked())
+
+    def test_crash_recovery_resume_waits_and_holds_the_lock(self) -> None:
+        self.service.resume.return_value = {"errorCode": 0}
+        entered = threading.Event()
+        release = threading.Event()
+
+        def _blocking_wait(*args: Any, **kwargs: Any) -> Any:
+            entered.set()
+            release.wait(timeout=10)
+            return Ran(outcome=RunOutcome(state="idle", done=True, percent=100))
+
+        self.service.wait.side_effect = _blocking_wait
+
+        result: dict[str, Any] = {}
+
+        def _run_resume() -> None:
+            result["reply"] = self.server.Resume(fast_pb2.Command.Resume(is_tip_broken="no"))
+
+        thread = threading.Thread(target=_run_resume)
+        thread.start()
+        # Cleanups run LIFO: release before join, so a failing assertion
+        # above never leaves the worker thread blocked forever.
+        self.addCleanup(thread.join, 10)
+        self.addCleanup(release.set)
+        self.assertTrue(entered.wait(timeout=5))
+
+        direct = self.server.Transfer(fast_pb2.Command.Transfer(**_ALL_TRANSFER_FIELDS))
+        self.assertEqual(direct.response, NOT_READY)
+        self.assertIn("another motion command is in progress", direct.error_message)
+        self.service.run_transfer.assert_not_called()
+
+        release.set()
+        thread.join(timeout=10)
+        self.assertFalse(thread.is_alive())
+
+        reply = result["reply"]
+        self.assertEqual(reply.response, SUCCESS, reply.error_message)
+        self.assertEqual(MessageToDict(reply.meta_data)["kind"], "ran")
+        self.assertFalse(self.server._motion_lock.locked())
+
+
 class TestTransportErrors(_MockedFastServerTestCase):
     def test_instrument_http_error_is_error_from_tool_single_line_bounded(self) -> None:
         body = "boom\n at Vendor.Stack()\n" + "x" * 400
@@ -1239,6 +1365,40 @@ class TestRecoveryCommands(unittest.TestCase):
                          ["return_liquid must be 'yes' or 'no' (got 'unset')"])
         self.assertEqual(_check_args(fast_pb2.Command.Resume(is_tip_broken="")),
                          ["is_tip_broken must be 'yes' or 'no' (got '')"])
+
+    def test_pause_while_running_is_a_soft_pause_and_success(self) -> None:
+        self._statuses({"currentState": "running"})
+        self.transport.pause.return_value = {"errorCode": 0}
+        reply = self.server.Pause(fast_pb2.Command.Pause())
+        self.assertEqual(reply.response, SUCCESS, reply.error_message)
+        self.transport.pause.assert_called_once_with(hard=False)
+        self.transport.abort.assert_not_called()
+        self.transport.resume.assert_not_called()
+
+    def test_pause_while_not_running_is_refused_without_a_pause_call(self) -> None:
+        for state in ("idle", "paused"):
+            with self.subTest(state=state):
+                self.transport.reset_mock()
+                self._statuses({"currentState": state})
+                reply = self.server.Pause(fast_pb2.Command.Pause())
+                self.assertEqual(reply.response, ERROR_FROM_TOOL)
+                self.assertEqual(
+                    reply.error_message,
+                    f"instrument not ready: no running protocol to pause (state {state})")
+                self.assertEqual(MessageToDict(reply.meta_data)["kind"], "refused")
+                self.transport.pause.assert_not_called()
+
+    def test_pause_nonzero_or_missing_error_code_is_error_from_tool(self) -> None:
+        self._statuses({"currentState": "running"})
+        self.transport.pause.return_value = {"errorCode": -1}
+        reply = self.server.Pause(fast_pb2.Command.Pause())
+        self.assertEqual(reply.response, ERROR_FROM_TOOL)
+        self.assertIn("instrument rejected pause: errorCode -1", reply.error_message)
+
+        self._statuses({"currentState": "running"})
+        self.transport.pause.return_value = {}
+        reply = self.server.Pause(fast_pb2.Command.Pause())
+        self.assertEqual(reply.response, ERROR_FROM_TOOL)
 
     def test_simulated_mode_checks_decisions_and_sleeps_the_estimate(self) -> None:
         fake_sleep = MagicMock()
