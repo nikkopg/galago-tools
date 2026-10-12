@@ -129,4 +129,8 @@ message StatusReply {
   int32 uptime = 1;
   ToolStatus status = 2;
   optional string error_message = 3;
+  // Live run state of a tool that supports run control (the F.A.S.T.: state,
+  // percent, pause). Every other tool leaves it unset. Reading it never
+  // commands the instrument.
+  optional google.protobuf.Struct run_state = 4;
 }

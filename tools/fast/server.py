@@ -21,8 +21,9 @@ import logging
 import math
 import re
 import threading
+from contextlib import contextmanager
 from dataclasses import fields
-from typing import Any, Optional, cast
+from typing import Any, Iterator, Optional, cast
 
 import grpc
 import httpx
@@ -77,6 +78,12 @@ MOTION_LOCK_COMMANDS = frozenset({"Transfer", "RunProtocol", "ScanTips", "EjectT
 # that FastServer.ExecuteCommand routes past base_server's readiness gate and
 # status bracket (D-01, D-02).
 CONTROL_COMMANDS = frozenset({"pause", "resume", "abort"})
+
+# The commands that own an instrument run, so their run is "in flight" for
+# run_state (D-12, D-19; design section 5.2 names exactly these two). Named
+# separately from CONTROL_COMMANDS (D-06): ScanTips and EjectTray also take
+# MOTION_LOCK_COMMANDS but read as idle (a fresh status()) while they run.
+LONG_RUNNING_COMMANDS = frozenset({"Transfer", "RunProtocol"})
 
 COMMAND_TO_SERVICE_METHOD = {
     "Transfer": "run_transfer",
@@ -142,6 +149,20 @@ EST_TRANSFER_PER_CYCLE_S = 20
 EST_TIP_MAX_VOLUME_UL = 13.0
 EST_RUN_PROTOCOL_OVERHEAD_S = 60
 EST_RUN_PROTOCOL_PER_TASK_S = 15
+
+
+def _run_percent(value: object) -> Optional[float]:
+    """run_state's percent (D-11, ADP-05 precision): the adapter never
+    rounds, clamps or converts. An int that is not a bool, or a finite
+    float, passes through unchanged; a bool, a string, NaN/infinity, or a
+    missing value becomes None."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and math.isfinite(value):
+        return value
+    return None
 
 
 def _one_line(text: str, limit: int) -> str:
@@ -358,6 +379,12 @@ class FastServer(ToolServer):
         self._owned: Optional[OwnedService] = None
         self.service: Optional[FastService] = None
         self._motion_lock = threading.Lock()
+        # Dedicated to run_state (D-12): never the same lock as _motion_lock,
+        # so reading run_state never contends with a motion command.
+        self._run_state_lock = threading.Lock()
+        self._active_runs = 0
+        self._run_record: dict[str, Any] = {
+            "state": "running", "percent": None, "pause": None}
 
     def _dispatchCommand(self, command: "message.Message") -> ExecuteCommandReply:
         """Override of ToolServer._dispatchCommand (RESEARCH Pattern 1, D-15).
@@ -427,8 +454,66 @@ class FastServer(ToolServer):
         self._owned = open_service(host, port, owner="galago")
         self.service = self._owned.service
 
+    @contextmanager
+    def _run_in_flight(self) -> Iterator[None]:
+        """Marks a LONG_RUNNING_COMMANDS run as in flight for run_state
+        (D-12). Entry resets the record to running/no-percent/no-pause under
+        _run_state_lock (never _motion_lock); exit decrements the nesting
+        counter and, only once no run remains in flight, clears any recorded
+        pause. Records only -- calls nothing on the service (D-16)."""
+        with self._run_state_lock:
+            self._active_runs += 1
+            self._run_record = {"state": "running", "percent": None, "pause": None}
+        try:
+            yield
+        finally:
+            with self._run_state_lock:
+                self._active_runs -= 1
+                if self._active_runs == 0:
+                    self._run_record["pause"] = None
+
     def _log_progress(self, percent: int, state: str) -> None:
         logging.info("fast run progress %s%% (%s)", percent, state)
+        with self._run_state_lock:
+            self._run_record["percent"] = percent
+            self._run_record["state"] = state
+            if state == "running":
+                self._run_record["pause"] = None
+
+    def _build_run_state(self) -> Optional[dict[str, Any]]:
+        """The health GetStatus's run_state source (D-12, D-14). While a
+        LONG_RUNNING_COMMANDS run is in flight, returns a copy of the
+        adapter's own record taken under _run_state_lock -- never
+        _motion_lock -- and calls nothing on the service. Otherwise maps a
+        fresh service.status() to state/percent/pause (percentProgress ->
+        percent, RESEARCH Pitfall 2); unset (None) when no service is
+        configured; any failure on this path -- a service.status()
+        exception, a non-dict status, or a non-string state -- yields
+        {"state": "unknown"} so a heartbeat never fails because of run state
+        (T-01-13). The only service call on this path is status()."""
+        with self._run_state_lock:
+            if self._active_runs > 0:
+                pause = self._run_record["pause"]
+                return {
+                    "state": self._run_record["state"],
+                    "percent": self._run_record["percent"],
+                    "pause": dict(pause) if pause is not None else None,
+                }
+        service = self.service
+        if service is None:
+            return None
+        try:
+            status = service.status()
+        except Exception:
+            logging.warning("fast run_state: service.status() failed", exc_info=True)
+            return {"state": "unknown"}
+        if not isinstance(status, dict) or not isinstance(status.get("state"), str):
+            return {"state": "unknown"}
+        return {
+            "state": status["state"],
+            "percent": _run_percent(status.get("percentProgress")),
+            "pause": None,
+        }
 
     def _timeout(self, per_command: Optional[float]) -> Optional[float]:
         if per_command is not None:
@@ -459,12 +544,13 @@ class FastServer(ToolServer):
                 for f in fields(TransferRequest)
             })
             expected = self._expected_tray_id(params)
-            try:
-                result = service.run_transfer(
-                    request, expected_tray_id=expected,
-                    options=RunOptions(timeout_s=self._timeout(None), on_progress=self._log_progress))
-            except (InstrumentHTTPError, httpx.HTTPError) as exc:
-                return _transport_error_reply(exc)
+            with self._run_in_flight():
+                try:
+                    result = service.run_transfer(
+                        request, expected_tray_id=expected,
+                        options=RunOptions(timeout_s=self._timeout(None), on_progress=self._log_progress))
+                except (InstrumentHTTPError, httpx.HTTPError) as exc:
+                    return _transport_error_reply(exc)
             return _result_reply(result, expected)
         finally:
             self._motion_lock.release()
@@ -477,13 +563,14 @@ class FastServer(ToolServer):
             return _reply(NOT_READY, message=_BUSY_MESSAGE)
         try:
             per_command = params.timeout_s if params.HasField("timeout_s") else None
-            try:
-                result = service.run_protocol(
-                    params.csv,
-                    options=RunOptions(timeout_s=self._timeout(per_command),
-                                       on_progress=self._log_progress))
-            except (InstrumentHTTPError, httpx.HTTPError) as exc:
-                return _transport_error_reply(exc)
+            with self._run_in_flight():
+                try:
+                    result = service.run_protocol(
+                        params.csv,
+                        options=RunOptions(timeout_s=self._timeout(per_command),
+                                           on_progress=self._log_progress))
+                except (InstrumentHTTPError, httpx.HTTPError) as exc:
+                    return _transport_error_reply(exc)
             return _result_reply(result)
         finally:
             self._motion_lock.release()
@@ -514,9 +601,22 @@ class FastServer(ToolServer):
         Both bind to the same attribute. The gRPC-generated stub always calls
         the health RPC with exactly two positional args (request, context);
         `_dispatchCommand` always calls the intent command with exactly one
-        (the command). Arity is therefore a safe, stable discriminator."""
+        (the command). Arity is therefore a safe, stable discriminator.
+
+        The 2-arg health-RPC branch also fills `reply.run_state` (D-10): the
+        adapter's own record while a run is in flight, a mapped
+        `service.status()` otherwise, unset when no service is configured.
+        The 1-arg intent-command branch is unchanged."""
         if len(args) == 2:
-            return super().GetStatus(*args)  # type: ignore[arg-type]
+            reply = super().GetStatus(*args)  # type: ignore[arg-type]
+            run_state = self._build_run_state()
+            if run_state is not None:
+                try:
+                    reply.run_state.update(run_state)
+                except (ValueError, TypeError):
+                    reply.ClearField("run_state")
+                    reply.run_state.update({"state": "unknown"})
+            return reply
         (params,) = args
         return self._get_status(params)  # type: ignore[arg-type]
 

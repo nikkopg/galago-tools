@@ -11,7 +11,7 @@ import unittest
 from concurrent import futures
 from dataclasses import fields
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Optional, cast
 from unittest.mock import MagicMock, call, patch
 
 import grpc
@@ -283,14 +283,13 @@ class TestSimulatedTransferOverGrpc(unittest.TestCase):
         self.mock_open_service.assert_not_called()
 
 
-class TestControlCommandsOverGrpc(unittest.TestCase):
-    """D-04/ADP-08: the real-mode gRPC tracer for Pause (Task 1), extended
-    (Task 2/3) into the concurrency test proving Pause/Resume/Abort reach a
-    Transfer in flight through the real base_server.ExecuteCommand gate.
-    Deliberately does NOT inherit _MockedFastServerTestCase: this class calls
-    control methods on purpose, so its own tearDown allows at most one call
-    each -- no test here may reach a control method more than the operator
-    asked."""
+class _RealModeGrpcTestCase(unittest.TestCase):
+    """Shared real-mode in-process gRPC fixture (RESEARCH Pattern 1): a
+    FastServer with a MagicMock(spec=FastService) injected directly, a real
+    gRPC server/stub pair, and the blocked-Transfer helper (RESEARCH Pitfall
+    6) that actually exercises base_server.ExecuteCommand's
+    parseCommand/isReady/setStatus(BUSY) bracket. Declares no tests of its
+    own."""
 
     def setUp(self) -> None:
         self.server = FastServer()
@@ -321,27 +320,22 @@ class TestControlCommandsOverGrpc(unittest.TestCase):
     def _health(self) -> tool_base_pb2.StatusReply:
         return cast(tool_base_pb2.StatusReply, self.stub.GetStatus(empty_pb2.Empty()))
 
-    def test_pause_over_grpc_reaches_service_as_soft_pause(self) -> None:
-        self.service.pause.return_value = {"errorCode": 0}
-        reply = self.stub.ExecuteCommand(self._fast(pause=fast_pb2.Command.Pause()))
-        self.assertEqual(reply.response, SUCCESS, reply.error_message)
-        self.service.pause.assert_called_once_with(hard=False)
-        self.assertEqual(self.service.status.call_count, 0)
-        self.service.resume.assert_not_called()
-        self.service.abort.assert_not_called()
-        self.service.wait.assert_not_called()
-        self.assertEqual(self._health().status, READY)
-
-    def _start_blocked_transfer(self) -> tuple[threading.Event, threading.Thread, dict[str, Any]]:
+    def _start_blocked_transfer(
+        self, progress: Optional[tuple[int, str]] = None,
+    ) -> tuple[threading.Event, threading.Thread, dict[str, Any]]:
         """Blocks a real Transfer sent over the gRPC stub inside run_transfer,
         so base_server.ExecuteCommand's parseCommand/isReady/setStatus(BUSY)
         bracket is actually exercised (RESEARCH Pitfall 6) -- driving the
         Transfer through self.server.Transfer(...) directly would never reach
-        that gate."""
+        that gate. When `progress` is given, the blocking side effect first
+        reports it via the on_progress callback (RunOptions.on_progress),
+        before blocking on the release event."""
         release = threading.Event()
         entered = threading.Event()
 
         def _blocking_run_transfer(*args: Any, **kwargs: Any) -> Any:
+            if progress is not None:
+                kwargs["options"].on_progress(*progress)
             entered.set()
             release.wait(timeout=10)
             return Ran(outcome=RunOutcome(state="idle", done=True, percent=100))
@@ -362,6 +356,27 @@ class TestControlCommandsOverGrpc(unittest.TestCase):
         self.addCleanup(release.set)
         self.assertTrue(entered.wait(timeout=5))
         return release, thread, result
+
+
+class TestControlCommandsOverGrpc(_RealModeGrpcTestCase):
+    """D-04/ADP-08: the real-mode gRPC tracer for Pause (Task 1), extended
+    (Task 2/3) into the concurrency test proving Pause/Resume/Abort reach a
+    Transfer in flight through the real base_server.ExecuteCommand gate.
+    Deliberately does NOT inherit _MockedFastServerTestCase: this class calls
+    control methods on purpose, so its own tearDown allows at most one call
+    each -- no test here may reach a control method more than the operator
+    asked."""
+
+    def test_pause_over_grpc_reaches_service_as_soft_pause(self) -> None:
+        self.service.pause.return_value = {"errorCode": 0}
+        reply = self.stub.ExecuteCommand(self._fast(pause=fast_pb2.Command.Pause()))
+        self.assertEqual(reply.response, SUCCESS, reply.error_message)
+        self.service.pause.assert_called_once_with(hard=False)
+        self.assertEqual(self.service.status.call_count, 0)
+        self.service.resume.assert_not_called()
+        self.service.abort.assert_not_called()
+        self.service.wait.assert_not_called()
+        self.assertEqual(self._health().status, READY)
 
     def test_pause_resume_abort_reach_service_while_transfer_in_flight(self) -> None:
         self.service.pause.return_value = {"errorCode": 0}
@@ -605,6 +620,39 @@ class TestControlCommandsOverGrpc(unittest.TestCase):
             ["pause", "abort", "resume", "wait"])
 
 
+class TestRunStateOverGrpc(_RealModeGrpcTestCase):
+    """D-09/D-10/D-12: the health GetStatus's run_state, sourced from the
+    adapter's own record while a Transfer is in flight and from a mapped
+    service.status() once it ends."""
+
+    def test_run_state_is_running_with_the_latest_progress_while_a_transfer_runs(
+            self) -> None:
+        release, thread, result = self._start_blocked_transfer(progress=(42, "running"))
+        reply = self._health()
+        self.assertTrue(reply.HasField("run_state"))
+        self.assertEqual(
+            MessageToDict(reply.run_state),
+            {"state": "running", "percent": 42, "pause": None})
+        self.assertEqual(self.service.status.call_count, 0)
+
+        self.service.status.return_value = {
+            "state": "idle", "percentProgress": 100, "remainingTime": 0, "done": True}
+        release.set()
+        thread.join(timeout=10)
+
+        run_state = MessageToDict(self._health().run_state)
+        self.assertEqual(run_state, {"state": "idle", "percent": 100, "pause": None})
+        self.assertNotIn("percentProgress", run_state)
+        self.assertEqual(self.service.status.call_count, 1)
+
+    def test_run_state_at_transfer_entry_has_no_percent_yet(self) -> None:
+        release, thread, result = self._start_blocked_transfer()
+        self.assertEqual(
+            MessageToDict(self._health().run_state),
+            {"state": "running", "percent": None, "pause": None})
+        release.set()
+
+
 class TestTransferMapping(unittest.TestCase):
     def setUp(self) -> None:
         self.server = FastServer()
@@ -784,8 +832,13 @@ class TestReadAndRecoveryCommands(_MockedFastServerTestCase):
 
     def test_get_status_dual_dispatch_delegates_health_rpc_to_super(self) -> None:
         from google.protobuf import empty_pb2
+        self.service.status.return_value = {
+            "state": "idle", "percentProgress": 0, "remainingTime": 0, "done": True}
         reply = self.server.GetStatus(empty_pb2.Empty(), None)
         self.assertIsInstance(reply, tool_base_pb2.StatusReply)
+        self.assertEqual(
+            MessageToDict(cast(tool_base_pb2.StatusReply, reply).run_state),
+            {"state": "idle", "percent": 0, "pause": None})
 
     def test_get_status_dual_dispatch_single_arg_is_intent_command(self) -> None:
         self.service.status.return_value = {
@@ -1068,6 +1121,38 @@ class TestControlCommandsBypassMotionLock(unittest.TestCase):
         self.assertEqual(reply.response, SUCCESS, reply.error_message)
         self.assertEqual(MessageToDict(reply.meta_data)["kind"], "ran")
         self.assertFalse(self.server._motion_lock.locked())
+
+
+class TestRunState(unittest.TestCase):
+    """D-11/D-12/D-13/D-14: run_state's record, recorder and read-path
+    builder, driven directly against FastServer (TestRunStateOverGrpc covers
+    the same guarantees through the real gRPC health RPC)."""
+
+    def setUp(self) -> None:
+        self.server = FastServer()
+        self.service = MagicMock(spec=FastService)
+        self.server.service = self.service
+        self.server.config = fast_pb2.Config(host="h")
+        self.server.status = READY
+
+    def test_run_protocol_marks_its_run_in_flight(self) -> None:
+        captured: dict[str, Any] = {}
+
+        def _capturing_run_protocol(*args: Any, **kwargs: Any) -> Any:
+            captured["run_state"] = self.server._build_run_state()
+            return Ran(outcome=RunOutcome(state="idle", done=True, percent=100))
+
+        self.service.run_protocol.side_effect = _capturing_run_protocol
+        reply = self.server.RunProtocol(fast_pb2.Command.RunProtocol(csv=EXAMPLE1_CSV))
+        self.assertEqual(reply.response, SUCCESS, reply.error_message)
+        self.assertEqual(captured["run_state"]["state"], "running")
+        self.assertEqual(self.server._active_runs, 0)
+
+    def test_a_run_that_raises_leaves_no_run_in_flight(self) -> None:
+        self.service.run_transfer.side_effect = RuntimeError("boom")
+        with self.assertRaises(RuntimeError):
+            self.server.Transfer(fast_pb2.Command.Transfer(**_ALL_TRANSFER_FIELDS))
+        self.assertEqual(self.server._active_runs, 0)
 
 
 class TestTransportErrors(_MockedFastServerTestCase):
