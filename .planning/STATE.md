@@ -1,8 +1,15 @@
 ---
-gsd_state_version: '1.0'
+gsd_state_version: "1.0"
 milestone: v1
 milestone_name: F.A.S.T. Live Run Control (adapter & rollout)
+current_phase: 1
+current_phase_name: Adapter Control Path & Run State
 status: planning
+stopped_at: Phase 1 context gathered
+last_updated: "2026-10-12T11:49:56.956Z"
+last_activity: 2026-10-12
+last_activity_desc: Project initialized (Galago planning moved here from fast-mcp)
+state_head: aa88874ab4c68891ff5a291b77275e9802dc97da
 progress:
   total_phases: 3
   completed_phases: 0
@@ -85,6 +92,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-12
-Stopped at: Project initialized
-Resume file: None
+Last session: 2026-10-12T11:49:56.941Z
+Stopped at: Phase 1 context gathered
+Resume file: .planning/phases/01-adapter-control-path-run-state/01-CONTEXT.md
