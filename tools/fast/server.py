@@ -7,12 +7,14 @@ caddy in-run, Phase 5 D-29), tray confirmation, timeouts, and which
 instrument states allow Abort and Resume) lives in
 fast_mcp.service.FastService.
 
-Abort and Resume are operator-issued recovery commands for a run the
-instrument has paused (dual-frontend section 11 #1, amended). The adapter
-only ever calls abort/resume from those two commands: a paused, timed-out
-or cancelled run is reported, never aborted on the adapter's own initiative. This module never imports the MCP adapter
-subpackage (fast_mcp.mcp) -- it obtains its FastService only through
-fast_mcp.composition.open_service (D-04).
+Pause, Resume and Abort are the operator's control commands (dual-frontend
+section 11 #1, amended). They reach a run in flight through the
+ExecuteCommand override: a paused, timed-out or cancelled run is reported,
+never paused, resumed or aborted on the adapter's own initiative -- the
+adapter only ever calls pause/resume/abort from those three methods. This
+module never imports the MCP adapter subpackage (fast_mcp.mcp) -- it
+obtains its FastService only through fast_mcp.composition.open_service
+(D-04).
 """
 import argparse
 import logging
@@ -22,6 +24,7 @@ import threading
 from dataclasses import fields
 from typing import Any, Optional, cast
 
+import grpc
 import httpx
 from google.protobuf import message
 from google.protobuf.struct_pb2 import Struct
@@ -48,10 +51,12 @@ from fast_mcp.transport import InstrumentHTTPError
 from tools.base_server import ToolServer, serve
 from tools.grpc_interfaces.fast_pb2 import Command, Config
 from tools.grpc_interfaces.tool_base_pb2 import (
+    DRIVER_ERROR,
     ERROR_FROM_TOOL,
     INVALID_ARGUMENTS,
     NOT_READY,
     SUCCESS,
+    Command as ToolCommand,
     ExecuteCommandReply,
     ResponseCode,
 )
@@ -63,8 +68,15 @@ _NOT_CONNECTED_MESSAGE = (
     "Configure it with simulated off")
 _BUSY_MESSAGE = "another motion command is in progress on this tool"
 
-MOTION_COMMANDS = frozenset(
-    {"Transfer", "RunProtocol", "ScanTips", "EjectTray", "Abort", "Resume"})
+# The commands that take _motion_lock and are serialised against each
+# other; the control commands (pause/resume/abort) are deliberately absent
+# -- they must reach a run that one of these commands holds in flight (D-06).
+MOTION_LOCK_COMMANDS = frozenset({"Transfer", "RunProtocol", "ScanTips", "EjectTray"})
+
+# The fast.Command oneof field names (lowercase, as WhichOneof returns them)
+# that FastServer.ExecuteCommand routes past base_server's readiness gate and
+# status bracket (D-01, D-02).
+CONTROL_COMMANDS = frozenset({"pause", "resume", "abort"})
 
 COMMAND_TO_SERVICE_METHOD = {
     "Transfer": "run_transfer",
@@ -360,6 +372,37 @@ class FastServer(ToolServer):
             )
         return super()._dispatchCommand(command)
 
+    def ExecuteCommand(
+        self, request: ToolCommand, context: grpc.ServicerContext
+    ) -> ExecuteCommandReply:
+        """Override of ToolServer.ExecuteCommand (D-01, D-02, D-03).
+
+        base_server refuses every command unless READY (base_server.py:203),
+        sets BUSY for the whole command (:240) and resets READY in its
+        finally (:254). A control command (pause/resume/abort) must reach
+        the run that an in-flight Transfer/RunProtocol owns and must not
+        flip its status, so this override bypasses those three for
+        CONTROL_COMMANDS only -- it still checks the tool type and still
+        runs _check_args through _dispatchCommand. Never calls isReady,
+        parseCommand or setStatus on this path: a BUSY tool stays BUSY and a
+        READY tool stays READY. Every other request (a non-fast
+        tool_command, a fast request with no command set, any non-control
+        fast command) returns super().ExecuteCommand(request, context)
+        unchanged. tools/base_server.py is never edited."""
+        if request.WhichOneof("tool_command") == self.toolType:
+            fast_command = request.fast
+            field_name = fast_command.WhichOneof("command")
+            if field_name in CONTROL_COMMANDS:
+                command = getattr(fast_command, field_name)
+                try:
+                    logging.info(f"Running command {command.__class__.__name__}")
+                    return self._dispatchCommand(command)
+                except Exception as e:
+                    logging.error(f"Error on Tool ={self.toolId}")
+                    self.last_error = str(e)
+                    return ExecuteCommandReply(response=DRIVER_ERROR, error_message=str(e))
+        return super().ExecuteCommand(request, context)
+
     def _configure(self, config: Config) -> None:
         host = config.host.strip()
         if not host:
@@ -538,9 +581,10 @@ class FastServer(ToolServer):
 
     def Abort(self, params: "Command.Abort") -> ExecuteCommandReply:
         """Operator-issued abort of a running or paused run. The core
-        refuses in any other state without contacting the instrument. Moves
-        the head, so it takes the motion lock. Returns once the instrument
-        has accepted the abort; it does not wait for the head to park."""
+        refuses in any other state without contacting the instrument. Never
+        takes the motion lock (D-06), so it reaches a run in flight. Returns
+        once the instrument has accepted the abort; it does not wait for the
+        head to park."""
         return_liquid = _decision(params, "return_liquid")
         if return_liquid is None:
             return _reply(INVALID_ARGUMENTS,
@@ -548,31 +592,33 @@ class FastServer(ToolServer):
         service = self.service
         if service is None:
             return _reply(NOT_READY, message=_NOT_CONNECTED_MESSAGE)
-        if not self._motion_lock.acquire(blocking=False):
-            return _reply(NOT_READY, message=_BUSY_MESSAGE)
         try:
-            try:
-                result = service.abort(return_liquid=return_liquid)
-            except (InstrumentHTTPError, httpx.HTTPError) as exc:
-                return _transport_error_reply(exc)
-            return _recovery_reply("abort", result)
-        finally:
-            self._motion_lock.release()
+            result = service.abort(return_liquid=return_liquid)
+        except (InstrumentHTTPError, httpx.HTTPError) as exc:
+            return _transport_error_reply(exc)
+        return _recovery_reply("abort", result)
 
     def Resume(self, params: "Command.Resume") -> ExecuteCommandReply:
         """Operator-issued resume of a paused run. The core refuses unless
-        the instrument is paused, without contacting it. On an accepted
-        resume this WAITS for the resumed run to reach a terminal state,
-        with the same timeout and progress logging as Transfer, so the
-        protocol step reports the run's real outcome (Ran, Paused again,
-        Aborted, TimedOut). Holds the motion lock for the whole wait.
+        the instrument is paused, without contacting it.
 
-        Known limitation: the wait treats `paused` as terminal on any poll.
-        If the instrument still reports `paused` on the first status poll
-        after accepting the resume, this returns Paused although the run is
-        resuming. Not observed live yet; a supervised check should confirm
-        the state flips before the first poll (or the core's wait should
-        ignore a leading `paused`)."""
+        Two paths (D-07), decided by a non-blocking acquire of the motion
+        lock -- adapter bookkeeping about its own threads, never an
+        instrument-state check (D-08):
+        - Lock acquired: no motion command is in flight (crash recovery).
+          Resumes, then WAITS for the resumed run to reach a terminal state,
+          with the same timeout and progress logging as Transfer, holding
+          the lock for the whole wait so no new Transfer can start under it.
+          Known limitation: the wait treats `paused` as terminal on any
+          poll. If the instrument still reports `paused` on the first
+          status poll after accepting the resume, this returns Paused
+          although the run is resuming. Not observed live yet; a supervised
+          check should confirm the state flips before the first poll (or
+          the core's wait should ignore a leading `paused`).
+        - Lock not acquired: a run is in flight. Resumes and returns as soon
+          as the instrument accepts; no wait, and never releases a lock this
+          call did not acquire -- the in-flight step's own wait reports the
+          outcome."""
         is_tip_broken = _decision(params, "is_tip_broken")
         if is_tip_broken is None:
             return _reply(INVALID_ARGUMENTS,
@@ -580,21 +626,25 @@ class FastServer(ToolServer):
         service = self.service
         if service is None:
             return _reply(NOT_READY, message=_NOT_CONNECTED_MESSAGE)
-        if not self._motion_lock.acquire(blocking=False):
-            return _reply(NOT_READY, message=_BUSY_MESSAGE)
-        try:
+        if self._motion_lock.acquire(blocking=False):
             try:
-                accepted = service.resume(is_tip_broken=is_tip_broken)
-                if isinstance(accepted, Refused) or accepted.get("errorCode") != 0:
-                    return _recovery_reply("resume", accepted)
-                result = service.wait(
-                    RunHandle(plates=None, stale_done=False),
-                    on_progress=self._log_progress, timeout_s=self._timeout(None))
-            except (InstrumentHTTPError, httpx.HTTPError) as exc:
-                return _transport_error_reply(exc)
-            return _result_reply(result)
-        finally:
-            self._motion_lock.release()
+                try:
+                    accepted = service.resume(is_tip_broken=is_tip_broken)
+                    if isinstance(accepted, Refused) or accepted.get("errorCode") != 0:
+                        return _recovery_reply("resume", accepted)
+                    result = service.wait(
+                        RunHandle(plates=None, stale_done=False),
+                        on_progress=self._log_progress, timeout_s=self._timeout(None))
+                except (InstrumentHTTPError, httpx.HTTPError) as exc:
+                    return _transport_error_reply(exc)
+                return _result_reply(result)
+            finally:
+                self._motion_lock.release()
+        try:
+            accepted = service.resume(is_tip_broken=is_tip_broken)
+        except (InstrumentHTTPError, httpx.HTTPError) as exc:
+            return _transport_error_reply(exc)
+        return _recovery_reply("resume", accepted)
 
     # -- D-16 estimate methods -------------------------------------------
     # Every Estimate<Cmd> method is called from two places: base_server's

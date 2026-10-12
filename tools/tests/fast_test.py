@@ -56,7 +56,13 @@ try:
     from fast_mcp.session import InstrumentSession
     from fast_mcp.transport import InstrumentHTTPError
 
-    from tools.fast.server import COMMAND_TO_SERVICE_METHOD, FastServer, _check_args
+    from tools.fast.server import (
+        CONTROL_COMMANDS,
+        COMMAND_TO_SERVICE_METHOD,
+        MOTION_LOCK_COMMANDS,
+        FastServer,
+        _check_args,
+    )
 except ModuleNotFoundError as exc:
     if exc.name and exc.name.split(".")[0] in ("fast_mcp", "httpx"):
         raise unittest.SkipTest(
@@ -354,11 +360,6 @@ class TestControlCommandsOverGrpc(unittest.TestCase):
         self.assertTrue(entered.wait(timeout=5))
         return release, thread, result
 
-    # D-04/ADP-08: Task 3 removes this decorator in the commit that adds the
-    # ExecuteCommand override -- until then, base_server's isReady() gate
-    # refuses every control command while the Transfer holds BUSY, so this
-    # test is an intentional, committed expected failure.
-    @unittest.expectedFailure
     def test_pause_resume_abort_reach_service_while_transfer_in_flight(self) -> None:
         self.service.pause.return_value = {"errorCode": 0}
         self.service.resume.return_value = {"errorCode": 0}
@@ -426,9 +427,10 @@ class _MockedFastServerTestCase(unittest.TestCase):
     """Shared setUp/tearDown for tests driving FastServer against a
     MagicMock(spec=FastService). D-18 (Task 2 behavior #11), as amended by
     dual-frontend section 11 #1: abort/pause/resume are never called on the
-    adapter's own initiative -- only the operator's Abort/Resume commands may
-    call them, and those are tested in TestRecoveryCommands, which does not
-    use this base. Enforced once per test class in tearDown."""
+    adapter's own initiative -- only the operator's Pause/Abort/Resume
+    commands may call them, and those are tested in TestRecoveryCommands and
+    TestControlCommandsOverGrpc, which do not use this base. Enforced once
+    per test class in tearDown."""
 
     def setUp(self) -> None:
         self.server = FastServer()
@@ -664,6 +666,10 @@ class TestExpectedTrayId(_MockedFastServerTestCase):
 
 
 class TestMotionSerialization(_MockedFastServerTestCase):
+    def test_motion_lock_and_control_command_sets_are_disjoint(self) -> None:
+        self.assertEqual(MOTION_LOCK_COMMANDS, {"Transfer", "RunProtocol", "ScanTips", "EjectTray"})
+        self.assertEqual(CONTROL_COMMANDS, {"pause", "resume", "abort"})
+
     def test_second_motion_command_refused_while_first_in_flight(self) -> None:
         release = threading.Event()
         entered = threading.Event()
@@ -696,14 +702,6 @@ class TestMotionSerialization(_MockedFastServerTestCase):
 
             reply = self.server.EjectTray(fast_pb2.Command.EjectTray())
             self.assertEqual(reply.response, NOT_READY)
-
-            reply = self.server.Abort(fast_pb2.Command.Abort(return_liquid="no"))
-            self.assertEqual(reply.response, NOT_READY)
-            self.assertIn("another motion command is in progress", reply.error_message)
-
-            reply = self.server.Resume(fast_pb2.Command.Resume(is_tip_broken="no"))
-            self.assertEqual(reply.response, NOT_READY)
-            self.assertIn("another motion command is in progress", reply.error_message)
 
             # Not gated by the motion lock.
             reply = self.server.GetTipStatus(fast_pb2.Command.GetTipStatus())
