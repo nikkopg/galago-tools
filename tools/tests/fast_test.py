@@ -67,6 +67,7 @@ except ModuleNotFoundError as exc:
 
 from tools.grpc_interfaces import controller_pb2, fast_pb2, tool_base_pb2
 from tools.grpc_interfaces.tool_base_pb2 import (
+    BUSY,
     ERROR_FROM_TOOL,
     INVALID_ARGUMENTS,
     NOT_READY,
@@ -320,6 +321,75 @@ class TestControlCommandsOverGrpc(unittest.TestCase):
         self.service.resume.assert_not_called()
         self.service.abort.assert_not_called()
         self.service.wait.assert_not_called()
+        self.assertEqual(self._health().status, READY)
+
+    def _start_blocked_transfer(self) -> tuple[threading.Event, threading.Thread, dict[str, Any]]:
+        """Blocks a real Transfer sent over the gRPC stub inside run_transfer,
+        so base_server.ExecuteCommand's parseCommand/isReady/setStatus(BUSY)
+        bracket is actually exercised (RESEARCH Pitfall 6) -- driving the
+        Transfer through self.server.Transfer(...) directly would never reach
+        that gate."""
+        release = threading.Event()
+        entered = threading.Event()
+
+        def _blocking_run_transfer(*args: Any, **kwargs: Any) -> Any:
+            entered.set()
+            release.wait(timeout=10)
+            return Ran(outcome=RunOutcome(state="idle", done=True, percent=100))
+
+        self.service.run_transfer.side_effect = _blocking_run_transfer
+
+        result: dict[str, Any] = {}
+
+        def _run_transfer() -> None:
+            result["transfer"] = self.stub.ExecuteCommand(
+                self._fast(transfer=fast_pb2.Command.Transfer(**_ALL_TRANSFER_FIELDS)))
+
+        thread = threading.Thread(target=_run_transfer)
+        thread.start()
+        # Cleanups run LIFO: release before join, so a failing assertion above
+        # never leaves the gRPC worker thread blocked forever.
+        self.addCleanup(thread.join, 10)
+        self.addCleanup(release.set)
+        self.assertTrue(entered.wait(timeout=5))
+        return release, thread, result
+
+    # D-04/ADP-08: Task 3 removes this decorator in the commit that adds the
+    # ExecuteCommand override -- until then, base_server's isReady() gate
+    # refuses every control command while the Transfer holds BUSY, so this
+    # test is an intentional, committed expected failure.
+    @unittest.expectedFailure
+    def test_pause_resume_abort_reach_service_while_transfer_in_flight(self) -> None:
+        self.service.pause.return_value = {"errorCode": 0}
+        self.service.resume.return_value = {"errorCode": 0}
+        self.service.abort.return_value = {"errorCode": 0}
+
+        release, thread, result = self._start_blocked_transfer()
+        self.assertEqual(self._health().status, BUSY)
+
+        for field, message, method, kwargs in (
+            ("pause", fast_pb2.Command.Pause(), "pause", {"hard": False}),
+            ("resume", fast_pb2.Command.Resume(is_tip_broken="no"), "resume",
+             {"is_tip_broken": False}),
+            ("abort", fast_pb2.Command.Abort(return_liquid="no"), "abort",
+             {"return_liquid": False}),
+        ):
+            status_before = self.service.status.call_count
+            reply = self.stub.ExecuteCommand(self._fast(**{field: message}))
+            self.assertEqual(reply.response, SUCCESS, reply.error_message)
+            getattr(self.service, method).assert_called_once_with(**kwargs)
+            self.assertEqual(self.service.status.call_count, status_before)
+            self.assertEqual(self._health().status, BUSY)
+            self.assertTrue(thread.is_alive())
+
+        self.service.wait.assert_not_called()
+        self.service.status.assert_not_called()
+
+        release.set()
+        thread.join(timeout=10)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(result["transfer"].response, SUCCESS)
+        self.service.run_transfer.assert_called_once()
         self.assertEqual(self._health().status, READY)
 
 
