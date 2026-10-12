@@ -21,8 +21,10 @@ import logging
 import math
 import re
 import threading
+import typing as t
 from contextlib import contextmanager
 from dataclasses import fields
+from datetime import datetime, timezone
 from typing import Any, Iterator, Optional, cast
 
 import grpc
@@ -370,6 +372,17 @@ def _recovery_reply(action: str, result: "dict | Refused") -> ExecuteCommandRepl
                   meta=result)
 
 
+class _PauseInfoLike(t.Protocol):
+    """A duck-typed stand-in for fast-mcp's PauseInfo (D-13): the pinned core
+    76f8c3f has no PauseInfo, so this module must not import it (nor
+    ResumeMarker, nor the new RunOptions fields). Phase 2 connects the
+    recorder as RunOptions(on_pause=self._record_pause) after the re-pin.
+    `typing.Protocol` is used as `t.Protocol` because `fast_mcp.model.Protocol`
+    is already imported under the bare name `Protocol`."""
+
+    def to_dict(self) -> dict[str, Any]: ...
+
+
 class FastServer(ToolServer):
     toolType = "fast"
     config: Config
@@ -479,6 +492,21 @@ class FastServer(ToolServer):
             self._run_record["state"] = state
             if state == "running":
                 self._run_record["pause"] = None
+
+    def _record_pause(self, info: "_PauseInfoLike") -> None:
+        """Records the current pause for run_state (D-11, D-12). Phase 1 has
+        no caller in production code -- the simulated hook (Plan 01-05) and
+        the tests are the callers; Phase 2 wires it as
+        RunOptions(on_pause=self._record_pause). Records only: no service
+        call, no control method (D-16)."""
+        pause = dict(info.to_dict())
+        pause["since"] = datetime.now(timezone.utc).isoformat()
+        with self._run_state_lock:
+            self._run_record["pause"] = pause
+            self._run_record["state"] = "paused"
+            percent = _run_percent(pause.get("percent"))
+            if percent is not None:
+                self._run_record["percent"] = percent
 
     def _build_run_state(self) -> Optional[dict[str, Any]]:
         """The health GetStatus's run_state source (D-12, D-14). While a

@@ -10,6 +10,7 @@ import types
 import unittest
 from concurrent import futures
 from dataclasses import fields
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional, cast
 from unittest.mock import MagicMock, call, patch
@@ -104,6 +105,27 @@ PickTip,2,8,12
 Aspirate,1,8,12,A,1,10
 Dispense,3,8,12,A,1,10
 EjectTip"""
+
+
+class _StubPauseInfo:
+    """D-13: tests feed a stub, never the core's PauseInfo (the pinned core
+    76f8c3f has no PauseInfo)."""
+
+    def __init__(self, data: dict[str, Any]) -> None:
+        self._data = dict(data)
+
+    def to_dict(self) -> dict[str, Any]:
+        return dict(self._data)
+
+
+_WRONG_PLATE_PAUSE: dict[str, Any] = {
+    "errorCode": -645,
+    "errorName": "WrongPlateType",
+    "percent": 0,
+    "eventPayload": {
+        "wrongDetection": [{"expectedPlateID": 1, "detectedPlateID": None, "position": 3}]
+    },
+}
 
 
 def _free_tcp_port() -> int:
@@ -1153,6 +1175,148 @@ class TestRunState(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.server.Transfer(fast_pb2.Command.Transfer(**_ALL_TRANSFER_FIELDS))
         self.assertEqual(self.server._active_runs, 0)
+
+    def _run_state(self) -> dict[str, Any]:
+        return MessageToDict(
+            cast(tool_base_pb2.StatusReply,
+                 self.server.GetStatus(empty_pb2.Empty(), None)).run_state)
+
+    def test_recorded_pause_is_reported_with_its_detail_and_a_utc_since(self) -> None:
+        with self.server._run_in_flight():
+            before = datetime.now(timezone.utc)
+            self.server._record_pause(_StubPauseInfo(_WRONG_PLATE_PAUSE))
+            after = datetime.now(timezone.utc)
+            run_state = self._run_state()
+
+        self.assertEqual(run_state["state"], "paused")
+        self.assertEqual(run_state["percent"], 0)
+        pause = run_state["pause"]
+        self.assertEqual(
+            set(pause), {"errorCode", "errorName", "percent", "eventPayload", "since"})
+        self.assertEqual(pause["errorCode"], -645)
+        self.assertEqual(pause["errorName"], "WrongPlateType")
+        self.assertEqual(pause["eventPayload"], _WRONG_PLATE_PAUSE["eventPayload"])
+        since = datetime.fromisoformat(pause["since"])
+        self.assertEqual(since.utcoffset(), timedelta(0))
+        self.assertLessEqual(before, since)
+        self.assertLessEqual(since, after)
+        self.assertEqual(self.service.method_calls, [])
+
+    def test_running_observation_clears_the_pause_and_paused_keeps_it(self) -> None:
+        with self.server._run_in_flight():
+            self.server._record_pause(_StubPauseInfo(_WRONG_PLATE_PAUSE))
+            self.server._log_progress(10, "paused")
+            paused_state = self._run_state()
+            self.assertEqual(paused_state["state"], "paused")
+            self.assertIsNotNone(paused_state["pause"])
+
+            self.server._log_progress(10, "running")
+            running_state = self._run_state()
+        self.assertEqual(
+            running_state, {"state": "running", "percent": 10, "pause": None})
+
+    def test_no_run_in_flight_maps_status_and_renames_percent(self) -> None:
+        cases: list[tuple[Any, Any]] = [(0, 0), (100, 100), (42, 42)]
+        for percent_progress, expected in cases:
+            with self.subTest(percentProgress=percent_progress):
+                self.service.reset_mock()
+                self.service.status.return_value = {
+                    "state": "idle", "percentProgress": percent_progress,
+                    "remainingTime": 0, "done": True}
+                run_state = self._run_state()
+                self.assertEqual(
+                    run_state, {"state": "idle", "percent": expected, "pause": None})
+                self.assertNotIn("percentProgress", run_state)
+
+        with self.subTest(percentProgress="missing"):
+            self.service.reset_mock()
+            self.service.status.return_value = {
+                "state": "idle", "remainingTime": 0, "done": True}
+            run_state = self._run_state()
+            self.assertEqual(
+                run_state, {"state": "idle", "percent": None, "pause": None})
+
+        self.assertEqual(self.service.method_calls, [call.status()])
+
+    def test_percent_is_passed_through_without_rounding_or_coercion(self) -> None:
+        cases: list[tuple[Any, Any]] = [
+            (42.5, 42.5), (True, None), ("50", None), (float("nan"), None),
+        ]
+        for percent_progress, expected in cases:
+            with self.subTest(percentProgress=percent_progress):
+                self.service.reset_mock()
+                self.service.status.return_value = {
+                    "state": "idle", "percentProgress": percent_progress,
+                    "remainingTime": 0, "done": True}
+                run_state = self._run_state()
+                self.assertEqual(run_state.get("percent"), expected)
+
+    def test_unconfigured_tool_leaves_run_state_unset(self) -> None:
+        self.server.service = None
+        reply = cast(
+            tool_base_pb2.StatusReply, self.server.GetStatus(empty_pb2.Empty(), None))
+        self.assertFalse(reply.HasField("run_state"))
+
+    def test_status_failure_reports_unknown_and_the_heartbeat_still_answers(self) -> None:
+        side_effects: list[Any] = [
+            InstrumentHTTPError(500, "boom"), httpx.ConnectError("x"), RuntimeError("y"),
+        ]
+        for exc in side_effects:
+            with self.subTest(side_effect=type(exc).__name__):
+                self.service.reset_mock()
+                self.service.status.side_effect = exc
+                reply = cast(
+                    tool_base_pb2.StatusReply,
+                    self.server.GetStatus(empty_pb2.Empty(), None))
+                self.assertEqual(MessageToDict(reply.run_state), {"state": "unknown"})
+                self.assertEqual(reply.status, READY)
+                self.assertGreaterEqual(reply.uptime, 0)
+
+        return_values: list[Any] = ["garbage", {"state": None}]
+        for value in return_values:
+            with self.subTest(return_value=value):
+                self.service.reset_mock()
+                self.service.status.side_effect = None
+                self.service.status.return_value = value
+                reply = cast(
+                    tool_base_pb2.StatusReply,
+                    self.server.GetStatus(empty_pb2.Empty(), None))
+                self.assertEqual(MessageToDict(reply.run_state), {"state": "unknown"})
+                self.assertEqual(reply.status, READY)
+                self.assertGreaterEqual(reply.uptime, 0)
+
+    def test_unencodable_run_state_falls_back_to_unknown(self) -> None:
+        with self.server._run_in_flight():
+            self.server._record_pause(_StubPauseInfo({"eventPayload": {"blob": object()}}))
+            run_state = self._run_state()
+        self.assertEqual(run_state, {"state": "unknown"})
+
+    def test_other_tool_types_leave_run_state_unset(self) -> None:
+        from tools.lcus1_relay.server import Lcus1RelayServer
+        server = Lcus1RelayServer()
+        reply = cast(
+            tool_base_pb2.StatusReply,
+            server.GetStatus(empty_pb2.Empty(), None))  # type: ignore[arg-type]
+        self.assertFalse(reply.HasField("run_state"))
+
+    def test_intent_get_status_is_unchanged(self) -> None:
+        self.service.status.return_value = {
+            "state": "idle", "percentProgress": 0, "remainingTime": 0, "done": True}
+        reply = cast(
+            tool_base_pb2.ExecuteCommandReply,
+            self.server.GetStatus(fast_pb2.Command.GetStatus()))
+        meta = MessageToDict(reply.meta_data)
+        self.assertIn("percentProgress", meta)
+        self.assertNotIn("pause", meta)
+
+    def test_run_state_lock_is_not_the_motion_lock(self) -> None:
+        self.assertIsNot(self.server._run_state_lock, self.server._motion_lock)
+        spy = MagicMock(wraps=threading.Lock())
+        self.server._motion_lock = spy
+        self.service.status.return_value = {
+            "state": "idle", "percentProgress": 0, "remainingTime": 0, "done": True}
+        self.server.GetStatus(empty_pb2.Empty(), None)
+        spy.acquire.assert_not_called()
 
 
 class TestTransportErrors(_MockedFastServerTestCase):
