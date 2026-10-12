@@ -5,16 +5,16 @@ milestone_name: F.A.S.T. Live Run Control (adapter & rollout)
 current_phase: 1
 current_phase_name: Adapter Control Path & Run State
 status: executing
-stopped_at: Completed 01-01-PLAN.md
-last_updated: "2026-10-12T21:48:35.453Z"
+stopped_at: Completed 01-02-PLAN.md
+last_updated: "2026-10-12T21:59:21.556Z"
 last_activity: 2026-10-13
 last_activity_desc: Phase 1 execution started
-state_head: bd41ae0e1301649c84a13050af5f5fd939c213f8
+state_head: b15c1dd87b23d3c3f59e08208dab4d2bf6762c54
 progress:
   total_phases: 3
   completed_phases: 0
   total_plans: 5
-  completed_plans: 1
+  completed_plans: 2
   percent: 0
 ---
 
@@ -31,7 +31,7 @@ is doing and recover it themselves; no adapter code path pauses, resumes or abor
 ## Current Position
 
 Phase: 1 (Adapter Control Path & Run State) — EXECUTING
-Plan: 2 of 5
+Plan: 3 of 5
 Status: Ready to execute
 Last activity: 2026-10-13 — Phase 1 execution started
 
@@ -60,6 +60,7 @@ Progress: [░░░░░░░░░░] 0%
 | Plan | Duration | Tasks | Files |
 |------|----------|-------|-------|
 | Phase 01 P01 | 45min | 3 tasks | 3 files |
+| Phase 01 P02 | 15min | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -76,6 +77,8 @@ Recent decisions affecting current work:
 - [Phase 01]: D-05: Pause {} has no fields (soft-only); FastServer.Pause() calls service.pause(hard=False) explicitly.
 - [Phase 01]: D-01/D-02/D-03: FastServer.ExecuteCommand override bypasses base_server's isReady/setStatus for pause/resume/abort only, dispatching through _dispatchCommand so _check_args still runs.
 - [Phase 01]: D-06/D-07: Pause and Abort never take _motion_lock; Resume branches on a non-blocking acquire into crash-recovery (wait under lock) vs in-flight (no wait, no lock) paths.
+- [Phase 01]: EST_RESUME_S stays a flat 15s placeholder; comment records the accepted debt now that Resume only waits on the crash-recovery path (research Pitfall 8)
+- [Phase 01]: No implementation bugs found in Pause/Abort/Resume for Plan 01-02; all must_haves were already satisfied by Plan 01-01, so this plan is purely additive test coverage
 
 ### Pending Todos
 
@@ -100,6 +103,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-12T21:48:35.432Z
-Stopped at: Completed 01-01-PLAN.md
+Last session: 2026-10-12T21:59:21.535Z
+Stopped at: Completed 01-02-PLAN.md
 Resume file: None
