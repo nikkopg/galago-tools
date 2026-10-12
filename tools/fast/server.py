@@ -407,7 +407,16 @@ class FastServer(ToolServer):
         its _estimateDuration error slot is structurally always None, so bad
         arguments must be rejected here or they either sleep through
         unchecked (simulated) or surface as the wrong error code entirely.
-        Never edits tools/base_server.py."""
+
+        A simulated LONG_RUNNING_COMMANDS run is marked in flight for the
+        whole of base_server's simulated sleep (D-18, D-19), once
+        _check_args has already passed -- base_server does the sleeping,
+        this override only brackets it with _run_in_flight() so run_state
+        reads running for its duration and idle once it returns.
+        _run_in_flight is a counter, so two overlapping simulated runs stay
+        running until the last one ends. Every other simulated command, and
+        every real-mode command (Transfer/RunProtocol enter _run_in_flight
+        themselves), is unaffected. Never edits tools/base_server.py."""
         problems = _check_args(command)
         if problems:
             return _reply(
@@ -415,6 +424,9 @@ class FastServer(ToolServer):
                 message=_one_line("invalid arguments: " + "; ".join(problems), 500),
                 meta=NeedsInput(missing=problems).to_dict(),
             )
+        if self.simulated and type(command).__name__ in LONG_RUNNING_COMMANDS:
+            with self._run_in_flight():
+                return super()._dispatchCommand(command)
         return super()._dispatchCommand(command)
 
     def ExecuteCommand(
@@ -509,16 +521,40 @@ class FastServer(ToolServer):
                 self._run_record["percent"] = percent
 
     def _build_run_state(self) -> Optional[dict[str, Any]]:
-        """The health GetStatus's run_state source (D-12, D-14). While a
-        LONG_RUNNING_COMMANDS run is in flight, returns a copy of the
-        adapter's own record taken under _run_state_lock -- never
-        _motion_lock -- and calls nothing on the service. Otherwise maps a
-        fresh service.status() to state/percent/pause (percentProgress ->
-        percent, RESEARCH Pitfall 2); unset (None) when no service is
-        configured; any failure on this path -- a service.status()
-        exception, a non-dict status, or a non-string state -- yields
-        {"state": "unknown"} so a heartbeat never fails because of run state
-        (T-01-13). The only service call on this path is status()."""
+        """The health GetStatus's run_state source (D-12, D-14, D-19, D-20).
+
+        While simulated, reads only the adapter's own record under
+        _run_state_lock and never touches the service (service stays None
+        throughout simulated mode, D-18): a recorded pause always reads
+        paused with its detail regardless of whether a run is in flight
+        (D-20, the simulate_pause hook); otherwise running while a
+        LONG_RUNNING_COMMANDS run is in flight (a counted run, not a
+        boolean, D-19) and idle otherwise. State is derived here from
+        pause/_active_runs directly, not from _run_record["state"], so a
+        cleared pause can never leave a stale "paused" behind.
+
+        In real mode, while a LONG_RUNNING_COMMANDS run is in flight,
+        returns a copy of the adapter's own record taken under
+        _run_state_lock -- never _motion_lock -- and calls nothing on the
+        service. Otherwise maps a fresh service.status() to state/percent/
+        pause (percentProgress -> percent, RESEARCH Pitfall 2); unset (None)
+        when no service is configured; any failure on this path -- a
+        service.status() exception, a non-dict status, or a non-string
+        state -- yields {"state": "unknown"} so a heartbeat never fails
+        because of run state (T-01-13). The only service call on this path
+        is status()."""
+        if self.simulated:
+            with self._run_state_lock:
+                pause = self._run_record["pause"]
+                if pause is not None:
+                    return {
+                        "state": "paused",
+                        "percent": _run_percent(pause.get("percent")),
+                        "pause": dict(pause),
+                    }
+                if self._active_runs > 0:
+                    return {"state": "running", "percent": None, "pause": None}
+                return {"state": "idle", "percent": None, "pause": None}
         with self._run_state_lock:
             if self._active_runs > 0:
                 pause = self._run_record["pause"]

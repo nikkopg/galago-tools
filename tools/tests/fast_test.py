@@ -3,6 +3,7 @@ import copy
 import importlib.metadata
 import json
 import os
+import queue
 import socket
 import tempfile
 import threading
@@ -242,6 +243,179 @@ class TestSimulatedTransferOverGrpc(unittest.TestCase):
     def _valid_transfer_command(self) -> tool_base_pb2.Command:
         return tool_base_pb2.Command(
             fast=fast_pb2.Command(transfer=fast_pb2.Command.Transfer(**_ALL_TRANSFER_FIELDS)))
+
+    def _run_state(self) -> dict[str, Any]:
+        return MessageToDict(self.stub.GetStatus(empty_pb2.Empty()).run_state)
+
+    def test_simulated_control_commands_check_arguments_then_succeed(self) -> None:
+        """D-18, ADP-10, ADP-06: simulated Pause/Resume/Abort check their
+        arguments through _check_args, then sleep their own estimate via
+        base_server's simulated branch and succeed -- never building a
+        service or taking the owner lock."""
+        reply = self.stub.ExecuteCommand(
+            tool_base_pb2.Command(fast=fast_pb2.Command(pause=fast_pb2.Command.Pause())))
+        self.assertEqual(reply.response, SUCCESS, reply.error_message)
+        reply = self.stub.ExecuteCommand(
+            tool_base_pb2.Command(fast=fast_pb2.Command(
+                resume=fast_pb2.Command.Resume(is_tip_broken="yes"))))
+        self.assertEqual(reply.response, SUCCESS, reply.error_message)
+        reply = self.stub.ExecuteCommand(
+            tool_base_pb2.Command(fast=fast_pb2.Command(
+                abort=fast_pb2.Command.Abort(return_liquid="no"))))
+        self.assertEqual(reply.response, SUCCESS, reply.error_message)
+        self.assertEqual(
+            self.fake_sleep.call_args_list, [call(1.0), call(15.0), call(15.0)])
+
+        self.fake_sleep.reset_mock()
+        bad_commands = [
+            fast_pb2.Command(resume=fast_pb2.Command.Resume(is_tip_broken="")),
+            fast_pb2.Command(resume=fast_pb2.Command.Resume()),
+            fast_pb2.Command(abort=fast_pb2.Command.Abort()),
+            fast_pb2.Command(abort=fast_pb2.Command.Abort(return_liquid="maybe")),
+        ]
+        for fast_command in bad_commands:
+            with self.subTest(command=fast_command.WhichOneof("command")):
+                reply = self.stub.ExecuteCommand(
+                    tool_base_pb2.Command(fast=fast_command))
+                self.assertEqual(reply.response, INVALID_ARGUMENTS)
+        self.fake_sleep.assert_not_called()
+
+        self.mock_open_service.assert_not_called()
+        self.assertIsNone(self.fs.service)
+
+    def test_simulated_run_state_is_running_during_a_transfer_sleep_then_idle(
+            self) -> None:
+        """D-19: simulated run_state is running while a simulated Transfer
+        sleeps and idle otherwise; the health status stays SIMULATED
+        throughout."""
+        self.assertEqual(
+            self._run_state(), {"state": "idle", "percent": None, "pause": None})
+
+        entered = threading.Event()
+        release = threading.Event()
+
+        def _blocking_sleep(duration: float) -> None:
+            if duration == 80.0:
+                entered.set()
+                release.wait(timeout=10)
+
+        self.fake_sleep.side_effect = _blocking_sleep
+
+        result: dict[str, Any] = {}
+
+        def _run_transfer() -> None:
+            result["reply"] = self.stub.ExecuteCommand(self._valid_transfer_command())
+
+        thread = threading.Thread(target=_run_transfer)
+        thread.start()
+        # Cleanups run LIFO: release before join, so a failing assertion
+        # above never leaves the gRPC worker thread blocked forever.
+        self.addCleanup(thread.join, 10)
+        self.addCleanup(release.set)
+        self.assertTrue(entered.wait(timeout=5))
+
+        self.assertEqual(
+            self._run_state(), {"state": "running", "percent": None, "pause": None})
+        self.assertEqual(
+            self.stub.GetStatus(empty_pb2.Empty()).status, tool_base_pb2.SIMULATED)
+
+        release.set()
+        thread.join(timeout=10)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(result["reply"].response, SUCCESS)
+
+        self.assertEqual(
+            self._run_state(), {"state": "idle", "percent": None, "pause": None})
+
+    def test_two_overlapping_simulated_transfers_read_running_until_both_end(
+            self) -> None:
+        """D-19, RESEARCH Pitfall 3: _active_runs is a counter, not a
+        boolean -- two overlapping simulated Transfers read running until
+        both have ended."""
+        gate_queue: "queue.Queue[threading.Event]" = queue.Queue()
+        gate_queue.put(threading.Event())
+        gate_queue.put(threading.Event())
+        pulled_gates: list[threading.Event] = []
+        pulled_lock = threading.Lock()
+        both_entered = threading.Event()
+
+        def _blocking_sleep(duration: float) -> None:
+            if duration != 80.0:
+                return
+            gate = gate_queue.get()
+            with pulled_lock:
+                pulled_gates.append(gate)
+                if len(pulled_gates) == 2:
+                    both_entered.set()
+            gate.wait(timeout=10)
+
+        self.fake_sleep.side_effect = _blocking_sleep
+
+        completed: "queue.Queue[Any]" = queue.Queue()
+
+        def _run() -> None:
+            completed.put(self.stub.ExecuteCommand(self._valid_transfer_command()))
+
+        threads = [threading.Thread(target=_run) for _ in range(2)]
+        for th in threads:
+            th.start()
+        self.addCleanup(lambda: [t.join(10) for t in threads])
+        self.assertTrue(both_entered.wait(timeout=5))
+
+        self.assertEqual(
+            self._run_state(), {"state": "running", "percent": None, "pause": None})
+
+        pulled_gates[0].set()
+        first_reply = completed.get(timeout=10)
+        self.assertEqual(first_reply.response, SUCCESS)
+        self.assertEqual(
+            self._run_state(), {"state": "running", "percent": None, "pause": None})
+
+        pulled_gates[1].set()
+        second_reply = completed.get(timeout=10)
+        self.assertEqual(second_reply.response, SUCCESS)
+        self.assertEqual(
+            self._run_state(), {"state": "idle", "percent": None, "pause": None})
+
+        for th in threads:
+            th.join(timeout=10)
+
+    def test_simulated_pause_does_not_shorten_the_transfer_sleep(self) -> None:
+        """D-18: a simulated Pause sent while a simulated Transfer sleeps
+        returns SUCCESS without shortening the Transfer's 80s sleep; the
+        Transfer still ends SUCCESS when its own sleep ends."""
+        entered = threading.Event()
+        release = threading.Event()
+
+        def _blocking_sleep(duration: float) -> None:
+            if duration == 80.0:
+                entered.set()
+                release.wait(timeout=10)
+
+        self.fake_sleep.side_effect = _blocking_sleep
+
+        result: dict[str, Any] = {}
+
+        def _run_transfer() -> None:
+            result["reply"] = self.stub.ExecuteCommand(self._valid_transfer_command())
+
+        thread = threading.Thread(target=_run_transfer)
+        thread.start()
+        self.addCleanup(thread.join, 10)
+        self.addCleanup(release.set)
+        self.assertTrue(entered.wait(timeout=5))
+
+        pause_reply = self.stub.ExecuteCommand(
+            tool_base_pb2.Command(fast=fast_pb2.Command(pause=fast_pb2.Command.Pause())))
+        self.assertEqual(pause_reply.response, SUCCESS, pause_reply.error_message)
+        self.assertTrue(thread.is_alive())
+        self.assertIn(call(80.0), self.fake_sleep.call_args_list)
+        self.assertIn(call(1.0), self.fake_sleep.call_args_list)
+
+        release.set()
+        thread.join(timeout=10)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(result["reply"].response, SUCCESS)
 
     def test_simulated_transfer_sleeps_estimate_without_service_or_lock(self) -> None:
         exec_reply = self.stub.ExecuteCommand(self._valid_transfer_command())
