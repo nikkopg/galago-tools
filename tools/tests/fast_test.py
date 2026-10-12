@@ -1,4 +1,5 @@
 import ast
+import copy
 import importlib.metadata
 import json
 import os
@@ -1883,84 +1884,217 @@ class TestRecoveryCommands(unittest.TestCase):
         self.assertIsNone(server.service)
 
 
+# D-15, D-17: scoped attribute -> the method name(s) allowed to use it. Each
+# value is a frozenset of owning FunctionDef names, so an attribute can
+# belong to more than one method (`.wait` belongs to Resume's crash-recovery
+# path, and to Transfer/RunProtocol if they ever call it directly).
+_SCOPED_ATTRS: dict[str, frozenset[str]] = {
+    "pause": frozenset({"Pause"}),
+    "resume": frozenset({"Resume"}),
+    "abort": frozenset({"Abort"}),
+    "wait": frozenset({"Resume", "Transfer", "RunProtocol"}),
+}
+
+
+def _adapter_invariant_violations(tree: ast.Module) -> list[str]:
+    """Pure, assertion-free version of the adapter's safety invariants
+    (D-17): returns one human-readable violation message per broken rule, or
+    an empty list when `tree` is clean. Never raises -- that is what lets
+    `_plant`'s deliberately-broken copies be checked without failing the
+    test that plants them. Run against the real tools/fast/server.py (must
+    return []) and against planted copies (must report the planted
+    mistake), so the checker is shown to depend on content in both
+    directions (T-01-20)."""
+    violations: list[str] = []
+    function_defs = {
+        node.name: node for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef)
+    }
+
+    # A rename or deletion of any owning/scoped method must not silently
+    # disable the rule that depends on it.
+    required_functions: set[str] = set()
+    for owners in _SCOPED_ATTRS.values():
+        required_functions |= owners
+    for name in sorted(required_functions):
+        if name not in function_defs:
+            violations.append(f"{name}() is missing from the tree")
+
+    # No plain `import fast_mcp...`; ImportFrom restricted to the allowed
+    # modules, with an exact-name allowlist for a few of them.
+    allowed_modules = {
+        "fast_mcp.composition", "fast_mcp.service", "fast_mcp.results",
+        "fast_mcp.run_control", "fast_mcp.model", "fast_mcp.authoring",
+        "fast_mcp.transport",
+    }
+    exact_names = {
+        "fast_mcp.model": {"Protocol"},
+        "fast_mcp.authoring": {"_TIP_REUSE_MODES"},
+        "fast_mcp.transport": {"InstrumentHTTPError"},
+    }
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            if module == "fast_mcp" or module.startswith("fast_mcp."):
+                if module not in allowed_modules:
+                    violations.append(
+                        f"import from disallowed fast_mcp module {module} "
+                        f"at line {node.lineno}")
+                elif module in exact_names:
+                    names = {alias.name for alias in node.names}
+                    if names != exact_names[module]:
+                        violations.append(
+                            f"{module} imports {sorted(names)} at line {node.lineno}, "
+                            f"expected {sorted(exact_names[module])}")
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "fast_mcp" or alias.name.startswith("fast_mcp."):
+                    violations.append(
+                        f"plain import of {alias.name} at line {node.lineno}")
+
+    # The adapter obtains its FastService only through open_service -- never
+    # by constructing FastService/InstrumentSession/RestInstrumentClient
+    # directly.
+    banned_calls = {"FastService", "InstrumentSession", "RestInstrumentClient"}
+    open_service_called = False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            if node.func.id in banned_calls:
+                violations.append(
+                    f"direct construction of {node.func.id} at line {node.lineno}")
+            if node.func.id == "open_service":
+                open_service_called = True
+    if not open_service_called:
+        violations.append("open_service must be called at least once")
+
+    # Attributes the adapter must never touch at all, scoped attributes
+    # confined to their owning method(s) (D-15), and httpx limited to
+    # HTTPError.
+    banned_attrs = {
+        "verify_deck_layout", "active_tray",
+        "plate_definitions", "dispense_report", "start_run",
+    }
+    allowed_nodes: dict[str, set[int]] = {}
+    for attr, owners in _SCOPED_ATTRS.items():
+        ids: set[int] = set()
+        for owner in owners:
+            fn = function_defs.get(owner)
+            if fn is not None:
+                ids |= {id(n) for n in ast.walk(fn)}
+        allowed_nodes[attr] = ids
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute):
+            if node.attr in banned_attrs:
+                violations.append(f".{node.attr} at line {node.lineno} is banned")
+            if node.attr in _SCOPED_ATTRS:
+                if id(node) not in allowed_nodes[node.attr]:
+                    owners_text = "/".join(sorted(_SCOPED_ATTRS[node.attr]))
+                    violations.append(
+                        f".{node.attr} at line {node.lineno} is outside {owners_text}()")
+            if isinstance(node.value, ast.Name) and node.value.id == "httpx":
+                if node.attr != "HTTPError":
+                    violations.append(
+                        f"httpx.{node.attr} at line {node.lineno} is not HTTPError")
+
+    # No raw :5003 or REST path literal anywhere in the module.
+    banned_substrings = (":5003", "/manualoperation", "/protocol/", "/sim/")
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            for substring in banned_substrings:
+                if substring in node.value:
+                    violations.append(
+                        f"string constant at line {node.lineno} contains "
+                        f"banned substring {substring!r}")
+
+    return violations
+
+
+def _plant(tree: ast.Module, function: Optional[str], statement: str) -> ast.Module:
+    """Returns a deep copy of `tree` with `statement` (parsed as Python
+    source) inserted either at the top of the module body (`function` is
+    None) or as the first statement(s) of the FunctionDef named `function`,
+    after its docstring when it has one. Used to prove each invariant rule
+    actually depends on the code it is supposed to check (D-17): a planted
+    violation must be reported by `_adapter_invariant_violations`, and a
+    planted allowed call must not be."""
+    planted = copy.deepcopy(tree)
+    new_statements = ast.parse(statement).body
+    if function is None:
+        planted.body = new_statements + planted.body
+    else:
+        target: Optional[ast.FunctionDef] = None
+        for node in ast.walk(planted):
+            if isinstance(node, ast.FunctionDef) and node.name == function:
+                target = node
+                break
+        if target is None:
+            raise ValueError(f"no such function: {function}")
+        insert_at = 0
+        if (target.body and isinstance(target.body[0], ast.Expr)
+                and isinstance(target.body[0].value, ast.Constant)
+                and isinstance(target.body[0].value.value, str)):
+            insert_at = 1
+        target.body[insert_at:insert_at] = new_statements
+    ast.fix_missing_locations(planted)
+    return planted
+
+
 class TestAdapterInvariant(unittest.TestCase):
     """The adapter's core-only, open_service-only, no-abort, no-passthrough
     shape, held mechanically (mirrors fast_mcp/tests/test_service.py's
-    test_adapter_server_is_pure style for the MCP entry)."""
+    test_adapter_server_is_pure style for the MCP entry). The checker itself
+    (`_adapter_invariant_violations`) is a reusable, assertion-free function;
+    the planted-violation tests below prove it actually depends on the code
+    it checks, in both directions (D-17, T-01-20)."""
+
+    def setUp(self) -> None:
+        server_path = Path(__file__).resolve().parents[1] / "fast" / "server.py"
+        self.tree = ast.parse(server_path.read_text())
 
     def test_adapter_obtains_service_only_through_open_service(self) -> None:
-        server_path = Path(__file__).resolve().parents[1] / "fast" / "server.py"
-        tree = ast.parse(server_path.read_text())
+        self.assertEqual(_adapter_invariant_violations(self.tree), [])
 
-        allowed_modules = {
-            "fast_mcp.composition", "fast_mcp.service", "fast_mcp.results",
-            "fast_mcp.run_control", "fast_mcp.model", "fast_mcp.authoring",
-            "fast_mcp.transport",
-        }
-        exact_names = {
-            "fast_mcp.model": {"Protocol"},
-            "fast_mcp.authoring": {"_TIP_REUSE_MODES"},
-            "fast_mcp.transport": {"InstrumentHTTPError"},
-        }
+    def test_planted_scoped_call_violations_are_caught(self) -> None:
+        cases = [
+            ("Abort", "service.pause(hard=False)", ".pause"),
+            ("Transfer", "service.abort(return_liquid=False)", ".abort"),
+            ("Pause", "service.resume(is_tip_broken=False)", ".resume"),
+            ("ScanTips", "service.wait(None)", ".wait"),
+            (None, "def _auto_pause(service):\n    service.pause(hard=False)", ".pause"),
+        ]
+        for function, statement, fragment in cases:
+            with self.subTest(function=function, statement=statement):
+                planted = _plant(self.tree, function, statement)
+                violations = _adapter_invariant_violations(planted)
+                self.assertTrue(violations, f"expected a violation for {statement!r}")
+                self.assertTrue(
+                    any(fragment in v for v in violations),
+                    f"no violation mentions {fragment!r}: {violations}")
 
-        for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom):
-                module = node.module or ""
-                if module == "fast_mcp" or module.startswith("fast_mcp."):
-                    self.assertIn(module, allowed_modules, module)
-                    if module in exact_names:
-                        names = {alias.name for alias in node.names}
-                        self.assertEqual(names, exact_names[module], module)
-            if isinstance(node, ast.Import):
-                for alias in node.names:
-                    self.assertFalse(
-                        alias.name == "fast_mcp" or alias.name.startswith("fast_mcp."),
-                        alias.name)
+    def test_planted_existing_invariant_violations_are_caught(self) -> None:
+        cases = [
+            (None, "from fast_mcp.mcp import server", "fast_mcp.mcp"),
+            (None, '_RAW = "http://h:5003/"', ":5003"),
+            ("_configure", "FastService(None)", "FastService"),
+            ("Transfer", "self.service.verify_deck_layout()", "verify_deck_layout"),
+        ]
+        for function, statement, fragment in cases:
+            with self.subTest(function=function, statement=statement):
+                planted = _plant(self.tree, function, statement)
+                violations = _adapter_invariant_violations(planted)
+                self.assertTrue(violations, f"expected a violation for {statement!r}")
+                self.assertTrue(
+                    any(fragment in v for v in violations),
+                    f"no violation mentions {fragment!r}: {violations}")
 
-        banned_calls = {"FastService", "InstrumentSession", "RestInstrumentClient"}
-        open_service_called = False
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
-                self.assertNotIn(node.func.id, banned_calls, node.func.id)
-                if node.func.id == "open_service":
-                    open_service_called = True
-        self.assertTrue(open_service_called, "open_service must be called at least once")
-
-        banned_attrs = {
-            "verify_deck_layout", "active_tray",
-            "plate_definitions", "dispense_report", "start_run",
-        }
-        # Dual-frontend section 11 #1 (amended): pause/abort/resume/wait exist
-        # only inside the operator's own Pause/Abort/Resume commands, so the
-        # adapter can never pause, abort or resume on its own initiative.
-        scoped_attrs = {
-            "pause": "Pause", "abort": "Abort", "resume": "Resume", "wait": "Resume",
-        }
-        recovery_defs = {
-            node.name: node for node in ast.walk(tree)
-            if isinstance(node, ast.FunctionDef) and node.name in ("Pause", "Abort", "Resume")
-        }
-        self.assertEqual(set(recovery_defs), {"Pause", "Abort", "Resume"})
-        allowed_nodes = {
-            attr: {id(n) for n in ast.walk(recovery_defs[owner])}
-            for attr, owner in scoped_attrs.items()
-        }
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Attribute):
-                self.assertNotIn(node.attr, banned_attrs, node.attr)
-                if node.attr in scoped_attrs:
-                    self.assertTrue(
-                        id(node) in allowed_nodes[node.attr],
-                        f".{node.attr} at line {node.lineno} is outside "
-                        f"{scoped_attrs[node.attr]}()")
-                if isinstance(node.value, ast.Name) and node.value.id == "httpx":
-                    self.assertEqual(node.attr, "HTTPError", node.attr)
-
-        banned_substrings = (":5003", "/manualoperation", "/protocol/", "/sim/")
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Constant) and isinstance(node.value, str):
-                for substring in banned_substrings:
-                    self.assertNotIn(substring, node.value, (substring, node.value))
+    def test_planted_allowed_calls_add_no_violation(self) -> None:
+        for function, statement in [
+            ("Pause", "service.pause(hard=False)"),
+            ("Transfer", "service.wait(None)"),
+        ]:
+            with self.subTest(function=function, statement=statement):
+                planted = _plant(self.tree, function, statement)
+                self.assertEqual(_adapter_invariant_violations(planted), [])
 
 
 class TestRequirementsPin(unittest.TestCase):
