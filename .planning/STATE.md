@@ -4,17 +4,17 @@ milestone: v1
 milestone_name: F.A.S.T. Live Run Control (adapter & rollout)
 current_phase: 1
 current_phase_name: Adapter Control Path & Run State
-status: executing
-stopped_at: Completed 01-04-PLAN.md
-last_updated: "2026-10-12T22:23:03.739Z"
+status: verifying
+stopped_at: Completed 01-05-PLAN.md
+last_updated: "2026-10-12T22:35:23.074Z"
 last_activity: 2026-10-13
 last_activity_desc: Phase 1 execution started
-state_head: edcf241d9ce4f1c627cf22b26954b2d216972591
+state_head: 471e8557ed8ba5e339330df5e57587c9ff24dd03
 progress:
   total_phases: 3
   completed_phases: 0
   total_plans: 5
-  completed_plans: 4
+  completed_plans: 5
   percent: 0
 ---
 
@@ -32,7 +32,7 @@ is doing and recover it themselves; no adapter code path pauses, resumes or abor
 
 Phase: 1 (Adapter Control Path & Run State) — EXECUTING
 Plan: 5 of 5
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-10-13 — Phase 1 execution started
 
 Progress: [░░░░░░░░░░] 0%
@@ -63,6 +63,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 01 P02 | 15min | 2 tasks | 2 files |
 | Phase 01 P03 | 26min | 2 tasks | 3 files |
 | Phase 01 P04 | 10 min | 2 tasks | 1 files |
+| Phase 01 P05 | 25min | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -85,6 +86,9 @@ Recent decisions affecting current work:
 - [Phase 01]: D-13: _PauseInfoLike declared as t.Protocol (import typing as t) to avoid colliding with the already-imported fast_mcp.model.Protocol; _record_pause accepts any to_dict()-able object, tested with a stub, no PauseInfo/ResumeMarker import
 - [Phase 01]: D-15: .wait scoped to Resume/Transfer/RunProtocol per spec, even though only Resume calls it today
 - [Phase 01]: D-16/D-14/D-08: no production code changes needed; server.py already satisfied every new rule, confirmed before any planted-violation test was written
+- [Phase 01]: D-18: no new production code needed for simulated Pause/Resume/Abort to check arguments then succeed; existing _dispatchCommand/_check_args/base_server simulated branch already satisfied it
+- [Phase 01]: D-19/D-20: _build_run_state's simulated branch derives state from pause/_active_runs directly (never _run_record["state"]), so a cleared pause can never surface as stale paused
+- [Phase 01]: D-20: simulate_pause is an in-process, simulated-mode-only hook with no gRPC surface; _PAUSE_CLEARING_COMMANDS={Resume,Abort} clears a hooked pause only on a SUCCESS reply
 
 ### Pending Todos
 
@@ -109,6 +113,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-12T22:23:03.716Z
-Stopped at: Completed 01-04-PLAN.md
+Last session: 2026-10-12T22:35:23.050Z
+Stopped at: Completed 01-05-PLAN.md
 Resume file: None

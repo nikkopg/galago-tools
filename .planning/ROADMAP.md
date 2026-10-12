@@ -44,7 +44,7 @@ acts without the operator.
      check exists in the adapter.
   5. In simulated mode, control commands return SUCCESS after argument checks and a test hook drives
      `run_state` to paused.
-**Plans**: 4/5 plans executed (sequential waves 1-5; every plan edits `tools/fast/server.py` or `tools/tests/fast_test.py`)
+**Plans**: 5/5 plans executed (sequential waves 1-5; every plan edits `tools/fast/server.py` or `tools/tests/fast_test.py`)
 
 Plans:
 **Wave 1**
@@ -60,7 +60,7 @@ Plans:
 - [x] 01-04-PLAN.md — reusable AST invariant: scoped pause/resume/abort/wait, record-only callbacks, status-only reader, planted violations (ADP-07/09)
 
 **Wave 5** *(blocked on Wave 4 completion)*
-- [ ] 01-05-PLAN.md — simulated control commands, simulated run_state, `simulate_pause` hook (ADP-10, ADP-06 simulated)
+- [x] 01-05-PLAN.md — simulated control commands, simulated run_state, `simulate_pause` hook (ADP-10, ADP-06 simulated)
 
 **Research flags**: build the failing real-mode test before the `ExecuteCommand` override
 (research/SUMMARY.md, ARCHITECTURE.md); the override must keep the tool-type check and
