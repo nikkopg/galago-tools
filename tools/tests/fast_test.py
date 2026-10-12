@@ -71,14 +71,17 @@ except ModuleNotFoundError as exc:
             "is the authoritative gate") from exc
     raise
 
-from tools.grpc_interfaces import controller_pb2, fast_pb2, tool_base_pb2
+from tools.grpc_interfaces import controller_pb2, fast_pb2, tool_base_pb2, toolbox_pb2
 from tools.grpc_interfaces.tool_base_pb2 import (
     BUSY,
+    DRIVER_ERROR,
     ERROR_FROM_TOOL,
     INVALID_ARGUMENTS,
     NOT_READY,
     READY,
     SUCCESS,
+    UNRECOGNIZED_COMMAND,
+    WRONG_TOOL,
 )
 from tools.grpc_interfaces.tool_driver_pb2_grpc import (
     ToolDriverStub,
@@ -392,6 +395,214 @@ class TestControlCommandsOverGrpc(unittest.TestCase):
         self.assertEqual(result["transfer"].response, SUCCESS)
         self.service.run_transfer.assert_called_once()
         self.assertEqual(self._health().status, READY)
+
+    def test_blank_or_unclear_decisions_are_invalid_arguments_through_the_control_path(
+            self) -> None:
+        cases: list[tuple[str, Any, str]] = [
+            ("Abort", fast_pb2.Command.Abort(), "return_liquid"),
+            ("Abort", fast_pb2.Command.Abort(return_liquid=""), "return_liquid"),
+            ("Abort", fast_pb2.Command.Abort(return_liquid="   "), "return_liquid"),
+            ("Abort", fast_pb2.Command.Abort(return_liquid="false"), "return_liquid"),
+            ("Abort", fast_pb2.Command.Abort(return_liquid="y"), "return_liquid"),
+            ("Abort", fast_pb2.Command.Abort(return_liquid="1"), "return_liquid"),
+            ("Resume", fast_pb2.Command.Resume(), "is_tip_broken"),
+            ("Resume", fast_pb2.Command.Resume(is_tip_broken=""), "is_tip_broken"),
+            ("Resume", fast_pb2.Command.Resume(is_tip_broken="maybe"), "is_tip_broken"),
+            ("Resume", fast_pb2.Command.Resume(is_tip_broken="true"), "is_tip_broken"),
+            ("Resume", fast_pb2.Command.Resume(is_tip_broken="yes please"), "is_tip_broken"),
+        ]
+        for name, command, field_name in cases:
+            field_key = name.lower()
+            value = getattr(command, field_name)
+            with self.subTest(command=name, value=value):
+                reply = self.stub.ExecuteCommand(self._fast(**{field_key: command}))
+                self.assertEqual(reply.response, INVALID_ARGUMENTS)
+                self.assertIn(f"{field_name} must be 'yes' or 'no'", reply.error_message)
+                missing = MessageToDict(reply.meta_data)["missing"]
+                self.assertEqual(len(missing), 1)
+                if not command.HasField(field_name):
+                    self.assertIn("got 'unset'", missing[0])
+        self.service.abort.assert_not_called()
+        self.service.resume.assert_not_called()
+        self.assertEqual(self._health().status, READY)
+
+    def test_blank_decisions_mid_run_are_invalid_arguments_and_leave_the_tool_busy(
+            self) -> None:
+        release, thread, result = self._start_blocked_transfer()
+        self.assertEqual(self._health().status, BUSY)
+
+        reply = self.stub.ExecuteCommand(self._fast(abort=fast_pb2.Command.Abort()))
+        self.assertEqual(reply.response, INVALID_ARGUMENTS)
+        reply = self.stub.ExecuteCommand(
+            self._fast(resume=fast_pb2.Command.Resume(is_tip_broken="")))
+        self.assertEqual(reply.response, INVALID_ARGUMENTS)
+
+        self.service.abort.assert_not_called()
+        self.service.resume.assert_not_called()
+        self.assertEqual(self._health().status, BUSY)
+
+        release.set()
+        thread.join(timeout=10)
+        self.assertEqual(result["transfer"].response, SUCCESS)
+
+    def test_trimmed_case_insensitive_yes_no_is_accepted(self) -> None:
+        self.service.abort.return_value = {"errorCode": 0}
+        self.service.resume.return_value = {"errorCode": 0}
+        self.service.wait.return_value = Ran(
+            outcome=RunOutcome(state="idle", done=True, percent=100))
+
+        reply = self.stub.ExecuteCommand(
+            self._fast(abort=fast_pb2.Command.Abort(return_liquid=" YES ")))
+        self.assertEqual(reply.response, SUCCESS, reply.error_message)
+        self.service.abort.assert_called_once_with(return_liquid=True)
+
+        reply = self.stub.ExecuteCommand(
+            self._fast(resume=fast_pb2.Command.Resume(is_tip_broken="No")))
+        self.assertEqual(reply.response, SUCCESS, reply.error_message)
+        self.service.resume.assert_called_once_with(is_tip_broken=False)
+
+    def test_wrong_tool_type_never_takes_the_control_path(self) -> None:
+        reply = self.stub.ExecuteCommand(
+            tool_base_pb2.Command(toolbox=toolbox_pb2.Command()))
+        self.assertEqual(reply.response, WRONG_TOOL)
+
+        reply = self.stub.ExecuteCommand(tool_base_pb2.Command(fast=fast_pb2.Command()))
+        self.assertEqual(reply.response, UNRECOGNIZED_COMMAND)
+
+        self.assertEqual(self.service.method_calls, [])
+
+    def test_non_control_commands_still_take_the_base_server_gate_mid_run(self) -> None:
+        release, thread, result = self._start_blocked_transfer()
+        reply = self.stub.ExecuteCommand(
+            self._fast(get_tip_status=fast_pb2.Command.GetTipStatus()))
+        self.assertEqual(reply.response, NOT_READY)
+        self.service.tip_status.assert_not_called()
+        self.assertEqual(self._health().status, BUSY)
+
+        release.set()
+        thread.join(timeout=10)
+        self.assertEqual(result["transfer"].response, SUCCESS)
+
+    def test_control_command_exception_is_driver_error_and_sets_last_error(self) -> None:
+        self.service.pause.side_effect = RuntimeError("boom")
+        reply = self.stub.ExecuteCommand(self._fast(pause=fast_pb2.Command.Pause()))
+        self.assertEqual(reply.response, DRIVER_ERROR)
+        self.assertEqual(reply.error_message, "boom")
+        self.assertEqual(self.server.last_error, "boom")
+        self.assertEqual(self._health().status, READY)
+
+    def test_control_commands_never_call_set_status(self) -> None:
+        self.service.pause.return_value = {"errorCode": 0}
+        self.service.resume.return_value = {"errorCode": 0}
+        self.service.abort.return_value = {"errorCode": 0}
+        self.service.wait.return_value = Ran(
+            outcome=RunOutcome(state="idle", done=True, percent=100))
+
+        with patch.object(self.server, "setStatus", wraps=self.server.setStatus) as spy:
+            reply = self.stub.ExecuteCommand(self._fast(pause=fast_pb2.Command.Pause()))
+            self.assertEqual(reply.response, SUCCESS, reply.error_message)
+            reply = self.stub.ExecuteCommand(
+                self._fast(resume=fast_pb2.Command.Resume(is_tip_broken="no")))
+            self.assertEqual(reply.response, SUCCESS, reply.error_message)
+            reply = self.stub.ExecuteCommand(
+                self._fast(abort=fast_pb2.Command.Abort(return_liquid="no")))
+            self.assertEqual(reply.response, SUCCESS, reply.error_message)
+            spy.assert_not_called()
+
+            self.service.tip_status.return_value = TipScan(tips={})
+            reply = self.stub.ExecuteCommand(
+                self._fast(get_tip_status=fast_pb2.Command.GetTipStatus()))
+            self.assertEqual(reply.response, SUCCESS, reply.error_message)
+            self.assertEqual(spy.call_count, 2)
+
+    def test_control_commands_never_check_instrument_state(self) -> None:
+        status_values: list[Any] = [
+            {"state": s, "percentProgress": 0, "remainingTime": 0, "done": False}
+            for s in ("idle", "running", "paused", "error")
+        ] + [{}]
+
+        for status_value in status_values:
+            with self.subTest(via="grpc", status=status_value):
+                self.service.reset_mock()
+                self.service.status.return_value = status_value
+                self.service.pause.return_value = {"errorCode": 0}
+                self.service.resume.return_value = {"errorCode": 0}
+                self.service.abort.return_value = {"errorCode": 0}
+                self.service.wait.return_value = Ran(
+                    outcome=RunOutcome(state="idle", done=True, percent=100))
+
+                self.stub.ExecuteCommand(self._fast(pause=fast_pb2.Command.Pause()))
+                self.stub.ExecuteCommand(
+                    self._fast(resume=fast_pb2.Command.Resume(is_tip_broken="no")))
+                self.stub.ExecuteCommand(
+                    self._fast(abort=fast_pb2.Command.Abort(return_liquid="no")))
+
+                self.assertEqual(self.service.pause.call_count, 1)
+                self.assertEqual(self.service.resume.call_count, 1)
+                self.assertEqual(self.service.abort.call_count, 1)
+                self.assertEqual(self.service.status.call_count, 0)
+
+        with self.subTest(via="grpc", status="connect_error"):
+            self.service.reset_mock()
+            self.service.status.side_effect = httpx.ConnectError("x")
+            self.service.pause.return_value = {"errorCode": 0}
+            self.service.resume.return_value = {"errorCode": 0}
+            self.service.abort.return_value = {"errorCode": 0}
+            self.service.wait.return_value = Ran(
+                outcome=RunOutcome(state="idle", done=True, percent=100))
+
+            self.stub.ExecuteCommand(self._fast(pause=fast_pb2.Command.Pause()))
+            self.stub.ExecuteCommand(
+                self._fast(resume=fast_pb2.Command.Resume(is_tip_broken="no")))
+            self.stub.ExecuteCommand(
+                self._fast(abort=fast_pb2.Command.Abort(return_liquid="no")))
+
+            self.assertEqual(self.service.pause.call_count, 1)
+            self.assertEqual(self.service.resume.call_count, 1)
+            self.assertEqual(self.service.abort.call_count, 1)
+            self.assertEqual(self.service.status.call_count, 0)
+
+        # Repeat the same matrix with direct method calls on self.server --
+        # these need no gRPC.
+        direct_values: list[Any] = list(status_values) + ["connect_error"]
+        for status_value in direct_values:
+            with self.subTest(via="direct", status=status_value):
+                self.service.reset_mock()
+                if status_value == "connect_error":
+                    self.service.status.side_effect = httpx.ConnectError("x")
+                else:
+                    self.service.status.return_value = status_value
+                self.service.pause.return_value = {"errorCode": 0}
+                self.service.resume.return_value = {"errorCode": 0}
+                self.service.abort.return_value = {"errorCode": 0}
+                self.service.wait.return_value = Ran(
+                    outcome=RunOutcome(state="idle", done=True, percent=100))
+
+                self.server.Pause(fast_pb2.Command.Pause())
+                self.server.Resume(fast_pb2.Command.Resume(is_tip_broken="no"))
+                self.server.Abort(fast_pb2.Command.Abort(return_liquid="no"))
+
+                self.assertEqual(self.service.pause.call_count, 1)
+                self.assertEqual(self.service.resume.call_count, 1)
+                self.assertEqual(self.service.abort.call_count, 1)
+                self.assertEqual(self.service.status.call_count, 0)
+
+    def test_control_commands_reach_the_service_in_send_order(self) -> None:
+        self.service.pause.return_value = {"errorCode": 0}
+        self.service.abort.return_value = {"errorCode": 0}
+        self.service.resume.return_value = {"errorCode": 0}
+        self.service.wait.return_value = Ran(
+            outcome=RunOutcome(state="idle", done=True, percent=100))
+
+        self.stub.ExecuteCommand(self._fast(pause=fast_pb2.Command.Pause()))
+        self.stub.ExecuteCommand(
+            self._fast(abort=fast_pb2.Command.Abort(return_liquid="no")))
+        self.stub.ExecuteCommand(
+            self._fast(resume=fast_pb2.Command.Resume(is_tip_broken="no")))
+
+        self.assertEqual(
+            [c[0] for c in self.service.method_calls],
+            ["pause", "abort", "resume", "wait"])
 
 
 class TestTransferMapping(unittest.TestCase):
