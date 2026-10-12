@@ -5,16 +5,16 @@ milestone_name: F.A.S.T. Live Run Control (adapter & rollout)
 current_phase: 1
 current_phase_name: Adapter Control Path & Run State
 status: executing
-stopped_at: Phase 1 context gathered
-last_updated: "2026-10-12T21:34:53.725Z"
-last_activity: 2026-10-12
-last_activity_desc: Project initialized (Galago planning moved here from fast-mcp)
-state_head: 9c27896be3e7b0527085be128070c5bdb4bc8fba
+stopped_at: Completed 01-01-PLAN.md
+last_updated: "2026-10-12T21:48:35.453Z"
+last_activity: 2026-10-13
+last_activity_desc: Phase 1 execution started
+state_head: bd41ae0e1301649c84a13050af5f5fd939c213f8
 progress:
   total_phases: 3
   completed_phases: 0
   total_plans: 5
-  completed_plans: 0
+  completed_plans: 1
   percent: 0
 ---
 
@@ -30,10 +30,10 @@ is doing and recover it themselves; no adapter code path pauses, resumes or abor
 
 ## Current Position
 
-Phase: 1 (Adapter Control Path & Run State) — READY TO EXECUTE
-Plan: 0 of 0 in current phase
+Phase: 1 (Adapter Control Path & Run State) — EXECUTING
+Plan: 2 of 5
 Status: Ready to execute
-Last activity: 2026-10-12 — Project initialized (Galago planning moved here from fast-mcp)
+Last activity: 2026-10-13 — Phase 1 execution started
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -55,6 +55,11 @@ Progress: [░░░░░░░░░░] 0%
 - Trend: -
 
 *Updated after each plan completion*
+**Per-Plan Metrics:**
+
+| Plan | Duration | Tasks | Files |
+|------|----------|-------|-------|
+| Phase 01 P01 | 45min | 3 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -68,6 +73,9 @@ Recent decisions affecting current work:
   approved in fast-mcp were re-split into ADP/LIVE (here) and QUE/UI (galago-core).
 - [Init]: The fast-mcp core prerequisites already exist (`b30b38d`), so the re-pin and
   wait-through-pauses wiring is its own phase here (Phase 2) rather than waiting on another repo.
+- [Phase 01]: D-05: Pause {} has no fields (soft-only); FastServer.Pause() calls service.pause(hard=False) explicitly.
+- [Phase 01]: D-01/D-02/D-03: FastServer.ExecuteCommand override bypasses base_server's isReady/setStatus for pause/resume/abort only, dispatching through _dispatchCommand so _check_args still runs.
+- [Phase 01]: D-06/D-07: Pause and Abort never take _motion_lock; Resume branches on a non-blocking acquire into crash-recovery (wait under lock) vs in-flight (no wait, no lock) paths.
 
 ### Pending Todos
 
@@ -92,6 +100,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-12T11:49:56.941Z
-Stopped at: Phase 1 context gathered
-Resume file: .planning/phases/01-adapter-control-path-run-state/01-CONTEXT.md
+Last session: 2026-10-12T21:48:35.432Z
+Stopped at: Completed 01-01-PLAN.md
+Resume file: None
