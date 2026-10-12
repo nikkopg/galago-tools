@@ -1894,6 +1894,27 @@ _SCOPED_ATTRS: dict[str, frozenset[str]] = {
     "abort": frozenset({"Abort"}),
     "wait": frozenset({"Resume", "Transfer", "RunProtocol"}),
 }
+# D-16: functions that may only record observed state -- no access to
+# .service, and no call naming a control or motion method. Plan 01-05 adds
+# the simulated hook's two functions here.
+_RECORD_ONLY_FUNCTIONS = frozenset({"_record_pause", "_log_progress"})
+# D-14: the only functions allowed to call service.status().
+_STATUS_READERS = frozenset({"_get_status", "_build_run_state"})
+# D-08: functions on the control path, which must never compare against an
+# instrument-state string.
+_CONTROL_PATH_FUNCTIONS = frozenset(
+    {"Pause", "Resume", "Abort", "ExecuteCommand", "_dispatchCommand"})
+# Every service method and adapter method name that moves or queries the
+# instrument -- used by the record-only and status-only-reader rules below.
+_COMMANDING_NAMES = frozenset({
+    "pause", "resume", "abort", "wait", "status",
+    "Pause", "Resume", "Abort", "ExecuteCommand", "_dispatchCommand",
+    "Transfer", "RunProtocol", "ScanTips", "EjectTray",
+    "run_transfer", "run_protocol", "scan_tips", "eject_tray",
+})
+# The instrument-state strings a control-path function must never compare
+# against (D-08, ADP-09).
+_INSTRUMENT_STATES = frozenset({"idle", "running", "paused", "error", "unknown"})
 
 
 def _adapter_invariant_violations(tree: ast.Module) -> list[str]:
@@ -1916,6 +1937,7 @@ def _adapter_invariant_violations(tree: ast.Module) -> list[str]:
     required_functions: set[str] = set()
     for owners in _SCOPED_ATTRS.values():
         required_functions |= owners
+    required_functions |= _RECORD_ONLY_FUNCTIONS | _STATUS_READERS | _CONTROL_PATH_FUNCTIONS
     for name in sorted(required_functions):
         if name not in function_defs:
             violations.append(f"{name}() is missing from the tree")
@@ -2006,6 +2028,71 @@ def _adapter_invariant_violations(tree: ast.Module) -> list[str]:
                         f"string constant at line {node.lineno} contains "
                         f"banned substring {substring!r}")
 
+    # D-16: the pause recorder and progress callback may only record state --
+    # no access to .service, and no call naming a control or motion method.
+    for name in sorted(_RECORD_ONLY_FUNCTIONS):
+        fn = function_defs.get(name)
+        if fn is None:
+            continue  # already reported above
+        for node in ast.walk(fn):
+            if isinstance(node, ast.Attribute) and node.attr == "service":
+                violations.append(f"{name}() touches .service at line {node.lineno}")
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr in _COMMANDING_NAMES):
+                violations.append(
+                    f"{name}() calls .{node.func.attr}() at line {node.lineno}, "
+                    "a control or motion method")
+
+    # D-14: _build_run_state may call only .status() on the service, and no
+    # other control or motion method anywhere in its body.
+    build_run_state = function_defs.get("_build_run_state")
+    if build_run_state is not None:
+        for node in ast.walk(build_run_state):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+                root = node.func.value
+                service_rooted = (
+                    (isinstance(root, ast.Name) and root.id == "service")
+                    or (isinstance(root, ast.Attribute) and root.attr == "service"))
+                if service_rooted and node.func.attr != "status":
+                    violations.append(
+                        f"_build_run_state() calls .{node.func.attr}() on the service "
+                        f"at line {node.lineno}, only .status() is allowed")
+                if node.func.attr in (_COMMANDING_NAMES - {"status"}):
+                    violations.append(
+                        f"_build_run_state() calls .{node.func.attr}() at line "
+                        f"{node.lineno}, a control or motion method")
+
+    # D-08, ADP-09: status() is read-only and confined to the status readers.
+    status_reader_ids: set[int] = set()
+    for name in _STATUS_READERS:
+        fn = function_defs.get(name)
+        if fn is not None:
+            status_reader_ids |= {id(n) for n in ast.walk(fn)}
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "status"):
+            if id(node) not in status_reader_ids:
+                readers_text = "/".join(sorted(_STATUS_READERS))
+                violations.append(
+                    f".status() call at line {node.lineno} is outside {readers_text}()")
+
+    # D-08: no control-path function may compare against an instrument-state
+    # string. _log_progress's `state == "running"` bookkeeping is deliberately
+    # not covered -- it observes, it does not gate a command.
+    for name in sorted(_CONTROL_PATH_FUNCTIONS):
+        fn = function_defs.get(name)
+        if fn is None:
+            continue  # already reported above
+        for node in ast.walk(fn):
+            if isinstance(node, ast.Compare):
+                for candidate in (node.left, *node.comparators):
+                    if (isinstance(candidate, ast.Constant)
+                            and isinstance(candidate.value, str)
+                            and candidate.value in _INSTRUMENT_STATES):
+                        violations.append(
+                            f"{name}() compares against instrument state "
+                            f"{candidate.value!r} at line {node.lineno}")
+
     return violations
 
 
@@ -2091,6 +2178,33 @@ class TestAdapterInvariant(unittest.TestCase):
         for function, statement in [
             ("Pause", "service.pause(hard=False)"),
             ("Transfer", "service.wait(None)"),
+        ]:
+            with self.subTest(function=function, statement=statement):
+                planted = _plant(self.tree, function, statement)
+                self.assertEqual(_adapter_invariant_violations(planted), [])
+
+    def test_planted_record_and_state_violations_are_caught(self) -> None:
+        cases = [
+            ("_record_pause", "self.service.pause(hard=False)", "_record_pause"),
+            ("_log_progress", "self.service.status()", "_log_progress"),
+            ("_log_progress", "self._dispatchCommand(None)", "_log_progress"),
+            ("_build_run_state", "self.service.abort(return_liquid=False)", "_build_run_state"),
+            ("Abort", "service.status()", ".status"),
+            ("Resume", "if state == \"paused\":\n    pass", "Resume"),
+        ]
+        for function, statement, fragment in cases:
+            with self.subTest(function=function, statement=statement):
+                planted = _plant(self.tree, function, statement)
+                violations = _adapter_invariant_violations(planted)
+                self.assertTrue(violations, f"expected a violation for {statement!r}")
+                self.assertTrue(
+                    any(fragment in v for v in violations),
+                    f"no violation mentions {fragment!r}: {violations}")
+
+    def test_planted_allowed_record_and_reader_calls_add_no_violation(self) -> None:
+        for function, statement in [
+            ("_log_progress", 'logging.info("x")'),
+            ("_build_run_state", "service.status()"),
         ]:
             with self.subTest(function=function, statement=statement):
                 planted = _plant(self.tree, function, statement)
