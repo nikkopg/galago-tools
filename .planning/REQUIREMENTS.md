@@ -18,9 +18,9 @@ requirement below names the original ID(s) it carries.
 - [x] **ADP-04**: With a run in flight, `Resume` returns once the instrument accepts it (the step's own wait reports the outcome); with no run in flight (crash recovery), `Resume` waits for the resumed run and reports its outcome — *RCTL-02, RCTL-07*
 - [x] **ADP-05**: `GetStatus` returns `StatusReply.run_state` (an additive optional `google.protobuf.Struct` on `tool_base.proto`) with state, percent and the current pause (`PauseInfo`) for the F.A.S.T.; other tool types leave it unset — *RSTATE-01*
 - [ ] **ADP-06**: Blank or unclear `is_tip_broken`/`return_liquid` are `INVALID_ARGUMENTS` on every path (real and simulated, `ExecuteCommand` override included); no decision is ever defaulted — *RSAFE-02*
-- [ ] **ADP-07**: The no-auto-abort invariant is extended: `.pause`/`.resume`/`.abort` appear only in the `Pause`/`Resume`/`Abort` methods, `.wait` only in the long-running commands and the crash-recovery `Resume`, `on_pause` only records state; a planted violation fails the check — *RSAFE-01*
+- [x] **ADP-07**: The no-auto-abort invariant is extended: `.pause`/`.resume`/`.abort` appear only in the `Pause`/`Resume`/`Abort` methods, `.wait` only in the long-running commands and the crash-recovery `Resume`, `on_pause` only records state; a planted violation fails the check — *RSAFE-01*
 - [x] **ADP-08**: A real-mode (not simulated) test shows `Pause`/`Resume`/`Abort` reaching the service through `ExecuteCommand` while a `Transfer` is blocked, with the tool still BUSY afterwards — *RSAFE-04*
-- [ ] **ADP-09**: The adapter adds no instrument-state check of its own; every state gate stays in the fast-mcp core — *RSAFE-03*
+- [x] **ADP-09**: The adapter adds no instrument-state check of its own; every state gate stays in the fast-mcp core — *RSAFE-03*
 - [ ] **ADP-10**: In simulated mode, control commands check their arguments and return SUCCESS, and a test hook drives `run_state` to paused (with a `PauseInfo`) so galago-core's prompt and controls can be exercised without hardware — *SIM-01*
 
 ### Live wiring and rollout (LIVE)
@@ -58,9 +58,9 @@ requirement below names the original ID(s) it carries.
 | ADP-04 | Phase 1 | Complete |
 | ADP-05 | Phase 1 | Complete |
 | ADP-06 | Phase 1 | Pending |
-| ADP-07 | Phase 1 | Pending |
+| ADP-07 | Phase 1 | Complete |
 | ADP-08 | Phase 1 | Complete |
-| ADP-09 | Phase 1 | Pending |
+| ADP-09 | Phase 1 | Complete |
 | ADP-10 | Phase 1 | Pending |
 | LIVE-01 | Phase 2 | Pending |
 | LIVE-02 | Phase 2 | Pending |

@@ -44,7 +44,7 @@ acts without the operator.
      check exists in the adapter.
   5. In simulated mode, control commands return SUCCESS after argument checks and a test hook drives
      `run_state` to paused.
-**Plans**: 3/5 plans executed (sequential waves 1-5; every plan edits `tools/fast/server.py` or `tools/tests/fast_test.py`)
+**Plans**: 4/5 plans executed (sequential waves 1-5; every plan edits `tools/fast/server.py` or `tools/tests/fast_test.py`)
 
 Plans:
 **Wave 1**
@@ -57,7 +57,7 @@ Plans:
 - [x] 01-03-PLAN.md — `StatusReply.run_state = 4`, run record, pause recorder, fail-safe health `GetStatus` (ADP-05)
 
 **Wave 4** *(blocked on Wave 3 completion)*
-- [ ] 01-04-PLAN.md — reusable AST invariant: scoped pause/resume/abort/wait, record-only callbacks, status-only reader, planted violations (ADP-07/09)
+- [x] 01-04-PLAN.md — reusable AST invariant: scoped pause/resume/abort/wait, record-only callbacks, status-only reader, planted violations (ADP-07/09)
 
 **Wave 5** *(blocked on Wave 4 completion)*
 - [ ] 01-05-PLAN.md — simulated control commands, simulated run_state, `simulate_pause` hook (ADP-10, ADP-06 simulated)

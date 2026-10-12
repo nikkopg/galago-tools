@@ -5,16 +5,16 @@ milestone_name: F.A.S.T. Live Run Control (adapter & rollout)
 current_phase: 1
 current_phase_name: Adapter Control Path & Run State
 status: executing
-stopped_at: Completed 01-03-PLAN.md
-last_updated: "2026-10-12T22:11:00.000Z"
+stopped_at: Completed 01-04-PLAN.md
+last_updated: "2026-10-12T22:23:03.739Z"
 last_activity: 2026-10-13
 last_activity_desc: Phase 1 execution started
-state_head: f2dcf26639a6ef72e828b0b7c9af48df9c19aa53
+state_head: edcf241d9ce4f1c627cf22b26954b2d216972591
 progress:
   total_phases: 3
   completed_phases: 0
   total_plans: 5
-  completed_plans: 3
+  completed_plans: 4
   percent: 0
 ---
 
@@ -31,7 +31,7 @@ is doing and recover it themselves; no adapter code path pauses, resumes or abor
 ## Current Position
 
 Phase: 1 (Adapter Control Path & Run State) — EXECUTING
-Plan: 4 of 5
+Plan: 5 of 5
 Status: Ready to execute
 Last activity: 2026-10-13 — Phase 1 execution started
 
@@ -62,6 +62,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 01 P01 | 45min | 3 tasks | 3 files |
 | Phase 01 P02 | 15min | 2 tasks | 2 files |
 | Phase 01 P03 | 26min | 2 tasks | 3 files |
+| Phase 01 P04 | 10 min | 2 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -82,6 +83,8 @@ Recent decisions affecting current work:
 - [Phase 01]: No implementation bugs found in Pause/Abort/Resume for Plan 01-02; all must_haves were already satisfied by Plan 01-01, so this plan is purely additive test coverage
 - [Phase 01]: D-09/D-12: StatusReply.run_state = 4 sources from the adapter's own record (under a dedicated _run_state_lock, never _motion_lock) while a Transfer/RunProtocol is in flight, and from a mapped service.status() otherwise; any read-path failure collapses to {state: unknown} so the heartbeat never fails
 - [Phase 01]: D-13: _PauseInfoLike declared as t.Protocol (import typing as t) to avoid colliding with the already-imported fast_mcp.model.Protocol; _record_pause accepts any to_dict()-able object, tested with a stub, no PauseInfo/ResumeMarker import
+- [Phase 01]: D-15: .wait scoped to Resume/Transfer/RunProtocol per spec, even though only Resume calls it today
+- [Phase 01]: D-16/D-14/D-08: no production code changes needed; server.py already satisfied every new rule, confirmed before any planted-violation test was written
 
 ### Pending Todos
 
@@ -106,6 +109,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-12T22:11:00.000Z
-Stopped at: Completed 01-03-PLAN.md
+Last session: 2026-10-12T22:23:03.716Z
+Stopped at: Completed 01-04-PLAN.md
 Resume file: None
