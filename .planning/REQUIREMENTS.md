@@ -16,7 +16,7 @@ requirement below names the original ID(s) it carries.
 - [x] **ADP-02**: `Pause`/`Resume`/`Abort` sent through `ExecuteCommand` reach `FastService` while a `Transfer`/`RunProtocol` is in flight — not refused by `base_server`'s readiness gate, not blocked by the adapter's motion lock — through a `FastServer.ExecuteCommand` override; `tools/base_server.py` is unchanged — *RCTL-05*
 - [x] **ADP-03**: A control command never changes the tool's status: a tool that is BUSY with a run stays BUSY after a control command completes — *RCTL-05*
 - [x] **ADP-04**: With a run in flight, `Resume` returns once the instrument accepts it (the step's own wait reports the outcome); with no run in flight (crash recovery), `Resume` waits for the resumed run and reports its outcome — *RCTL-02, RCTL-07*
-- [ ] **ADP-05**: `GetStatus` returns `StatusReply.run_state` (an additive optional `google.protobuf.Struct` on `tool_base.proto`) with state, percent and the current pause (`PauseInfo`) for the F.A.S.T.; other tool types leave it unset — *RSTATE-01*
+- [x] **ADP-05**: `GetStatus` returns `StatusReply.run_state` (an additive optional `google.protobuf.Struct` on `tool_base.proto`) with state, percent and the current pause (`PauseInfo`) for the F.A.S.T.; other tool types leave it unset — *RSTATE-01*
 - [ ] **ADP-06**: Blank or unclear `is_tip_broken`/`return_liquid` are `INVALID_ARGUMENTS` on every path (real and simulated, `ExecuteCommand` override included); no decision is ever defaulted — *RSAFE-02*
 - [ ] **ADP-07**: The no-auto-abort invariant is extended: `.pause`/`.resume`/`.abort` appear only in the `Pause`/`Resume`/`Abort` methods, `.wait` only in the long-running commands and the crash-recovery `Resume`, `on_pause` only records state; a planted violation fails the check — *RSAFE-01*
 - [x] **ADP-08**: A real-mode (not simulated) test shows `Pause`/`Resume`/`Abort` reaching the service through `ExecuteCommand` while a `Transfer` is blocked, with the tool still BUSY afterwards — *RSAFE-04*
@@ -56,7 +56,7 @@ requirement below names the original ID(s) it carries.
 | ADP-02 | Phase 1 | Complete |
 | ADP-03 | Phase 1 | Complete |
 | ADP-04 | Phase 1 | Complete |
-| ADP-05 | Phase 1 | Pending |
+| ADP-05 | Phase 1 | Complete |
 | ADP-06 | Phase 1 | Pending |
 | ADP-07 | Phase 1 | Pending |
 | ADP-08 | Phase 1 | Complete |

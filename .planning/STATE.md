@@ -5,16 +5,16 @@ milestone_name: F.A.S.T. Live Run Control (adapter & rollout)
 current_phase: 1
 current_phase_name: Adapter Control Path & Run State
 status: executing
-stopped_at: Completed 01-02-PLAN.md
-last_updated: "2026-10-12T21:59:21.556Z"
+stopped_at: Completed 01-03-PLAN.md
+last_updated: "2026-10-12T22:11:00.000Z"
 last_activity: 2026-10-13
 last_activity_desc: Phase 1 execution started
-state_head: b15c1dd87b23d3c3f59e08208dab4d2bf6762c54
+state_head: f2dcf26639a6ef72e828b0b7c9af48df9c19aa53
 progress:
   total_phases: 3
   completed_phases: 0
   total_plans: 5
-  completed_plans: 2
+  completed_plans: 3
   percent: 0
 ---
 
@@ -31,7 +31,7 @@ is doing and recover it themselves; no adapter code path pauses, resumes or abor
 ## Current Position
 
 Phase: 1 (Adapter Control Path & Run State) — EXECUTING
-Plan: 3 of 5
+Plan: 4 of 5
 Status: Ready to execute
 Last activity: 2026-10-13 — Phase 1 execution started
 
@@ -61,6 +61,7 @@ Progress: [░░░░░░░░░░] 0%
 |------|----------|-------|-------|
 | Phase 01 P01 | 45min | 3 tasks | 3 files |
 | Phase 01 P02 | 15min | 2 tasks | 2 files |
+| Phase 01 P03 | 26min | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -79,6 +80,8 @@ Recent decisions affecting current work:
 - [Phase 01]: D-06/D-07: Pause and Abort never take _motion_lock; Resume branches on a non-blocking acquire into crash-recovery (wait under lock) vs in-flight (no wait, no lock) paths.
 - [Phase 01]: EST_RESUME_S stays a flat 15s placeholder; comment records the accepted debt now that Resume only waits on the crash-recovery path (research Pitfall 8)
 - [Phase 01]: No implementation bugs found in Pause/Abort/Resume for Plan 01-02; all must_haves were already satisfied by Plan 01-01, so this plan is purely additive test coverage
+- [Phase 01]: D-09/D-12: StatusReply.run_state = 4 sources from the adapter's own record (under a dedicated _run_state_lock, never _motion_lock) while a Transfer/RunProtocol is in flight, and from a mapped service.status() otherwise; any read-path failure collapses to {state: unknown} so the heartbeat never fails
+- [Phase 01]: D-13: _PauseInfoLike declared as t.Protocol (import typing as t) to avoid colliding with the already-imported fast_mcp.model.Protocol; _record_pause accepts any to_dict()-able object, tested with a stub, no PauseInfo/ResumeMarker import
 
 ### Pending Todos
 
@@ -103,6 +106,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-12T21:59:21.535Z
-Stopped at: Completed 01-02-PLAN.md
+Last session: 2026-10-12T22:11:00.000Z
+Stopped at: Completed 01-03-PLAN.md
 Resume file: None
