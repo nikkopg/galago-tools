@@ -15,6 +15,7 @@ from typing import Any, cast
 from unittest.mock import MagicMock, call, patch
 
 import grpc
+from google.protobuf import empty_pb2
 from google.protobuf.json_format import MessageToDict
 
 # Item 6 (PROJECT.md "Fork CI GitLab credential"): option approve-all-ci-skip (6b).
@@ -270,6 +271,56 @@ class TestSimulatedTransferOverGrpc(unittest.TestCase):
         self.assertEqual(result["reply"].response, SUCCESS)
 
         self.mock_open_service.assert_not_called()
+
+
+class TestControlCommandsOverGrpc(unittest.TestCase):
+    """D-04/ADP-08: the real-mode gRPC tracer for Pause (Task 1), extended
+    (Task 2/3) into the concurrency test proving Pause/Resume/Abort reach a
+    Transfer in flight through the real base_server.ExecuteCommand gate.
+    Deliberately does NOT inherit _MockedFastServerTestCase: this class calls
+    control methods on purpose, so its own tearDown allows at most one call
+    each -- no test here may reach a control method more than the operator
+    asked."""
+
+    def setUp(self) -> None:
+        self.server = FastServer()
+        self.service = MagicMock(spec=FastService)
+        self.server.service = self.service
+        self.server.config = fast_pb2.Config(host="h")
+        self.server.status = READY
+
+        self._grpc_port = _free_tcp_port()
+        self._server = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
+        add_ToolDriverServicer_to_server(self.server, self._server)
+        self._server.add_insecure_port(f"127.0.0.1:{self._grpc_port}")
+        self._server.start()
+        self.addCleanup(self._server.stop, None)
+
+        self._channel = grpc.insecure_channel(f"127.0.0.1:{self._grpc_port}")
+        self.addCleanup(self._channel.close)
+        self.stub = ToolDriverStub(self._channel)
+
+    def tearDown(self) -> None:
+        self.assertLessEqual(self.service.pause.call_count, 1)
+        self.assertLessEqual(self.service.resume.call_count, 1)
+        self.assertLessEqual(self.service.abort.call_count, 1)
+
+    def _fast(self, **command: Any) -> tool_base_pb2.Command:
+        return tool_base_pb2.Command(fast=fast_pb2.Command(**command))
+
+    def _health(self) -> tool_base_pb2.StatusReply:
+        return cast(tool_base_pb2.StatusReply, self.stub.GetStatus(empty_pb2.Empty()))
+
+    def test_pause_over_grpc_reaches_service_as_soft_pause(self) -> None:
+        self.service.pause.return_value = {"errorCode": 0}
+        reply = self.stub.ExecuteCommand(self._fast(pause=fast_pb2.Command.Pause()))
+        self.assertEqual(reply.response, SUCCESS, reply.error_message)
+        self.service.pause.assert_called_once_with(hard=False)
+        self.assertEqual(self.service.status.call_count, 0)
+        self.service.resume.assert_not_called()
+        self.service.abort.assert_not_called()
+        self.service.wait.assert_not_called()
+        self.assertEqual(self._health().status, READY)
 
 
 class TestTransferMapping(unittest.TestCase):
@@ -648,6 +699,7 @@ class TestNotConfigured(unittest.TestCase):
             ("EjectTray", fast_pb2.Command.EjectTray()),
             ("Abort", fast_pb2.Command.Abort(return_liquid="no")),
             ("Resume", fast_pb2.Command.Resume(is_tip_broken="no")),
+            ("Pause", fast_pb2.Command.Pause()),
         ]
         for name, params in checks:
             with self.subTest(command=name):
@@ -736,6 +788,7 @@ class TestOneToOneSurface(unittest.TestCase):
         service.eject_tray.return_value = TrayEjected(response={})
         service.abort.return_value = {"errorCode": 0}
         service.resume.return_value = {"errorCode": 0}
+        service.pause.return_value = {"errorCode": 0}
         service.wait.return_value = Ran(
             outcome=RunOutcome(state="idle", done=True, percent=100))
 
@@ -749,6 +802,7 @@ class TestOneToOneSurface(unittest.TestCase):
             "EjectTray": (fast_pb2.Command.EjectTray(),),
             "Abort": (fast_pb2.Command.Abort(return_liquid="no"),),
             "Resume": (fast_pb2.Command.Resume(is_tip_broken="no"),),
+            "Pause": (fast_pb2.Command.Pause(),),
         }
         self.assertEqual(set(calls), set(COMMAND_TO_SERVICE_METHOD))
         for command_name, args in calls.items():
@@ -846,6 +900,7 @@ class TestCheckArgs(unittest.TestCase):
         for command in (
             fast_pb2.Command.GetStatus(), fast_pb2.Command.GetTipStatus(),
             fast_pb2.Command.ScanTips(), fast_pb2.Command.EjectTray(),
+            fast_pb2.Command.Pause(),
         ):
             with self.subTest(command=type(command).__name__):
                 self.assertEqual(_check_args(command), [])
@@ -926,6 +981,7 @@ class TestEstimates(unittest.TestCase):
         self.assertEqual(self.server.EstimateEjectTray(fast_pb2.Command.EjectTray()), 15)
         self.assertEqual(self.server.EstimateAbort(fast_pb2.Command.Abort()), 15)
         self.assertEqual(self.server.EstimateResume(fast_pb2.Command.Resume()), 15)
+        self.assertEqual(self.server.EstimatePause(fast_pb2.Command.Pause()), 1)
 
     def test_no_estimate_method_raises_for_an_empty_message_of_its_type(self) -> None:
         empty_messages = [
@@ -938,6 +994,7 @@ class TestEstimates(unittest.TestCase):
             fast_pb2.Command.EjectTray(),
             fast_pb2.Command.Abort(),
             fast_pb2.Command.Resume(),
+            fast_pb2.Command.Pause(),
         ]
         estimate_methods: dict[str, Any] = {
             "Transfer": self.server.EstimateTransfer,
@@ -949,6 +1006,7 @@ class TestEstimates(unittest.TestCase):
             "EjectTray": self.server.EstimateEjectTray,
             "Abort": self.server.EstimateAbort,
             "Resume": self.server.EstimateResume,
+            "Pause": self.server.EstimatePause,
         }
         for message in empty_messages:
             name = type(message).__name__
@@ -1181,18 +1239,20 @@ class TestAdapterInvariant(unittest.TestCase):
         self.assertTrue(open_service_called, "open_service must be called at least once")
 
         banned_attrs = {
-            "pause", "verify_deck_layout", "active_tray",
+            "verify_deck_layout", "active_tray",
             "plate_definitions", "dispense_report", "start_run",
         }
-        # Dual-frontend section 11 #1 (amended): abort/resume/wait exist only
-        # inside the operator's own Abort/Resume commands, so the adapter can
-        # never abort or resume on its own initiative.
-        scoped_attrs = {"abort": "Abort", "resume": "Resume", "wait": "Resume"}
+        # Dual-frontend section 11 #1 (amended): pause/abort/resume/wait exist
+        # only inside the operator's own Pause/Abort/Resume commands, so the
+        # adapter can never pause, abort or resume on its own initiative.
+        scoped_attrs = {
+            "pause": "Pause", "abort": "Abort", "resume": "Resume", "wait": "Resume",
+        }
         recovery_defs = {
             node.name: node for node in ast.walk(tree)
-            if isinstance(node, ast.FunctionDef) and node.name in ("Abort", "Resume")
+            if isinstance(node, ast.FunctionDef) and node.name in ("Pause", "Abort", "Resume")
         }
-        self.assertEqual(set(recovery_defs), {"Abort", "Resume"})
+        self.assertEqual(set(recovery_defs), {"Pause", "Abort", "Resume"})
         allowed_nodes = {
             attr: {id(n) for n in ast.walk(recovery_defs[owner])}
             for attr, owner in scoped_attrs.items()

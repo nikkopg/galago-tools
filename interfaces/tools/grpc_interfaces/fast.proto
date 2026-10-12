@@ -13,6 +13,7 @@ message Command {
     EjectTray eject_tray = 7;
     Abort abort = 8;
     Resume resume = 9;
+    Pause pause = 10;
   }
 
   message Transfer {
@@ -64,6 +65,11 @@ message Command {
   message Resume {
     optional string is_tip_broken = 1;
   }
+
+  // The operator's pause of the running run. It is always a soft pause
+  // (design D5), so it carries no hard/soft choice; the core refuses it
+  // unless the instrument is running.
+  message Pause {}
 }
 
 message Config {

@@ -1,6 +1,6 @@
 """The Galago adapter for the Formulatrix F.A.S.T. liquid handler.
 
-It maps the nine intent-level commands 1:1 onto FastService methods and
+It maps the ten intent-level commands 1:1 onto FastService methods and
 holds no instrument policy of its own -- every decision (idle gate,
 validate -> run sequencing (the instrument detects plates and the tip
 caddy in-run, Phase 5 D-29), tray confirmation, timeouts, and which
@@ -76,6 +76,7 @@ COMMAND_TO_SERVICE_METHOD = {
     "EjectTray": "eject_tray",
     "Abort": "abort",
     "Resume": "resume",
+    "Pause": "pause",
 }
 
 # The physical decision each recovery command must carry explicitly. A
@@ -111,6 +112,10 @@ EST_READ_S = 1
 EST_SCAN_TIPS_S = 30
 EST_EJECT_TRAY_S = 15
 EST_ABORT_S = 15
+# Pause returns once the instrument accepts the soft pause and never waits
+# for the head, so it takes the read-sized flat value, not EST_ABORT_S's --
+# this also keeps a simulated Pause quick for galago-core's UI tests.
+EST_PAUSE_S = 1
 # Resume waits for the resumed run to finish, but how much of the run is
 # left is unknown from the command alone, so this is the same flat
 # placeholder as Abort.
@@ -140,7 +145,7 @@ def _check_args(command: "message.Message") -> list[str]:
     DRIVER_ERROR in simulated mode (base_server._estimateDuration's error
     slot is structurally always None, see RESEARCH.md).
 
-    `command` is one of the nine generated oneof message types, which have
+    `command` is one of the ten generated oneof message types, which have
     no shared base beyond google.protobuf.message.Message -- cast to Any
     once here (not Message itself) so the per-field checks below can access
     each concrete message's own fields."""
@@ -312,7 +317,7 @@ def _transport_error_reply(exc: Exception) -> ExecuteCommandReply:
 
 
 def _recovery_reply(action: str, result: "dict | Refused") -> ExecuteCommandReply:
-    """Map FastService.abort/resume's `dict | Refused`. Refused means the
+    """Map FastService.pause/abort/resume's `dict | Refused`. Refused means the
     core sent nothing to the instrument (wrong state); the dict is the
     instrument's reply, which only counts as success with errorCode 0. A
     missing errorCode is treated as a failure."""
@@ -517,6 +522,20 @@ class FastServer(ToolServer):
         finally:
             self._motion_lock.release()
 
+    def Pause(self, params: "Command.Pause") -> ExecuteCommandReply:
+        """Operator-issued soft pause of a running run. The core refuses
+        without contacting the instrument unless the instrument is running.
+        It never takes the motion lock, so it reaches a run that
+        Transfer/RunProtocol own; it returns once the instrument accepts."""
+        service = self.service
+        if service is None:
+            return _reply(NOT_READY, message=_NOT_CONNECTED_MESSAGE)
+        try:
+            result = service.pause(hard=False)
+        except (InstrumentHTTPError, httpx.HTTPError) as exc:
+            return _transport_error_reply(exc)
+        return _recovery_reply("pause", result)
+
     def Abort(self, params: "Command.Abort") -> ExecuteCommandReply:
         """Operator-issued abort of a running or paused run. The core
         refuses in any other state without contacting the instrument. Moves
@@ -614,6 +633,9 @@ class FastServer(ToolServer):
 
     def EstimateEjectTray(self, params: "Command.EjectTray") -> int:
         return EST_EJECT_TRAY_S
+
+    def EstimatePause(self, params: "Command.Pause") -> int:
+        return EST_PAUSE_S
 
     def EstimateAbort(self, params: "Command.Abort") -> int:
         return EST_ABORT_S
