@@ -536,7 +536,9 @@ class FastServer(ToolServer):
     def _log_progress(self, percent: int, state: str) -> None:
         logging.info("fast run progress %s%% (%s)", percent, state)
         with self._run_state_lock:
-            self._run_record["percent"] = percent
+            sanitized = _run_percent(percent)
+            if sanitized is not None:
+                self._run_record["percent"] = sanitized
             self._run_record["state"] = state
             if state == "running":
                 self._run_record["pause"] = None

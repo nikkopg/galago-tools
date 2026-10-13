@@ -1573,6 +1573,26 @@ class TestRunState(unittest.TestCase):
         self.assertEqual(
             running_state, {"state": "running", "percent": 10, "pause": None})
 
+    def test_log_progress_sanitizes_the_percent_like_every_other_path(self) -> None:
+        """WR-01 regression (D-11/ADP-05): _log_progress must route percent
+        through the same _run_percent sanitizer that _record_pause and
+        _build_run_state's service.status() path already use -- a bool,
+        a string, or a non-finite float must read as null in run_state
+        rather than being stored verbatim."""
+        for invalid in (float("nan"), float("inf"), float("-inf"), True, False, "50"):
+            with self.subTest(invalid=invalid):
+                with self.server._run_in_flight():
+                    self.server._log_progress(invalid, "running")  # type: ignore[arg-type]
+                    self.assertIsNone(self._run_state()["percent"])
+
+        with self.server._run_in_flight():
+            self.server._log_progress(10, "running")
+            self.assertEqual(self._run_state()["percent"], 10)
+            # An invalid percent delivered after a valid one must not
+            # clobber the last valid value with garbage.
+            self.server._log_progress(float("nan"), "running")  # type: ignore[arg-type]
+            self.assertEqual(self._run_state()["percent"], 10)
+
     def test_no_run_in_flight_maps_status_and_renames_percent(self) -> None:
         cases: list[tuple[Any, Any]] = [(0, 0), (100, 100), (42, 42)]
         for percent_progress, expected in cases:
