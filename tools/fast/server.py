@@ -514,13 +514,17 @@ class FastServer(ToolServer):
     @contextmanager
     def _run_in_flight(self) -> Iterator[None]:
         """Marks a LONG_RUNNING_COMMANDS run as in flight for run_state
-        (D-12). Entry resets the record to running/no-percent/no-pause under
-        _run_state_lock (never _motion_lock); exit decrements the nesting
-        counter and, only once no run remains in flight, clears any recorded
-        pause. Records only -- calls nothing on the service (D-16)."""
+        (D-12). Entry increments the nesting counter under _run_state_lock
+        (never _motion_lock) and, only on the 0->1 transition, resets the
+        record to running/no-percent/no-pause -- mirroring the exit guard
+        below so an overlapping second run never clobbers a pause recorded
+        for a run that is still in flight. Exit decrements the counter and,
+        only once no run remains in flight, clears any recorded pause.
+        Records only -- calls nothing on the service (D-16)."""
         with self._run_state_lock:
+            if self._active_runs == 0:
+                self._run_record = {"state": "running", "percent": None, "pause": None}
             self._active_runs += 1
-            self._run_record = {"state": "running", "percent": None, "pause": None}
         try:
             yield
         finally:

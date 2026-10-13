@@ -385,6 +385,86 @@ class TestSimulatedTransferOverGrpc(unittest.TestCase):
         for th in threads:
             th.join(timeout=10)
 
+    def test_pause_recorded_during_one_run_survives_a_second_overlapping_runs_entry(
+            self) -> None:
+        """CR-01 regression (D-19, D-20): _run_in_flight only
+        (re)initializes _run_record on the 0->1 transition, mirroring the
+        exit guard. A pause recorded via simulate_pause while run A is
+        still in flight must survive run B's overlapping entry into
+        _run_in_flight -- not be silently wiped back to
+        running/no-pause -- and must stay reported until the last
+        overlapping run ends."""
+        gate_a = threading.Event()
+        gate_b = threading.Event()
+        entered_a = threading.Event()
+        entered_b = threading.Event()
+        seen_count = {"n": 0}
+        seen_lock = threading.Lock()
+
+        def _blocking_sleep(duration: float) -> None:
+            if duration != 80.0:
+                return
+            with seen_lock:
+                seen_count["n"] += 1
+                first = seen_count["n"] == 1
+            if first:
+                entered_a.set()
+                gate_a.wait(timeout=10)
+            else:
+                entered_b.set()
+                gate_b.wait(timeout=10)
+
+        self.fake_sleep.side_effect = _blocking_sleep
+
+        completed: "queue.Queue[Any]" = queue.Queue()
+
+        def _run() -> None:
+            completed.put(self.stub.ExecuteCommand(self._valid_transfer_command()))
+
+        thread_a = threading.Thread(target=_run)
+        thread_a.start()
+        self.addCleanup(thread_a.join, 10)
+        self.addCleanup(gate_a.set)
+        self.assertTrue(entered_a.wait(timeout=5))
+
+        # Run A is now in flight (_active_runs == 1). Record a pause for it.
+        self.fs.simulate_pause(dict(_WRONG_PLATE_PAUSE))
+        run_state = self._run_state()
+        self.assertEqual(run_state["state"], "paused")
+
+        # Start a second, overlapping Transfer (run B). Its entry into
+        # _run_in_flight (_active_runs 1 -> 2) must NOT reset
+        # _run_record -- A's pause must survive.
+        thread_b = threading.Thread(target=_run)
+        thread_b.start()
+        self.addCleanup(thread_b.join, 10)
+        self.addCleanup(gate_b.set)
+        self.assertTrue(entered_b.wait(timeout=5))
+
+        run_state = self._run_state()
+        self.assertEqual(run_state["state"], "paused")
+        self.assertEqual(
+            set(run_state["pause"]),
+            {"errorCode", "errorName", "percent", "eventPayload", "since"})
+
+        gate_a.set()
+        first_reply = completed.get(timeout=10)
+        self.assertEqual(first_reply.response, SUCCESS)
+        # A ended but B is still in flight (_active_runs == 1): the pause
+        # must still be reported, since only the 1 -> 0 transition clears it.
+        run_state = self._run_state()
+        self.assertEqual(run_state["state"], "paused")
+
+        gate_b.set()
+        second_reply = completed.get(timeout=10)
+        self.assertEqual(second_reply.response, SUCCESS)
+        # Both runs have ended: the pause is cleared on the last exit.
+        self.assertEqual(
+            self._run_state(), {"state": "idle", "percent": None, "pause": None})
+
+        thread_a.join(timeout=10)
+        thread_b.join(timeout=10)
+
     def test_simulated_pause_does_not_shorten_the_transfer_sleep(self) -> None:
         """D-18: a simulated Pause sent while a simulated Transfer sleeps
         returns SUCCESS without shortening the Transfer's 80s sleep; the
