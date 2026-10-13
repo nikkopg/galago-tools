@@ -80,7 +80,7 @@ outcome.
   3. An operator abort ends the step "run aborted by operator at <p>%"; a timeout still never aborts.
   4. Paused time doesn't count toward the run timeout.
 
-**Plans**: 3/4 plans executed (sequential waves 1-4; every plan edits `tools/tests/fast_test.py`)
+**Plans**: 4/4 plans executed (sequential waves 1-4; every plan edits `tools/tests/fast_test.py`)
 
 Plans:
 **Wave 1**
@@ -93,7 +93,7 @@ Plans:
 - [x] 02-03-PLAN.md — "run aborted by operator at <p>%" only for the adapter's own accepted Abort; real-core abort tests over gRPC (LIVE-02)
 
 **Wave 4** *(blocked on Wave 3 completion)*
-- [ ] 02-04-PLAN.md — paused time excluded from the timeout on an injected clock; a timeout never aborts; threshold and granularity pinned (LIVE-03)
+- [x] 02-04-PLAN.md — paused time excluded from the timeout on an injected clock; a timeout never aborts; threshold and granularity pinned (LIVE-03)
 
 **Note**: a clean install of the new pin needs fast-mcp's `fix/run-recovery-gate` pushed to GitLab;
 until then install from the local clone at the pinned SHA.

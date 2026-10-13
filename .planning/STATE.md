@@ -4,17 +4,17 @@ milestone: v1
 milestone_name: F.A.S.T. Live Run Control (adapter & rollout)
 current_phase: 02
 current_phase_name: Wait Through Pauses on the Pinned Core
-status: executing
-stopped_at: Completed 02-03-PLAN.md
-last_updated: "2026-10-13T08:12:48.242Z"
+status: verifying
+stopped_at: Completed 02-04-PLAN.md
+last_updated: "2026-10-13T12:48:58.110Z"
 last_activity: 2026-10-13
 last_activity_desc: Phase 02 execution started
-state_head: 880cd16a2f90b459a597290eeaad95849bdfafe6
+state_head: 2e677a725c9a4bbb8d3352c03f3039c1de72c0b0
 progress:
   total_phases: 3
   completed_phases: 1
   total_plans: 9
-  completed_plans: 8
+  completed_plans: 9
   percent: 33
 ---
 
@@ -32,7 +32,7 @@ is doing and recover it themselves; no adapter code path pauses, resumes or abor
 
 Phase: 02 (Wait Through Pauses on the Pinned Core) — EXECUTING
 Plan: 4 of 4
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-10-13 — Phase 02 execution started
 
 Progress: [███░░░░░░░] 33%
@@ -67,6 +67,7 @@ Progress: [███░░░░░░░] 33%
 | Phase 02 P01 | 15 min | 2 tasks | 3 files |
 | Phase 02 P02 | 20min | 2 tasks | 2 files |
 | Phase 02 P03 | 25min | 2 tasks | 2 files |
+| Phase 02-wait-through-pauses-on-the-pinned-core P04 | 15min | 2 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -97,6 +98,7 @@ Recent decisions affecting current work:
 - [Phase 02]: D-03: LIVE-01 gate tests join TestRequirementsPin and check state gates by calling the real core directly, leaving FastServer-level idle tests unchanged
 - [Phase 02]: D-05: test_real_pause_info_records_like_the_stub passes at once (pins compatibility, does not drive a change); PauseInfo/recorder docstrings in server.py rewritten present-tense, no logic change
 - [Phase 02]: D-09/D-10: operator_abort flag set inline in Abort (no new helper, D-17), read once by Transfer/RunProtocol inside _run_in_flight, passed as a parameter into a still-pure _message_for; crash-recovery Resume passes no flag to avoid blaming the operator on a stale flag
+- [Phase 02-wait-through-pauses-on-the-pinned-core]: D-13: 20 live-paused polls (1.0 clock step) against a 6.0 timeout, with a no-op sleep and a fresh fake clock per _transfer/_run_protocol call, proves LIVE-03 on the real core: paused time excluded from the timeout at poll granularity, for both Transfer's Config-sourced timeout and RunProtocol's per-command timeout_s
 
 ### Pending Todos
 
@@ -121,6 +123,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-13T08:12:48.206Z
-Stopped at: Completed 02-03-PLAN.md
+Last session: 2026-10-13T12:48:58.073Z
+Stopped at: Completed 02-04-PLAN.md
 Resume file: None
