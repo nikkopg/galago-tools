@@ -1489,6 +1489,15 @@ class TestPausedTimeExcludedFromTimeout(unittest.TestCase):
             self, self.transport, sleep=_no_sleep, clock=_fake_clock(1.0))
         return self.server.Transfer(fast_pb2.Command.Transfer(**_ALL_TRANSFER_FIELDS))
 
+    def _run_protocol(self, *polls: dict[str, Any]) -> Any:
+        self.server.config = fast_pb2.Config(host="h")
+        self.transport.reset_mock()
+        self.transport.get_status.side_effect = [_STATUS_IDLE, *polls]
+        self.server.service = _real_core(
+            self, self.transport, sleep=_no_sleep, clock=_fake_clock(1.0))
+        return self.server.RunProtocol(
+            fast_pb2.Command.RunProtocol(csv=EXAMPLE1_CSV, timeout_s=6.0))
+
     def _assert_no_control_calls(self) -> None:
         self.transport.pause.assert_not_called()
         self.transport.resume.assert_not_called()
@@ -1550,6 +1559,43 @@ class TestPausedTimeExcludedFromTimeout(unittest.TestCase):
                 *[_running(50) for _ in range(5)])
             self.assertEqual(MessageToDict(reply.meta_data)["kind"], "timedOut")
             self._assert_no_control_calls()
+
+    def test_run_protocol_per_command_timeout_excludes_paused_time(self) -> None:
+        """LIVE-03: RunProtocol's per-command timeout_s (Config.run_timeout_s
+        0) excludes paused time the same way Transfer's does, with no
+        control call either way."""
+        with self.subTest("paused"):
+            reply = self._run_protocol(
+                _running(10), *[_wrong_plate_paused(10) for _ in range(20)],
+                _running(60), _STATUS_DONE)
+            self.assertEqual(reply.response, SUCCESS, reply.error_message)
+            self.assertEqual(MessageToDict(reply.meta_data)["kind"], "ran")
+            self._assert_no_control_calls()
+        with self.subTest("running"):
+            reply = self._run_protocol(
+                _running(10), *[_running(10) for _ in range(20)], _running(60),
+                _STATUS_DONE)
+            self.assertEqual(reply.response, ERROR_FROM_TOOL)
+            self.assertEqual(MessageToDict(reply.meta_data)["kind"], "timedOut")
+            self._assert_no_control_calls()
+
+    def test_each_pause_episode_records_once(self) -> None:
+        """LIVE-02/D-06: two distinct pause episodes record two pauses (core
+        S4); the running reading between them is what ends the first
+        episode, and _log_progress clears the recorded pause on it (already
+        proven over gRPC by the 02-01 tracer)."""
+        with patch.object(
+                self.server, "_record_pause", wraps=self.server._record_pause) as spy:
+            reply = self._transfer(
+                _running(10), *[_wrong_plate_paused(10) for _ in range(3)],
+                _running(20), *[_wrong_plate_paused(20) for _ in range(3)],
+                _running(60), _STATUS_DONE)
+        self.assertEqual(reply.response, SUCCESS, reply.error_message)
+        self.assertEqual(MessageToDict(reply.meta_data)["kind"], "ran")
+        self.assertEqual(spy.call_count, 2)
+        self.assertEqual(
+            [c.args[0].to_dict()["percent"] for c in spy.call_args_list], [10, 20])
+        self._assert_no_control_calls()
 
 
 class TestTransferMapping(unittest.TestCase):
