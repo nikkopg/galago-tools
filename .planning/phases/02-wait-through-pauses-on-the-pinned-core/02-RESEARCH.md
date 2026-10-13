@@ -634,7 +634,7 @@ stub_statuses = (
 every other claim in this document is `[VERIFIED]` against the actual `fast-mcp` source at
 `b30b38d`/`76f8c3f` or the actual `galago-tools` source read this session.
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 1. **Does `_message_for` take the abort flag as a parameter, or does the reply builder pre-format
    the text (D-10)?**
@@ -647,6 +647,7 @@ every other claim in this document is `[VERIFIED]` against the actual `fast-mcp`
    - Recommendation: leave to the planner/Claude's Discretion per CONTEXT.md; either shape satisfies
      D-10's purity requirement. A parameter addition is the smaller diff against the existing
      `_message_for(result, expected_tray_id)` signature.
+   - RESOLVED: `_message_for` gains an `operator_abort: bool = False` parameter (02-03, CONTEXT D-10).
 
 2. **Exact poll-count budget for the D-13 timeout-exclusion test's "far longer than the timeout"
    requirement.**
@@ -659,6 +660,7 @@ every other claim in this document is `[VERIFIED]` against the actual `fast-mcp`
    - Recommendation: script at least 3-5x the number of iterations a 6.0s/2.0s-per-poll budget would
      allow (i.e., more than 3 iterations) while keeping `sleep` a no-op so wall-clock test time stays
      near zero regardless of the count chosen.
+   - RESOLVED: 20 live paused polls against a 6.0 timeout with 1.0 clock steps, plus the one-step-either-side threshold cases (02-04, CONTEXT D-13).
 
 ## Environment Availability
 
