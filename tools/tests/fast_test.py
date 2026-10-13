@@ -160,6 +160,16 @@ def _running(percent: int) -> dict[str, Any]:
     return {"currentState": "running", "percentProgress": percent}
 
 
+def _aborted(percent: int, error_code: Optional[int] = None) -> dict[str, Any]:
+    """A fresh aborted reading at `percent`; a lastEvent carrying `error_code`
+    is included only when one is given, so an instrument-side abort with no
+    error reads with no lastEvent at all (D-16)."""
+    reading: dict[str, Any] = {"currentState": "aborted", "percentProgress": percent}
+    if error_code is not None:
+        reading["lastEvent"] = {"messageType": 1, "payload": {"errorCode": error_code}}
+    return reading
+
+
 def _wrong_plate_paused(percent: int) -> dict[str, Any]:
     """A fresh paused reading at `percent` whose lastEvent carries -645
     WrongPlateType merged with _WRONG_PLATE_PAUSE["eventPayload"], so the
@@ -1342,6 +1352,98 @@ class TestPauseThroughRealCore(_RealCoreGrpcTestCase):
             self.transport.pause.assert_not_called()
             self.transport.resume.assert_not_called()
             self.transport.abort.assert_not_called()
+
+
+class TestOperatorAbortRealCore(_RealCoreGrpcTestCase):
+    """D-14 (real core, stub transport), D-16/D-17 (real-core proof): an
+    operator Abort of a paused Transfer ends the step "run aborted by
+    operator at <p>%"; an instrument-side abort (no Abort sent) keeps the
+    instrument's wording; and an operator abort on one run never carries
+    into the next (the _run_in_flight 0->1 reset clears it)."""
+
+    def test_operator_abort_while_paused_ends_the_step_aborted_by_operator(self) -> None:
+        self.transport.get_status.side_effect = [
+            _STATUS_IDLE, _running(10), _wrong_plate_paused(40), _wrong_plate_paused(40),
+            _aborted(40), _STATUS_IDLE,
+        ]
+        thread, result = self._start_command_thread(
+            transfer=fast_pb2.Command.Transfer(**_ALL_TRANSFER_FIELDS))
+        self.stepper.wait_sleeping()
+        self.stepper.step()
+        self.stepper.wait_sleeping()
+        health = self._health()
+        self.assertEqual(MessageToDict(health.run_state)["state"], "paused")
+
+        reply = self.stub.ExecuteCommand(
+            self._fast(abort=fast_pb2.Command.Abort(return_liquid="no")))
+        self.assertEqual(reply.response, SUCCESS, reply.error_message)
+        self.transport.abort.assert_called_once_with(return_liquid=False)
+        health = self._health()
+        self.assertEqual(health.status, BUSY)
+        self.assertTrue(thread.is_alive())
+
+        self.stepper.step()
+        thread.join(timeout=10)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(result["reply"].response, ERROR_FROM_TOOL)
+        self.assertEqual(result["reply"].error_message, "run aborted by operator at 40%")
+        self.assertEqual(MessageToDict(result["reply"].meta_data)["kind"], "aborted")
+        health = self._health()
+        self.assertEqual(health.status, READY)
+        self.assertEqual(self.transport.get_status.call_count, 6)
+        self.transport.pause.assert_not_called()
+        self.transport.resume.assert_not_called()
+
+    def test_instrument_side_abort_keeps_the_instruments_wording(self) -> None:
+        self.transport.get_status.side_effect = [
+            _STATUS_IDLE, _running(10), _aborted(40, error_code=-645), _STATUS_IDLE,
+        ]
+        thread, result = self._start_command_thread(
+            transfer=fast_pb2.Command.Transfer(**_ALL_TRANSFER_FIELDS))
+        self.stepper.wait_sleeping()
+        self.stepper.step()
+        thread.join(timeout=10)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(result["reply"].response, ERROR_FROM_TOOL)
+        self.assertEqual(
+            result["reply"].error_message, "run aborted at 40%: WrongPlateType (-645)")
+        health = self._health()
+        self.assertEqual(health.status, READY)
+        self.assertEqual(self.transport.get_status.call_count, 4)
+        self.transport.pause.assert_not_called()
+        self.transport.resume.assert_not_called()
+        self.transport.abort.assert_not_called()
+
+    def test_operator_abort_on_one_run_is_not_carried_into_the_next(self) -> None:
+        self.transport.get_status.side_effect = [
+            _STATUS_IDLE, _running(10), _running(10), _aborted(30), _STATUS_IDLE,
+            _running(10), _aborted(50), _STATUS_IDLE,
+        ]
+        thread1, result1 = self._start_command_thread(
+            transfer=fast_pb2.Command.Transfer(**_ALL_TRANSFER_FIELDS))
+        self.stepper.wait_sleeping()
+
+        reply = self.stub.ExecuteCommand(
+            self._fast(abort=fast_pb2.Command.Abort(return_liquid="no")))
+        self.assertEqual(reply.response, SUCCESS, reply.error_message)
+
+        self.stepper.step()
+        thread1.join(timeout=10)
+        self.assertFalse(thread1.is_alive())
+        self.assertEqual(result1["reply"].error_message, "run aborted by operator at 30%")
+
+        thread2, result2 = self._start_command_thread(
+            transfer=fast_pb2.Command.Transfer(**_ALL_TRANSFER_FIELDS))
+        self.stepper.wait_sleeping()
+        self.stepper.step()
+        thread2.join(timeout=10)
+        self.assertFalse(thread2.is_alive())
+        self.assertEqual(result2["reply"].error_message, "run aborted at 50%: no error reported")
+
+        health = self._health()
+        self.assertEqual(health.status, READY)
+        self.assertEqual(self.transport.abort.call_count, 1)
+        self.assertEqual(self.transport.get_status.call_count, 8)
 
 
 class TestTransferMapping(unittest.TestCase):
