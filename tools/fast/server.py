@@ -674,7 +674,9 @@ class FastServer(ToolServer):
                 try:
                     result = service.run_transfer(
                         request, expected_tray_id=expected,
-                        options=RunOptions(timeout_s=self._timeout(None), on_progress=self._log_progress))
+                        options=RunOptions(
+                            timeout_s=self._timeout(None), on_progress=self._log_progress,
+                            on_pause=self._record_pause, through_pauses=True))
                 except (InstrumentHTTPError, httpx.HTTPError) as exc:
                     return _transport_error_reply(exc)
             return _result_reply(result, expected)
@@ -840,12 +842,10 @@ class FastServer(ToolServer):
           Resumes, then WAITS for the resumed run to reach a terminal state,
           with the same timeout and progress logging as Transfer, holding
           the lock for the whole wait so no new Transfer can start under it.
-          Known limitation: the wait treats `paused` as terminal on any
-          poll. If the instrument still reports `paused` on the first
-          status poll after accepting the resume, this returns Paused
-          although the run is resuming. Not observed live yet; a supervised
-          check should confirm the state flips before the first poll (or
-          the core's wait should ignore a leading `paused`).
+          The re-pinned core masks a stale leading `paused` reading after an
+          accepted resume, so this wait reports the resumed run's real
+          outcome; it keeps the default (non-through) wait, so a fresh pause
+          still ends it as Paused with the actionable message (D-07, D-08).
         - Lock not acquired: a run is in flight. Resumes and returns as soon
           as the instrument accepts; no wait, and never releases a lock this
           call did not acquire -- the in-flight step's own wait reports the

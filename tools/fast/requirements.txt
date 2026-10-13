@@ -1,2 +1,5 @@
 # F.A.S.T. core only (no [mcp] extra), pinned to a fast-mcp commit SHA; bump deliberately (Phase 5 D-03)
-fast-mcp @ git+https://gitlab.formulatrix.com/nikkopg/fast-mcp.git@76f8c3fee41b0a2df3519aa74b022152df673824
+# Pinned for the wait-through-pauses core (RunOptions.through_pauses/on_pause, PauseInfo, the
+# stale-paused ResumeMarker, state-gated pause/resume/abort) from fast-mcp's fix/run-recovery-gate
+# branch, which must be pushed to GitLab before a clean install (Phase 3 prerequisite, user action).
+fast-mcp @ git+https://gitlab.formulatrix.com/nikkopg/fast-mcp.git@b30b38df48e8480f325228145ccae7915a56e437

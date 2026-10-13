@@ -129,6 +129,111 @@ _WRONG_PLATE_PAUSE: dict[str, Any] = {
     },
 }
 
+_TRAY_ID = 90
+
+# Copied verbatim from fast-mcp's fixtures/labware/getplatedefinitions.json (plate id 1,
+# "Default 96-Well Conical"), so this fork test does not depend on the fast-mcp checkout's
+# location (the EXAMPLE1_CSV convention above).
+_PLATE_ONE_DEFINITION: dict[str, Any] = {
+    "id": 1,
+    "description": "Default 96-Well Conical",
+    "rowCount": 8,
+    "colCount": 12,
+    "wellCapacity": 401.92,
+    "workingCapacity": 401.92,
+    "deadVolume": 0,
+    "valid": True,
+}
+
+_STATUS_IDLE: dict[str, Any] = {"currentState": "idle"}
+
+_STATUS_DONE: dict[str, Any] = {
+    "currentState": "idle",
+    "percentProgress": 100,
+    "lastEvent": {"messageType": 5, "payload": {"errorCode": 0}},
+}
+
+
+def _running(percent: int) -> dict[str, Any]:
+    return {"currentState": "running", "percentProgress": percent}
+
+
+def _wrong_plate_paused(percent: int) -> dict[str, Any]:
+    """A fresh paused reading at `percent` whose lastEvent carries -645
+    WrongPlateType merged with _WRONG_PLATE_PAUSE["eventPayload"], so the
+    core's PauseInfo.event_payload equals _WRONG_PLATE_PAUSE["eventPayload"]
+    (errorCode is excluded from event_payload by the core's _pause_info)."""
+    return {
+        "currentState": "paused",
+        "percentProgress": percent,
+        "lastEvent": {
+            "messageType": 1,
+            "payload": {"errorCode": -645, **_WRONG_PLATE_PAUSE["eventPayload"]},
+        },
+    }
+
+
+def _stub_transport() -> MagicMock:
+    """D-14 stub transport: a MagicMock standing in for the real instrument
+    transport. The real core's run_transfer calls, in order: get_active_tray,
+    get_plate_definitions (the first knowledge read), get_status (idle
+    gate), run_protocol (submit), then get_status once per poll; each
+    pause/resume/abort gate reads get_status once more."""
+    transport = MagicMock()
+    transport.get_active_tray.return_value = {"id": _TRAY_ID}
+    transport.get_plate_definitions.return_value = [dict(_PLATE_ONE_DEFINITION)]
+    transport.pause.return_value = {"errorCode": 0}
+    transport.resume.return_value = {"errorCode": 0}
+    transport.abort.return_value = {"errorCode": 0}
+    return transport
+
+
+def _real_core(case: unittest.TestCase, transport: MagicMock, **options: Any) -> Any:
+    """D-14 real core: a real FastService built on InstrumentSession wrapping
+    the stub transport, with the bundled OpenAPI spec kept open for the
+    case's lifetime (the TestRecoveryCommands.setUp shape). Never
+    open_service, never a host."""
+    cm = default_openapi_path()
+    openapi_path = cm.__enter__()
+    case.addCleanup(cm.__exit__, None, None, None)
+    options.setdefault("poll_interval_s", 0.01)
+    return FastService(InstrumentSession(transport, openapi_path), **options)
+
+
+class _Stepper:
+    """Paces the real core's poll loop one step at a time from the test
+    thread (research Pattern 3, ported from fast-mcp's
+    tests/test_run_control_threads.py, which is not importable from this
+    fork: Pitfall 5). Pacing goes through the injected `sleep` and never
+    through `get_status`: ResumeMarker holds its own lock across the
+    get_status call, so a blocking get_status would deadlock any concurrent
+    Resume, Abort or status call issued from the test thread. This refines
+    D-15's mechanism and keeps its observable assertions unchanged."""
+
+    def __init__(self) -> None:
+        self._sleeping = threading.Event()
+        self._sem = threading.Semaphore(0)
+        self._closed = False
+
+    def sleep(self, _seconds: float) -> None:
+        if self._closed:
+            return
+        self._sleeping.set()
+        if not self._sem.acquire(timeout=5):
+            raise AssertionError("stepper sleep() timed out waiting for step()")
+
+    def wait_sleeping(self) -> None:
+        if not self._sleeping.wait(timeout=5):
+            raise AssertionError("timed out waiting for the wait thread to sleep")
+        self._sleeping.clear()
+
+    def step(self) -> None:
+        self._sem.release()
+
+    def close(self) -> None:
+        self._closed = True
+        self._sem.release()
+
 
 def _free_tcp_port() -> int:
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -1031,6 +1136,110 @@ class TestRunStateOverGrpc(_RealModeGrpcTestCase):
             MessageToDict(self._health().run_state),
             {"state": "running", "percent": None, "pause": None})
         release.set()
+
+
+class _RealCoreGrpcTestCase(_RealModeGrpcTestCase):
+    """D-14 (real core, stub transport), D-15 (gRPC path): a FastServer
+    wired to a real FastService over a stub transport, paced by an injected
+    _Stepper, reached through the real in-process gRPC stub so base_server's
+    BUSY bracket and the Phase 1 control override are exercised on the real
+    core. Declares no tests of its own."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.transport = _stub_transport()
+        self.stepper = _Stepper()
+        self.core = _real_core(self, self.transport, sleep=self.stepper.sleep)
+        self.server.service = self.core
+        self.server.config = fast_pb2.Config(host="h", expected_tray_id=_TRAY_ID)
+
+    def tearDown(self) -> None:
+        super().tearDown()
+        self.assertLessEqual(self.transport.pause.call_count, 1)
+        self.assertLessEqual(self.transport.resume.call_count, 1)
+        self.assertLessEqual(self.transport.abort.call_count, 1)
+
+    def _start_command_thread(self, **command: Any) -> tuple[threading.Thread, dict[str, Any]]:
+        result: dict[str, Any] = {}
+
+        def _run() -> None:
+            result["reply"] = self.stub.ExecuteCommand(self._fast(**command))
+
+        thread = threading.Thread(target=_run)
+        thread.start()
+        # Cleanups run LIFO: close the stepper (freeing a worker blocked in
+        # sleep) before joining, so a failing assertion above never leaves
+        # the gRPC worker thread blocked forever.
+        self.addCleanup(thread.join, 10)
+        self.addCleanup(self.stepper.close)
+        return thread, result
+
+
+class TestPauseThroughRealCore(_RealCoreGrpcTestCase):
+    """D-14 (real core, stub transport), D-15 (gRPC path): a Transfer paused
+    by the instrument stays open on the real core, run_state reports the
+    pause, and an operator Resume through ExecuteCommand ends the same step
+    SUCCESS."""
+
+    def test_paused_transfer_stays_open_and_ends_success_after_resume(self) -> None:
+        self.transport.get_status.side_effect = [
+            _STATUS_IDLE, _running(10), _wrong_plate_paused(40), _wrong_plate_paused(40),
+            _running(60), _STATUS_DONE, _STATUS_DONE,
+        ]
+        thread, result = self._start_command_thread(
+            transfer=fast_pb2.Command.Transfer(**_ALL_TRANSFER_FIELDS))
+        self.stepper.wait_sleeping()
+        health = self._health()
+        self.assertEqual(health.status, BUSY)
+        self.assertEqual(
+            MessageToDict(health.run_state), {"state": "running", "percent": 10, "pause": None})
+
+        before = datetime.now(timezone.utc)
+        self.stepper.step()
+        self.stepper.wait_sleeping()
+        after = datetime.now(timezone.utc)
+        health = self._health()
+        self.assertEqual(health.status, BUSY)
+        self.assertTrue(thread.is_alive())
+        run_state = MessageToDict(health.run_state)
+        self.assertEqual(run_state["state"], "paused")
+        self.assertEqual(run_state["percent"], 40)
+        pause = run_state["pause"]
+        self.assertEqual(
+            set(pause.keys()), {"errorCode", "errorName", "percent", "eventPayload", "since"})
+        self.assertEqual(pause["errorCode"], -645)
+        self.assertEqual(pause["errorName"], "WrongPlateType")
+        self.assertEqual(pause["eventPayload"], _WRONG_PLATE_PAUSE["eventPayload"])
+        since = datetime.fromisoformat(pause["since"])
+        self.assertEqual(since.utcoffset(), timedelta(0))
+        self.assertTrue(before <= since <= after)
+
+        reply = self.stub.ExecuteCommand(
+            self._fast(resume=fast_pb2.Command.Resume(is_tip_broken="no")))
+        self.assertEqual(reply.response, SUCCESS, reply.error_message)
+        self.transport.resume.assert_called_once_with(is_tip_broken=False)
+        health = self._health()
+        self.assertEqual(health.status, BUSY)
+        self.assertTrue(thread.is_alive())
+
+        self.stepper.step()
+        self.stepper.wait_sleeping()
+        self.assertEqual(
+            MessageToDict(self._health().run_state),
+            {"state": "running", "percent": 60, "pause": None})
+
+        self.stepper.step()
+        thread.join(timeout=10)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(result["reply"].response, SUCCESS)
+        self.assertEqual(MessageToDict(result["reply"].meta_data)["kind"], "ran")
+        health = self._health()
+        self.assertEqual(health.status, READY)
+        self.assertEqual(
+            MessageToDict(health.run_state), {"state": "idle", "percent": 100, "pause": None})
+        self.assertEqual(self.transport.get_status.call_count, 7)
+        self.transport.pause.assert_not_called()
+        self.transport.abort.assert_not_called()
 
 
 class TestTransferMapping(unittest.TestCase):
@@ -2167,16 +2376,24 @@ class TestRecoveryCommands(unittest.TestCase):
                       reply.error_message)
         self.transport.abort.assert_not_called()
 
-    def test_resume_known_limitation_leading_paused_poll_reads_as_paused(self) -> None:
-        """Pins the documented limitation on FastServer.Resume: if the
-        instrument still says paused on the first poll after accepting the
-        resume, the wait reports Paused. Change this test if the core's wait
-        learns to ignore a leading paused."""
-        self._statuses({"currentState": "paused"}, {"currentState": "paused"})
+    def test_resume_masks_a_stale_leading_paused_and_reports_ran(self) -> None:
+        """D-08: the re-pinned core classifies the first post-resume paused
+        reading as stale, so it is never terminal and the wait continues to
+        the run's real end."""
+        self._statuses(
+            {"currentState": "paused"},
+            {"currentState": "paused"},
+            {"currentState": "running", "percentProgress": 50},
+            {"currentState": "idle", "percentProgress": 100,
+             "lastEvent": {"messageType": 5, "payload": {"errorCode": 0}}},
+        )
         self.transport.resume.return_value = {"errorCode": 0}
         reply = self.server.Resume(fast_pb2.Command.Resume(is_tip_broken="no"))
-        self.assertEqual(reply.response, ERROR_FROM_TOOL)
-        self.assertEqual(MessageToDict(reply.meta_data)["kind"], "paused")
+        self.assertEqual(reply.response, SUCCESS)
+        self.assertEqual(MessageToDict(reply.meta_data)["kind"], "ran")
+        self.assertEqual(self.transport.get_status.call_count, 4)
+        self.transport.resume.assert_called_once_with(is_tip_broken=False)
+        self.transport.abort.assert_not_called()
 
     def test_resume_while_idle_is_refused_without_a_resume_call(self) -> None:
         self._statuses({"currentState": "idle"})
