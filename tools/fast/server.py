@@ -377,6 +377,21 @@ def _transport_error_reply(exc: Exception) -> ExecuteCommandReply:
     return _reply(ERROR_FROM_TOOL, message=message)
 
 
+def _accepted(result: "dict | Refused") -> bool:
+    """WR-01: the single definition of "the instrument accepted the
+    command" -- True only when `result` is a dict whose `errorCode` is the
+    literal int 0. Mirrors fast_mcp.orchestration._pause_info's own rule
+    (`type(code) is int`): a bool, str or other non-int errorCode never
+    counts as accepted, even though e.g. `False == 0` in Python. Used by
+    both _recovery_reply's SUCCESS mapping and Abort()'s operator-abort
+    bookkeeping so the stricter definition can never diverge between the
+    two safety-sensitive call sites."""
+    if not isinstance(result, dict):
+        return False
+    code = result.get("errorCode")
+    return type(code) is int and code == 0
+
+
 def _recovery_reply(action: str, result: "dict | Refused") -> ExecuteCommandReply:
     """Map FastService.pause/abort/resume's `dict | Refused`. Refused means the
     core sent nothing to the instrument (wrong state); the dict is the
@@ -385,9 +400,9 @@ def _recovery_reply(action: str, result: "dict | Refused") -> ExecuteCommandRepl
     if isinstance(result, Refused):
         return _reply(ERROR_FROM_TOOL, message=_message_for(result, None),
                       meta=result.to_dict())
-    code = result.get("errorCode")
-    if code == 0:
+    if _accepted(result):
         return _reply(SUCCESS, meta=result)
+    code = result.get("errorCode")
     return _reply(ERROR_FROM_TOOL,
                   message=_one_line(f"instrument rejected {action}: errorCode {code}", 500),
                   meta=result)
@@ -869,7 +884,7 @@ class FastServer(ToolServer):
             result = service.abort(return_liquid=return_liquid)
         except (InstrumentHTTPError, httpx.HTTPError) as exc:
             return _transport_error_reply(exc)
-        if isinstance(result, dict) and result.get("errorCode") == 0:
+        if _accepted(result):
             with self._run_state_lock:
                 self._run_record["operator_abort"] = True
         return _recovery_reply("abort", result)

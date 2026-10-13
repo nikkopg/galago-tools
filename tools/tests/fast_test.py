@@ -2135,6 +2135,9 @@ class TestOperatorAbortWording(unittest.TestCase):
             ("accepted", {"errorCode": 0}),
             ("rejected", {"errorCode": -1}),
             ("no_error_code", {}),
+            ("bool_false_error_code", {"errorCode": False}),
+            ("bool_true_error_code", {"errorCode": True}),
+            ("str_zero_error_code", {"errorCode": "0"}),
             ("refused",
              Refused(reason="no running or paused protocol to abort", state="idle")),
         ]
@@ -2142,9 +2145,10 @@ class TestOperatorAbortWording(unittest.TestCase):
             with self.subTest(case=name):
                 server = _fresh_server()
                 cast(MagicMock, server.service).abort.return_value = result
-                server.Abort(fast_pb2.Command.Abort(return_liquid="no"))
+                reply = server.Abort(fast_pb2.Command.Abort(return_liquid="no"))
                 expected = name == "accepted"
                 self.assertIs(server._run_record["operator_abort"], expected)
+                self.assertEqual(reply.response, SUCCESS if expected else ERROR_FROM_TOOL)
 
         with self.subTest(case="transport_error"):
             server = _fresh_server()
@@ -2871,6 +2875,31 @@ class TestRecoveryCommands(unittest.TestCase):
     def test_abort_reply_without_error_code_is_not_success(self) -> None:
         self._statuses({"currentState": "paused"})
         self.transport.abort.return_value = {}
+        reply = self.server.Abort(fast_pb2.Command.Abort(return_liquid="no"))
+        self.assertEqual(reply.response, ERROR_FROM_TOOL)
+
+    def test_abort_bool_false_error_code_is_not_success(self) -> None:
+        """WR-01 regression: `False == 0` in Python, but a boolean errorCode
+        is never a real accepted (int 0) reply (mirrors fast_mcp's own
+        `_pause_info` rule: `type(code) is int`)."""
+        self._statuses({"currentState": "paused"})
+        self.transport.abort.return_value = {"errorCode": False}
+        reply = self.server.Abort(fast_pb2.Command.Abort(return_liquid="no"))
+        self.assertEqual(reply.response, ERROR_FROM_TOOL)
+
+    def test_abort_bool_true_error_code_is_not_success(self) -> None:
+        """WR-01 regression: a boolean errorCode never counts as accepted,
+        even when it happens to equal a nonzero int under `==`."""
+        self._statuses({"currentState": "paused"})
+        self.transport.abort.return_value = {"errorCode": True}
+        reply = self.server.Abort(fast_pb2.Command.Abort(return_liquid="no"))
+        self.assertEqual(reply.response, ERROR_FROM_TOOL)
+
+    def test_abort_str_zero_error_code_is_not_success(self) -> None:
+        """WR-01 regression: a string errorCode of "0" is not the real int
+        0 and must never be treated as accepted."""
+        self._statuses({"currentState": "paused"})
+        self.transport.abort.return_value = {"errorCode": "0"}
         reply = self.server.Abort(fast_pb2.Command.Abort(return_liquid="no"))
         self.assertEqual(reply.response, ERROR_FROM_TOOL)
 
