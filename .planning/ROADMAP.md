@@ -13,7 +13,7 @@ flight, the adapter reports live run state, a running step stays open through an
 and the stack is proven live. Governing design: `docs/specs/2026-10-12-galago-live-run-control-design.md`.
 Companion milestone: galago-core "Live Run Control: queue & run page".
 
-- [ ] **Phase 1: Adapter Control Path & Run State** - Control commands reach an in-flight run
+- [x] **Phase 1: Adapter Control Path & Run State** - Control commands reach an in-flight run (completed 2026-10-13)
   without touching the tool's status, `run_state` is reported, and the safety invariants and tests
   are extended, all proven against a mocked `FastService`.
 - [ ] **Phase 2: Wait Through Pauses on the Pinned Core** - Re-pin to the wait-through-pauses core
@@ -44,7 +44,7 @@ acts without the operator.
      check exists in the adapter.
   5. In simulated mode, control commands return SUCCESS after argument checks and a test hook drives
      `run_state` to paused.
-**Plans**: 5/5 plans executed (sequential waves 1-5; every plan edits `tools/fast/server.py` or `tools/tests/fast_test.py`)
+**Plans**: 5/5 plans complete (sequential waves 1-5; every plan edits `tools/fast/server.py` or `tools/tests/fast_test.py`)
 
 Plans:
 **Wave 1**
