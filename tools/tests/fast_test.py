@@ -14,7 +14,7 @@ from concurrent import futures
 from dataclasses import fields
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Optional, cast
+from typing import Any, Callable, Optional, cast
 from unittest.mock import MagicMock, call, patch
 
 import grpc
@@ -210,6 +210,27 @@ def _real_core(case: unittest.TestCase, transport: MagicMock, **options: Any) ->
     case.addCleanup(cm.__exit__, None, None, None)
     options.setdefault("poll_interval_s", 0.01)
     return FastService(InstrumentSession(transport, openapi_path), **options)
+
+
+def _no_sleep(_seconds: float) -> None:
+    """D-13: a no-op sleep so a real-core timeout test takes no wall-clock
+    time -- the poll loop is paced by _fake_clock, not real time."""
+    return None
+
+
+def _fake_clock(step: float) -> Callable[[], float]:
+    """D-13: a clock closure that adds `step` on each call and returns the
+    running total (ported from fast-mcp's tests/test_pause_control.py,
+    which is not importable from this fork: research Pitfall 5). Each call
+    site builds a fresh clock, so every run starts at 0."""
+    total = 0.0
+
+    def _clock() -> float:
+        nonlocal total
+        total += step
+        return total
+
+    return _clock
 
 
 class _Stepper:
@@ -1444,6 +1465,91 @@ class TestOperatorAbortRealCore(_RealCoreGrpcTestCase):
         self.assertEqual(health.status, READY)
         self.assertEqual(self.transport.abort.call_count, 1)
         self.assertEqual(self.transport.get_status.call_count, 8)
+
+
+class TestPausedTimeExcludedFromTimeout(unittest.TestCase):
+    """D-12/D-13, LIVE-03: on the real core with an injected clock, time
+    spent paused does not count toward the run timeout, and a timeout still
+    never commands the instrument. The adapter adds no clock of its own
+    (D-12) -- its whole part in the timeout is through_pauses=True plus the
+    timeout_s it already forwards; the core's own poll-granularity deadline
+    shift (S6) is what lets a long pause still end SUCCESS."""
+
+    def setUp(self) -> None:
+        self.transport = _stub_transport()
+        self.server = FastServer()
+        self.server.config = fast_pb2.Config(
+            host="h", expected_tray_id=_TRAY_ID, run_timeout_s=6.0)
+        self.server.status = READY
+
+    def _transfer(self, *polls: dict[str, Any]) -> Any:
+        self.transport.reset_mock()
+        self.transport.get_status.side_effect = [_STATUS_IDLE, *polls]
+        self.server.service = _real_core(
+            self, self.transport, sleep=_no_sleep, clock=_fake_clock(1.0))
+        return self.server.Transfer(fast_pb2.Command.Transfer(**_ALL_TRANSFER_FIELDS))
+
+    def _assert_no_control_calls(self) -> None:
+        self.transport.pause.assert_not_called()
+        self.transport.resume.assert_not_called()
+        self.transport.abort.assert_not_called()
+
+    def test_a_pause_far_longer_than_the_timeout_still_ends_success(self) -> None:
+        """D-13: 20 live-paused polls are 20 clock units against a 6.0
+        timeout (over three times over); only the core's deadline shift for
+        paused time (poll granularity, S6) lets this end SUCCESS instead of
+        TimedOut."""
+        with patch.object(
+                self.server, "_record_pause", wraps=self.server._record_pause) as spy:
+            reply = self._transfer(
+                _running(10), *[_wrong_plate_paused(10) for _ in range(20)],
+                _running(60), _STATUS_DONE)
+        self.assertEqual(reply.response, SUCCESS, reply.error_message)
+        self.assertEqual(MessageToDict(reply.meta_data)["kind"], "ran")
+        self.assertEqual(spy.call_count, 1)
+        self._assert_no_control_calls()
+
+    def test_the_same_time_running_times_out_and_never_commands_the_instrument(
+            self) -> None:
+        """D-13 control, D-16 timeout case, D-11: the same 20 clock units
+        spent running (not paused) end TimedOut with the unaborted-
+        instrument message, and no control call either way."""
+        reply = self._transfer(
+            _running(10), *[_running(10) for _ in range(20)], _running(60), _STATUS_DONE)
+        self.assertEqual(reply.response, ERROR_FROM_TOOL)
+        self.assertEqual(MessageToDict(reply.meta_data)["kind"], "timedOut")
+        self.assertIn("the instrument run was NOT aborted", reply.error_message)
+        self._assert_no_control_calls()
+
+    def test_the_timeout_threshold_is_inclusive_one_poll_either_side(self) -> None:
+        """LIVE-03 boundary: with a 6.0 timeout and 1.0 clock steps, 5
+        running polls then idle/done end SUCCESS and 6 running polls end
+        TimedOut."""
+        with self.subTest("5 running"):
+            reply = self._transfer(*[_running(10) for _ in range(5)], _STATUS_DONE)
+            self.assertEqual(reply.response, SUCCESS, reply.error_message)
+            self._assert_no_control_calls()
+        with self.subTest("6 running"):
+            reply = self._transfer(*[_running(10) for _ in range(6)])
+            self.assertEqual(MessageToDict(reply.meta_data)["kind"], "timedOut")
+            self._assert_no_control_calls()
+
+    def test_paused_time_is_excluded_at_poll_granularity(self) -> None:
+        """LIVE-03 precision: the poll step into a pause counts toward the
+        timeout, the paused span does not -- the core's S6 contract at poll
+        granularity, and the adapter adds no arithmetic of its own."""
+        with self.subTest("4 after"):
+            reply = self._transfer(
+                _running(10), *[_wrong_plate_paused(10) for _ in range(20)],
+                *[_running(50) for _ in range(4)], _STATUS_DONE)
+            self.assertEqual(reply.response, SUCCESS, reply.error_message)
+            self._assert_no_control_calls()
+        with self.subTest("5 after"):
+            reply = self._transfer(
+                _running(10), *[_wrong_plate_paused(10) for _ in range(20)],
+                *[_running(50) for _ in range(5)])
+            self.assertEqual(MessageToDict(reply.meta_data)["kind"], "timedOut")
+            self._assert_no_control_calls()
 
 
 class TestTransferMapping(unittest.TestCase):
