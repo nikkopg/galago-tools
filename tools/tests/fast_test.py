@@ -65,6 +65,7 @@ try:
         MOTION_LOCK_COMMANDS,
         FastServer,
         _check_args,
+        _message_for,
     )
 except ModuleNotFoundError as exc:
     if exc.name and exc.name.split(".")[0] in ("fast_mcp", "httpx"):
@@ -1817,6 +1818,164 @@ class TestControlCommandsBypassMotionLock(unittest.TestCase):
         self.assertEqual(reply.response, SUCCESS, reply.error_message)
         self.assertEqual(MessageToDict(reply.meta_data)["kind"], "ran")
         self.assertFalse(self.server._motion_lock.locked())
+
+
+class TestOperatorAbortWording(unittest.TestCase):
+    """D-09/D-10: an Aborted result reads "run aborted by operator" only
+    when this adapter's own Abort was accepted for the run in flight; any
+    other abort keeps the instrument's wording. Calls Abort on purpose, so
+    it does not inherit _MockedFastServerTestCase (which forbids that)."""
+
+    def setUp(self) -> None:
+        self.server = FastServer()
+        self.service = MagicMock(spec=FastService)
+        self.server.service = self.service
+        self.server.config = fast_pb2.Config(host="h")
+        self.server.status = READY
+
+    def test_message_for_names_the_operator_only_when_the_flag_is_set(self) -> None:
+        no_error = Aborted(outcome=RunOutcome(state="aborted", done=False, percent=40))
+        with_error = Aborted(outcome=RunOutcome(
+            state="aborted", done=False, error_code=-645, error_name="WrongPlateType",
+            percent=40))
+
+        self.assertEqual(
+            _message_for(no_error, None, operator_abort=True),
+            "run aborted by operator at 40%")
+        self.assertEqual(
+            _message_for(with_error, None, operator_abort=True),
+            "run aborted by operator at 40%: WrongPlateType (-645)")
+        self.assertEqual(
+            _message_for(no_error, None, operator_abort=False),
+            "run aborted at 40%: no error reported")
+        self.assertEqual(
+            _message_for(with_error, None, operator_abort=False),
+            "run aborted at 40%: WrongPlateType (-645)")
+        self.assertEqual(
+            _message_for(no_error, None),
+            "run aborted at 40%: no error reported")
+
+    def test_timed_out_cancelled_and_paused_text_ignores_the_flag(self) -> None:
+        timed_out = TimedOut(outcome=RunOutcome(state="timeout", done=False, percent=40))
+        cancelled = Cancelled(percent=40)
+        paused = Paused(outcome=RunOutcome(state="paused", done=False, percent=40))
+        for result in (timed_out, cancelled, paused):
+            with self.subTest(kind=type(result).__name__):
+                self.assertEqual(
+                    _message_for(result, None, operator_abort=True),
+                    _message_for(result, None))
+        self.assertIn("the instrument run was NOT aborted", _message_for(timed_out, None))
+        self.assertEqual(_message_for(cancelled, None), "cancelled by operator")
+
+    def test_only_an_accepted_abort_sets_the_flag(self) -> None:
+        self.assertFalse(self.server._run_record["operator_abort"])
+
+        def _fresh_server() -> FastServer:
+            server = FastServer()
+            server.service = MagicMock(spec=FastService)
+            server.config = fast_pb2.Config(host="h")
+            server.status = READY
+            return server
+
+        cases: list[tuple[str, Any]] = [
+            ("accepted", {"errorCode": 0}),
+            ("rejected", {"errorCode": -1}),
+            ("no_error_code", {}),
+            ("refused",
+             Refused(reason="no running or paused protocol to abort", state="idle")),
+        ]
+        for name, result in cases:
+            with self.subTest(case=name):
+                server = _fresh_server()
+                cast(MagicMock, server.service).abort.return_value = result
+                server.Abort(fast_pb2.Command.Abort(return_liquid="no"))
+                expected = name == "accepted"
+                self.assertIs(server._run_record["operator_abort"], expected)
+
+        with self.subTest(case="transport_error"):
+            server = _fresh_server()
+            cast(MagicMock, server.service).abort.side_effect = httpx.ConnectError("refused")
+            server.Abort(fast_pb2.Command.Abort(return_liquid="no"))
+            self.assertFalse(server._run_record["operator_abort"])
+
+        with self.subTest(case="blank_decision"):
+            server = _fresh_server()
+            reply = server.Abort(fast_pb2.Command.Abort(return_liquid=""))
+            self.assertEqual(reply.response, INVALID_ARGUMENTS)
+            cast(MagicMock, server.service).abort.assert_not_called()
+            self.assertFalse(server._run_record["operator_abort"])
+
+        with self.subTest(case="accepted_pause"):
+            server = _fresh_server()
+            cast(MagicMock, server.service).pause.return_value = {"errorCode": 0}
+            server.Pause(fast_pb2.Command.Pause())
+            self.assertFalse(server._run_record["operator_abort"])
+
+        with self.subTest(case="accepted_resume_in_flight"):
+            server = _fresh_server()
+            server._motion_lock.acquire()
+            self.addCleanup(server._motion_lock.release)
+            cast(MagicMock, server.service).resume.return_value = {"errorCode": 0}
+            server.Resume(fast_pb2.Command.Resume(is_tip_broken="no"))
+            self.assertFalse(server._run_record["operator_abort"])
+
+    def test_a_new_run_starts_with_the_flag_cleared(self) -> None:
+        self.service.abort.return_value = {"errorCode": 0}
+        self.server.Abort(fast_pb2.Command.Abort(return_liquid="no"))
+        self.assertTrue(self.server._run_record["operator_abort"])
+
+        recorded: dict[str, Any] = {}
+
+        def _run_transfer(*args: Any, **kwargs: Any) -> Any:
+            recorded["operator_abort"] = self.server._run_record["operator_abort"]
+            return Aborted(outcome=RunOutcome(state="aborted", done=False, percent=40))
+
+        self.service.run_transfer.side_effect = _run_transfer
+        reply = self.server.Transfer(fast_pb2.Command.Transfer(**_ALL_TRANSFER_FIELDS))
+        self.assertEqual(reply.response, ERROR_FROM_TOOL)
+        self.assertEqual(reply.error_message, "run aborted at 40%: no error reported")
+        self.assertFalse(recorded["operator_abort"])
+
+    def test_an_abort_accepted_mid_run_reaches_the_steps_message(self) -> None:
+        cases = [
+            ("Transfer", lambda: fast_pb2.Command.Transfer(**_ALL_TRANSFER_FIELDS),
+             "run_transfer"),
+            ("RunProtocol", lambda: fast_pb2.Command.RunProtocol(csv=EXAMPLE1_CSV),
+             "run_protocol"),
+        ]
+        for name, build_command, service_method in cases:
+            with self.subTest(command=name):
+                self.service.reset_mock()
+                self.service.abort.return_value = {"errorCode": 0}
+                recorded: dict[str, Any] = {}
+
+                def _side_effect(*args: Any, **kwargs: Any) -> Any:
+                    self.server.Abort(fast_pb2.Command.Abort(return_liquid="yes"))
+                    run_state = self.server._build_run_state()
+                    assert run_state is not None
+                    recorded["run_state_keys"] = set(run_state)
+                    return Aborted(outcome=RunOutcome(state="aborted", done=False, percent=40))
+
+                getattr(self.service, service_method).side_effect = _side_effect
+                reply = getattr(self.server, name)(build_command())
+
+                self.assertEqual(reply.response, ERROR_FROM_TOOL)
+                self.assertEqual(reply.error_message, "run aborted by operator at 40%")
+                self.assertEqual(MessageToDict(reply.meta_data)["kind"], "aborted")
+                self.service.abort.assert_called_once_with(return_liquid=True)
+                self.assertEqual(recorded["run_state_keys"], {"state", "percent", "pause"})
+
+        with self.subTest(command="Transfer", case="rejected_mid_run"):
+            self.service.reset_mock()
+            self.service.abort.return_value = {"errorCode": -1}
+
+            def _side_effect_rejected(*args: Any, **kwargs: Any) -> Any:
+                self.server.Abort(fast_pb2.Command.Abort(return_liquid="yes"))
+                return Aborted(outcome=RunOutcome(state="aborted", done=False, percent=40))
+
+            self.service.run_transfer.side_effect = _side_effect_rejected
+            reply = self.server.Transfer(fast_pb2.Command.Transfer(**_ALL_TRANSFER_FIELDS))
+            self.assertEqual(reply.error_message, "run aborted at 40%: no error reported")
 
 
 class TestRunState(unittest.TestCase):

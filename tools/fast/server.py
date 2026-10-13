@@ -282,9 +282,12 @@ def _reply(code: ResponseCode, *, message: str = "",
     return reply
 
 
+_NO_ERROR_TEXT = "no error reported"
+
+
 def _outcome_text(outcome: object) -> str:
     """"<error_name> (<error_code>): <message>" with None parts dropped, or
-    "no error reported" when all are None."""
+    _NO_ERROR_TEXT when all are None."""
     name_code: Optional[str] = None
     error_name = getattr(outcome, "error_name", None)
     error_code = getattr(outcome, "error_code", None)
@@ -301,11 +304,21 @@ def _outcome_text(outcome: object) -> str:
         return name_code
     if message:
         return str(message)
-    return "no error reported"
+    return _NO_ERROR_TEXT
 
 
-def _message_for(result: RunResult, expected_tray_id: Optional[int]) -> str:
-    """D-12: every message passes through _one_line with limit 500."""
+def _message_for(
+        result: RunResult, expected_tray_id: Optional[int],
+        operator_abort: bool = False) -> str:
+    """D-12: every message passes through _one_line with limit 500.
+
+    `operator_abort` (D-10) is the caller's record of whether THIS adapter's
+    own Abort was accepted for the run that produced `result` -- it is
+    always a parameter, never a read of adapter state, so this function
+    stays pure. It only changes the Aborted branch's wording (D-09): True
+    names the operator ("run aborted by operator at <p>%"), appending the
+    instrument's own outcome text only when there is a real error; False (or
+    omitted) keeps the plain instrument wording, exactly as before."""
     text = ""
     if isinstance(result, Rejected):
         parts = "; ".join(f"{f.code} {f.name}: {f.message}" for f in result.findings)
@@ -332,7 +345,13 @@ def _message_for(result: RunResult, expected_tray_id: Optional[int]) -> str:
         text = (f"run paused at {result.percent}%: {_outcome_text(result.outcome)}; "
                 "fix the deck, then send Resume (is_tip_broken) or Abort (return_liquid)")
     elif isinstance(result, Aborted):
-        text = f"run aborted at {result.percent}%: {_outcome_text(result.outcome)}"
+        outcome_text = _outcome_text(result.outcome)
+        if operator_abort:
+            text = f"run aborted by operator at {result.percent}%"
+            if outcome_text != _NO_ERROR_TEXT:
+                text += f": {outcome_text}"
+        else:
+            text = f"run aborted at {result.percent}%: {outcome_text}"
     elif isinstance(result, TimedOut):
         text = (f"run timed out at {result.percent}%; the instrument run was NOT aborted, "
                 "check the instrument and stop it physically if needed")
@@ -341,9 +360,11 @@ def _message_for(result: RunResult, expected_tray_id: Optional[int]) -> str:
     return _one_line(text, 500)
 
 
-def _result_reply(result: RunResult, expected_tray_id: Optional[int] = None) -> ExecuteCommandReply:
+def _result_reply(
+        result: RunResult, expected_tray_id: Optional[int] = None,
+        operator_abort: bool = False) -> ExecuteCommandReply:
     code = _RESPONSE_FOR_KIND[result.kind]
-    message = _message_for(result, expected_tray_id)
+    message = _message_for(result, expected_tray_id, operator_abort=operator_abort)
     return _reply(code, message=message, meta=result.to_dict())
 
 
@@ -419,7 +440,7 @@ class FastServer(ToolServer):
         self._run_state_lock = threading.Lock()
         self._active_runs = 0
         self._run_record: dict[str, Any] = {
-            "state": "running", "percent": None, "pause": None}
+            "state": "running", "percent": None, "pause": None, "operator_abort": False}
 
     def _dispatchCommand(self, command: "message.Message") -> ExecuteCommandReply:
         """Override of ToolServer._dispatchCommand (RESEARCH Pattern 1, D-15).
@@ -519,14 +540,18 @@ class FastServer(ToolServer):
         """Marks a LONG_RUNNING_COMMANDS run as in flight for run_state
         (D-12). Entry increments the nesting counter under _run_state_lock
         (never _motion_lock) and, only on the 0->1 transition, resets the
-        record to running/no-percent/no-pause -- mirroring the exit guard
-        below so an overlapping second run never clobbers a pause recorded
-        for a run that is still in flight. Exit decrements the counter and,
+        record to running/no-percent/no-pause/no-operator-abort -- mirroring
+        the exit guard below so an overlapping second run never clobbers a
+        pause recorded for a run that is still in flight. The reset also
+        clears the operator-abort flag (D-09): a new run never inherits an
+        abort recorded for a previous one. Exit decrements the counter and,
         only once no run remains in flight, clears any recorded pause.
         Records only -- calls nothing on the service (D-16)."""
         with self._run_state_lock:
             if self._active_runs == 0:
-                self._run_record = {"state": "running", "percent": None, "pause": None}
+                self._run_record = {
+                    "state": "running", "percent": None, "pause": None,
+                    "operator_abort": False}
             self._active_runs += 1
         try:
             yield
@@ -681,7 +706,9 @@ class FastServer(ToolServer):
                             on_pause=self._record_pause, through_pauses=True))
                 except (InstrumentHTTPError, httpx.HTTPError) as exc:
                     return _transport_error_reply(exc)
-            return _result_reply(result, expected)
+                with self._run_state_lock:
+                    operator_abort = self._run_record.get("operator_abort") is True
+                return _result_reply(result, expected, operator_abort=operator_abort)
         finally:
             self._motion_lock.release()
 
@@ -702,7 +729,9 @@ class FastServer(ToolServer):
                             on_pause=self._record_pause, through_pauses=True))
                 except (InstrumentHTTPError, httpx.HTTPError) as exc:
                     return _transport_error_reply(exc)
-            return _result_reply(result)
+                with self._run_state_lock:
+                    operator_abort = self._run_record.get("operator_abort") is True
+                return _result_reply(result, operator_abort=operator_abort)
         finally:
             self._motion_lock.release()
 
@@ -820,7 +849,15 @@ class FastServer(ToolServer):
         refuses in any other state without contacting the instrument. Never
         takes the motion lock (D-06), so it reaches a run in flight. Returns
         once the instrument has accepted the abort; it does not wait for the
-        head to park."""
+        head to park.
+
+        D-09: when the instrument accepts (errorCode 0), records
+        operator_abort=True under _run_state_lock -- bookkeeping about this
+        adapter's own accepted command, never an instrument-state check
+        (ADP-09). Transfer/RunProtocol read it afterwards to word an Aborted
+        result as the operator's doing ("run aborted by operator at <p>%")
+        rather than the instrument's. Set inline, never in a new helper
+        method (D-17)."""
         return_liquid = _decision(params, "return_liquid")
         if return_liquid is None:
             return _reply(INVALID_ARGUMENTS,
@@ -832,6 +869,9 @@ class FastServer(ToolServer):
             result = service.abort(return_liquid=return_liquid)
         except (InstrumentHTTPError, httpx.HTTPError) as exc:
             return _transport_error_reply(exc)
+        if isinstance(result, dict) and result.get("errorCode") == 0:
+            with self._run_state_lock:
+                self._run_record["operator_abort"] = True
         return _recovery_reply("abort", result)
 
     def Resume(self, params: "Command.Resume") -> ExecuteCommandReply:
@@ -852,7 +892,13 @@ class FastServer(ToolServer):
         - Lock not acquired: a run is in flight. Resumes and returns as soon
           as the instrument accepts; no wait, and never releases a lock this
           call did not acquire -- the in-flight step's own wait reports the
-          outcome."""
+          outcome.
+
+        The crash-recovery wait's _result_reply call below passes no
+        operator_abort flag: that wait is not bracketed by _run_in_flight,
+        so a flag left by an earlier Abort could be stale, and an Aborted
+        result here keeps the plain instrument wording (planner choice,
+        D-09 scope)."""
         is_tip_broken = _decision(params, "is_tip_broken")
         if is_tip_broken is None:
             return _reply(INVALID_ARGUMENTS,
