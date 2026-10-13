@@ -2,19 +2,19 @@
 gsd_state_version: "1.0"
 milestone: v1
 milestone_name: F.A.S.T. Live Run Control (adapter & rollout)
-current_phase: 2
+current_phase: 02
 current_phase_name: Wait Through Pauses on the Pinned Core
 status: executing
-stopped_at: Phase 2 context gathered
-last_updated: "2026-10-13T07:34:54.838Z"
+stopped_at: Completed 02-01-PLAN.md
+last_updated: "2026-10-13T07:50:10.422Z"
 last_activity: 2026-10-13
-last_activity_desc: Phase 1 complete, transitioned to Phase 2
-state_head: b6793a229e97e34a6b0ac847624bb40759ec6477
+last_activity_desc: Phase 02 execution started
+state_head: d60c829d3df9e70a4291aa2992ee36e29a8aabd2
 progress:
   total_phases: 3
   completed_phases: 1
   total_plans: 9
-  completed_plans: 5
+  completed_plans: 6
   percent: 33
 ---
 
@@ -26,14 +26,14 @@ See: .planning/PROJECT.md (updated 2026-10-12)
 
 **Core value:** An operator running a F.A.S.T. step from Galago can always see what the instrument
 is doing and recover it themselves; no adapter code path pauses, resumes or aborts on its own.
-**Current focus:** Phase 1 — Adapter Control Path & Run State
+**Current focus:** Phase 02 — Wait Through Pauses on the Pinned Core
 
 ## Current Position
 
-Phase: 2 (Wait Through Pauses on the Pinned Core) — READY TO EXECUTE
-Plan: Not started
+Phase: 02 (Wait Through Pauses on the Pinned Core) — EXECUTING
+Plan: 2 of 4
 Status: Ready to execute
-Last activity: 2026-10-13 — Phase 1 complete, transitioned to Phase 2
+Last activity: 2026-10-13 — Phase 02 execution started
 
 Progress: [███░░░░░░░] 33%
 
@@ -64,6 +64,7 @@ Progress: [███░░░░░░░] 33%
 | Phase 01 P03 | 26min | 2 tasks | 3 files |
 | Phase 01 P04 | 10 min | 2 tasks | 1 files |
 | Phase 01 P05 | 25min | 2 tasks | 2 files |
+| Phase 02 P01 | 15 min | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -89,6 +90,8 @@ Recent decisions affecting current work:
 - [Phase 01]: D-18: no new production code needed for simulated Pause/Resume/Abort to check arguments then succeed; existing _dispatchCommand/_check_args/base_server simulated branch already satisfied it
 - [Phase 01]: D-19/D-20: _build_run_state's simulated branch derives state from pause/_active_runs directly (never _run_record["state"]), so a cleared pause can never surface as stale paused
 - [Phase 01]: D-20: simulate_pause is an in-process, simulated-mode-only hook with no gRPC surface; _PAUSE_CLEARING_COMMANDS={Resume,Abort} clears a hooked pause only on a SUCCESS reply
+- [Phase 02]: D-02: gate venv re-installed from local fast-mcp clone at b30b38d (--no-deps --force-reinstall); GitLab push of fix/run-recovery-gate remains a Phase 3 prerequisite
+- [Phase 02]: D-08: rewrote the leading-paused Resume test to pin the re-pinned core's fixed behaviour (ResumeMarker masks a stale leading paused reading) instead of the old known-limitation assertion
 
 ### Pending Todos
 
@@ -113,6 +116,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-13T03:02:34.669Z
-Stopped at: Phase 2 context gathered
-Resume file: .planning/phases/02-wait-through-pauses-on-the-pinned-core/02-CONTEXT.md
+Last session: 2026-10-13T07:50:10.380Z
+Stopped at: Completed 02-01-PLAN.md
+Resume file: None

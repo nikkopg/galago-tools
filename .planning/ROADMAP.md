@@ -80,11 +80,11 @@ outcome.
   3. An operator abort ends the step "run aborted by operator at <p>%"; a timeout still never aborts.
   4. Paused time doesn't count toward the run timeout.
 
-**Plans**: 4 plans (sequential waves 1-4; every plan edits `tools/tests/fast_test.py`)
+**Plans**: 1/4 plans executed (sequential waves 1-4; every plan edits `tools/tests/fast_test.py`)
 
 Plans:
 **Wave 1**
-- [ ] 02-01-PLAN.md — tracer: re-pin to b30b38d (gate venv from the local clone), a paused Transfer stays open on the real core and ends SUCCESS after Resume; RunProtocol wiring, operator and instrument pauses (LIVE-01/02)
+- [x] 02-01-PLAN.md — tracer: re-pin to b30b38d (gate venv from the local clone), a paused Transfer stays open on the real core and ends SUCCESS after Resume; RunProtocol wiring, operator and instrument pauses (LIVE-01/02)
 
 **Wave 2** *(blocked on Wave 1 completion)*
 - [ ] 02-02-PLAN.md — the gate rejects a core without wait-through-pauses or state gates; PauseInfo docstrings (LIVE-01)
