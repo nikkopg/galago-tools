@@ -80,9 +80,25 @@ outcome.
   3. An operator abort ends the step "run aborted by operator at <p>%"; a timeout still never aborts.
   4. Paused time doesn't count toward the run timeout.
 
-**Plans**: TBD
+**Plans**: 4 plans (sequential waves 1-4; every plan edits `tools/tests/fast_test.py`)
+
+Plans:
+**Wave 1**
+- [ ] 02-01-PLAN.md — tracer: re-pin to b30b38d (gate venv from the local clone), a paused Transfer stays open on the real core and ends SUCCESS after Resume; RunProtocol wiring, operator and instrument pauses (LIVE-01/02)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [ ] 02-02-PLAN.md — the gate rejects a core without wait-through-pauses or state gates; PauseInfo docstrings (LIVE-01)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [ ] 02-03-PLAN.md — "run aborted by operator at <p>%" only for the adapter's own accepted Abort; real-core abort tests over gRPC (LIVE-02)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+- [ ] 02-04-PLAN.md — paused time excluded from the timeout on an injected clock; a timeout never aborts; threshold and granularity pinned (LIVE-03)
+
 **Note**: a clean install of the new pin needs fast-mcp's `fix/run-recovery-gate` pushed to GitLab;
 until then install from the local clone at the pinned SHA.
+**Research flag**: pace real-core threaded tests through an injected `sleep` stepper, never an
+Event-gated `get_status` (it deadlocks against the core's `ResumeMarker` lock; 02-RESEARCH.md Pattern 3).
 
 ### Phase 3: Deploy & Supervised Live Acceptance
 
