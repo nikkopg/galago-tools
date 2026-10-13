@@ -1241,6 +1241,106 @@ class TestPauseThroughRealCore(_RealCoreGrpcTestCase):
         self.transport.pause.assert_not_called()
         self.transport.abort.assert_not_called()
 
+    def test_operator_pause_then_resume_keeps_the_transfer_open_and_ends_success(self) -> None:
+        self.transport.get_status.side_effect = [
+            _STATUS_IDLE, _running(10), _running(10),
+            {"currentState": "paused", "percentProgress": 30},
+            {"currentState": "paused", "percentProgress": 30},
+            _running(60), _STATUS_DONE, _STATUS_DONE,
+        ]
+        thread, result = self._start_command_thread(
+            transfer=fast_pb2.Command.Transfer(**_ALL_TRANSFER_FIELDS))
+        self.stepper.wait_sleeping()
+
+        reply = self.stub.ExecuteCommand(self._fast(pause=fast_pb2.Command.Pause()))
+        self.assertEqual(reply.response, SUCCESS, reply.error_message)
+        self.transport.pause.assert_called_once_with(hard=False)
+        health = self._health()
+        self.assertEqual(health.status, BUSY)
+        self.assertTrue(thread.is_alive())
+
+        self.stepper.step()
+        self.stepper.wait_sleeping()
+        run_state = MessageToDict(self._health().run_state)
+        self.assertEqual(run_state["state"], "paused")
+        self.assertEqual(run_state["percent"], 30)
+        pause = run_state["pause"]
+        self.assertIsNone(pause.get("errorCode"))
+        self.assertIsNone(pause.get("errorName"))
+        self.assertEqual(pause["eventPayload"], {})
+        self.assertIn("since", pause)
+
+        reply = self.stub.ExecuteCommand(
+            self._fast(resume=fast_pb2.Command.Resume(is_tip_broken="no")))
+        self.assertEqual(reply.response, SUCCESS, reply.error_message)
+        self.transport.resume.assert_called_once_with(is_tip_broken=False)
+
+        self.stepper.step()
+        self.stepper.wait_sleeping()
+        self.assertEqual(
+            MessageToDict(self._health().run_state),
+            {"state": "running", "percent": 60, "pause": None})
+
+        self.stepper.step()
+        thread.join(timeout=10)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(result["reply"].response, SUCCESS)
+        self.assertEqual(MessageToDict(result["reply"].meta_data)["kind"], "ran")
+        health = self._health()
+        self.assertEqual(health.status, READY)
+        self.assertEqual(self.transport.get_status.call_count, 8)
+        self.transport.abort.assert_not_called()
+
+    def test_instrument_pause_keeps_a_run_protocol_open_with_no_command_sent(self) -> None:
+        with patch.object(
+                self.server, "_record_pause", wraps=self.server._record_pause) as spy:
+            def _p() -> dict[str, Any]:
+                return {
+                    "currentState": "paused", "percentProgress": 20,
+                    "lastEvent": {"messageType": 1, "payload": {"errorCode": -301}},
+                }
+
+            self.transport.get_status.side_effect = [
+                _STATUS_IDLE, _running(10), _p(), _p(), _running(60), _STATUS_DONE, _STATUS_DONE,
+            ]
+            thread, result = self._start_command_thread(
+                run_protocol=fast_pb2.Command.RunProtocol(csv=EXAMPLE1_CSV))
+            self.stepper.wait_sleeping()
+
+            self.stepper.step()
+            self.stepper.wait_sleeping()
+            run_state = MessageToDict(self._health().run_state)
+            self.assertEqual(run_state["state"], "paused")
+            self.assertEqual(run_state["percent"], 20)
+            self.assertEqual(run_state["pause"]["errorCode"], -301)
+            self.assertEqual(run_state["pause"]["errorName"], "TipsNotEnough")
+            since = run_state["pause"]["since"]
+
+            self.stepper.step()
+            self.stepper.wait_sleeping()
+            run_state = MessageToDict(self._health().run_state)
+            self.assertEqual(run_state["state"], "paused")
+            self.assertEqual(run_state["pause"]["since"], since)
+            self.assertEqual(spy.call_count, 1)
+
+            self.stepper.step()
+            self.stepper.wait_sleeping()
+            self.assertEqual(
+                MessageToDict(self._health().run_state),
+                {"state": "running", "percent": 60, "pause": None})
+
+            self.stepper.step()
+            thread.join(timeout=10)
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(result["reply"].response, SUCCESS)
+            self.assertEqual(MessageToDict(result["reply"].meta_data)["kind"], "ran")
+            health = self._health()
+            self.assertEqual(health.status, READY)
+            self.assertEqual(self.transport.get_status.call_count, 7)
+            self.transport.pause.assert_not_called()
+            self.transport.resume.assert_not_called()
+            self.transport.abort.assert_not_called()
+
 
 class TestTransferMapping(unittest.TestCase):
     def setUp(self) -> None:
@@ -1269,6 +1369,9 @@ class TestTransferMapping(unittest.TestCase):
         self.assertEqual(call.args[0], expected_request)
         self.assertIsNone(call.kwargs["expected_tray_id"])
         self.assertIsNone(call.kwargs["options"].cancel)
+        self.assertIs(call.kwargs["options"].through_pauses, True)
+        self.assertEqual(call.kwargs["options"].on_pause, self.server._record_pause)
+        self.assertEqual(call.kwargs["options"].on_progress, self.server._log_progress)
 
 
 class _MockedFastServerTestCase(unittest.TestCase):
@@ -1363,6 +1466,9 @@ class TestResultMapping(_MockedFastServerTestCase):
         call = self.service.run_protocol.call_args
         self.assertNotIn("verify_layout", call.kwargs)
         self.assertIsNone(call.kwargs["options"].cancel)
+        self.assertIs(call.kwargs["options"].through_pauses, True)
+        self.assertEqual(call.kwargs["options"].on_pause, self.server._record_pause)
+        self.assertEqual(call.kwargs["options"].on_progress, self.server._log_progress)
 
     def test_run_protocol_timeout_resolution(self) -> None:
         self.service.run_protocol.return_value = Ran(
@@ -2359,6 +2465,8 @@ class TestRecoveryCommands(unittest.TestCase):
         self.assertEqual(service.wait.call_args.kwargs["timeout_s"], 300)
         self.assertEqual(service.wait.call_args.kwargs["on_progress"],
                          self.server._log_progress)
+        self.assertNotIn("on_pause", service.wait.call_args.kwargs)
+        self.assertNotIn("through_pauses", service.wait.call_args.kwargs)
         service.abort.assert_not_called()
 
     def test_resume_that_pauses_again_reports_the_actionable_paused_message(self) -> None:

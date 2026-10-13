@@ -695,8 +695,9 @@ class FastServer(ToolServer):
                 try:
                     result = service.run_protocol(
                         params.csv,
-                        options=RunOptions(timeout_s=self._timeout(per_command),
-                                           on_progress=self._log_progress))
+                        options=RunOptions(
+                            timeout_s=self._timeout(per_command), on_progress=self._log_progress,
+                            on_pause=self._record_pause, through_pauses=True))
                 except (InstrumentHTTPError, httpx.HTTPError) as exc:
                     return _transport_error_reply(exc)
             return _result_reply(result)
