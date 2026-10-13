@@ -5,16 +5,16 @@ milestone_name: F.A.S.T. Live Run Control (adapter & rollout)
 current_phase: 02
 current_phase_name: Wait Through Pauses on the Pinned Core
 status: executing
-stopped_at: Completed 02-01-PLAN.md
-last_updated: "2026-10-13T07:50:10.422Z"
+stopped_at: Completed 02-02-PLAN.md
+last_updated: "2026-10-13T07:58:54.591Z"
 last_activity: 2026-10-13
 last_activity_desc: Phase 02 execution started
-state_head: d60c829d3df9e70a4291aa2992ee36e29a8aabd2
+state_head: f7d62f8ce9c901cdedf9b82db786f273e44f3fe0
 progress:
   total_phases: 3
   completed_phases: 1
   total_plans: 9
-  completed_plans: 6
+  completed_plans: 7
   percent: 33
 ---
 
@@ -31,7 +31,7 @@ is doing and recover it themselves; no adapter code path pauses, resumes or abor
 ## Current Position
 
 Phase: 02 (Wait Through Pauses on the Pinned Core) — EXECUTING
-Plan: 2 of 4
+Plan: 3 of 4
 Status: Ready to execute
 Last activity: 2026-10-13 — Phase 02 execution started
 
@@ -65,6 +65,7 @@ Progress: [███░░░░░░░] 33%
 | Phase 01 P04 | 10 min | 2 tasks | 1 files |
 | Phase 01 P05 | 25min | 2 tasks | 2 files |
 | Phase 02 P01 | 15 min | 2 tasks | 3 files |
+| Phase 02 P02 | 20min | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -92,6 +93,8 @@ Recent decisions affecting current work:
 - [Phase 01]: D-20: simulate_pause is an in-process, simulated-mode-only hook with no gRPC surface; _PAUSE_CLEARING_COMMANDS={Resume,Abort} clears a hooked pause only on a SUCCESS reply
 - [Phase 02]: D-02: gate venv re-installed from local fast-mcp clone at b30b38d (--no-deps --force-reinstall); GitLab push of fix/run-recovery-gate remains a Phase 3 prerequisite
 - [Phase 02]: D-08: rewrote the leading-paused Resume test to pin the re-pinned core's fixed behaviour (ResumeMarker masks a stale leading paused reading) instead of the old known-limitation assertion
+- [Phase 02]: D-03: LIVE-01 gate tests join TestRequirementsPin and check state gates by calling the real core directly, leaving FastServer-level idle tests unchanged
+- [Phase 02]: D-05: test_real_pause_info_records_like_the_stub passes at once (pins compatibility, does not drive a change); PauseInfo/recorder docstrings in server.py rewritten present-tense, no logic change
 
 ### Pending Todos
 
@@ -116,6 +119,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-13T07:50:10.380Z
-Stopped at: Completed 02-01-PLAN.md
+Last session: 2026-10-13T07:58:54.555Z
+Stopped at: Completed 02-02-PLAN.md
 Resume file: None
