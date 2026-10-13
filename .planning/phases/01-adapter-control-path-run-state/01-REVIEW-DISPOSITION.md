@@ -5,11 +5,11 @@ titles: json
 findings:
   - id: CR-01
     severity: critical
-    disposition: open
+    disposition: fixed
     title: "`_run_in_flight()` resets the run record on every entry, not just the first, silently clobbering an in-flight pause"
   - id: WR-01
     severity: warning
-    disposition: open
+    disposition: fixed
     title: "`_log_progress` writes `percent` into `run_state` without the `_run_percent()` sanitization every other path uses"
   - id: IN-01
     severity: info
@@ -23,17 +23,17 @@ findings:
     severity: info
     disposition: open
     title: "`_run_percent`'s return type annotation doesn't match the int branch's actual return value"
-open: 5
+open: 3
 total: 5
-recorded: 2026-10-12T22:45:37.914Z
+recorded: 2026-10-13T02:42:00.846Z
 ---
 
 # Phase 01: Code Review Disposition
 
 | Finding | Severity | Disposition | Source |
 |---------|----------|-------------|--------|
-| CR-01 | critical | open | - |
-| WR-01 | warning | open | - |
+| CR-01 | critical | fixed | 01-REVIEW-FIX.md |
+| WR-01 | warning | fixed | 01-REVIEW-FIX.md |
 | IN-01 | info | open | - |
 | IN-02 | info | open | - |
 | IN-03 | info | open | - |
