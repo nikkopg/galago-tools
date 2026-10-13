@@ -35,7 +35,7 @@ try:
     import httpx
 
     from fast_mcp.errors import Finding
-    from fast_mcp.orchestration import RunOutcome
+    from fast_mcp.orchestration import PauseInfo, RunOutcome
     from fast_mcp.results import (
         Aborted,
         Cancelled,
@@ -54,7 +54,7 @@ try:
         ValidationReport,
     )
     from fast_mcp.resources import default_openapi_path
-    from fast_mcp.run_control import RunHandle
+    from fast_mcp.run_control import RunHandle, RunOptions
     from fast_mcp.service import FastService, TransferRequest
     from fast_mcp.session import InstrumentSession
     from fast_mcp.transport import InstrumentHTTPError
@@ -2954,6 +2954,58 @@ class TestRequirementsPin(unittest.TestCase):
         direct_url = json.loads(
             importlib.metadata.distribution("fast_mcp").read_text("direct_url.json") or "{}")
         self.assertEqual(direct_url["vcs_info"]["commit_id"], pinned_sha)
+
+    def test_installed_core_has_wait_through_pauses_and_pause_info(self) -> None:
+        """D-03/LIVE-01: the installed core exposes the wait-through-pauses
+        capability (RunOptions.through_pauses/on_pause), PauseInfo from
+        fast_mcp.orchestration with the expected to_dict shape, and a
+        bool-only guard on wait()'s through_pauses before any transport
+        call -- a core without these would reach Phase 3 ungated."""
+        option_fields = {f.name: f for f in fields(RunOptions)}
+        self.assertIn("through_pauses", option_fields)
+        self.assertIs(option_fields["through_pauses"].default, False)
+        self.assertIn("on_pause", option_fields)
+        self.assertIsNone(option_fields["on_pause"].default)
+
+        self.assertEqual(PauseInfo.__module__, "fast_mcp.orchestration")
+        info = PauseInfo(error_code=-645, error_name="WrongPlateType", percent=0,
+                          event_payload={"k": 1})
+        self.assertEqual(set(info.to_dict()), {"errorCode", "errorName", "percent",
+                                                 "eventPayload"})
+
+        transport = MagicMock()
+        core = _real_core(self, transport)
+        with self.assertRaises(TypeError):
+            core.wait(RunHandle(), through_pauses=cast(Any, "yes"))
+        transport.get_status.assert_not_called()
+        transport.get_plate_definitions.assert_not_called()
+
+    def test_installed_core_refuses_pause_resume_abort_while_idle(self) -> None:
+        """D-03/LIVE-01: the installed core's own state gates refuse
+        pause/resume/abort while idle, with no transport call -- checked on
+        the core directly, not just at the FastServer layer."""
+        transport = MagicMock()
+        transport.get_status.return_value = {"currentState": "idle"}
+        core = _real_core(self, transport)
+
+        pause_result = core.pause(hard=False)
+        self.assertIsInstance(pause_result, Refused)
+        self.assertEqual(pause_result.state, "idle")
+        self.assertEqual(pause_result.reason, "no running protocol to pause")
+
+        resume_result = core.resume(is_tip_broken=False)
+        self.assertIsInstance(resume_result, Refused)
+        self.assertEqual(resume_result.state, "idle")
+        self.assertEqual(resume_result.reason, "no paused protocol to resume")
+
+        abort_result = core.abort(return_liquid=False)
+        self.assertIsInstance(abort_result, Refused)
+        self.assertEqual(abort_result.state, "idle")
+        self.assertEqual(abort_result.reason, "no running or paused protocol to abort")
+
+        transport.pause.assert_not_called()
+        transport.resume.assert_not_called()
+        transport.abort.assert_not_called()
 
 
 if __name__ == "__main__":
