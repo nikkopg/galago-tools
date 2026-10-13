@@ -110,8 +110,9 @@ EjectTip"""
 
 
 class _StubPauseInfo:
-    """D-13: tests feed a stub, never the core's PauseInfo (the pinned core
-    76f8c3f has no PauseInfo)."""
+    """D-13: tests may now use the real PauseInfo (TestRunState does); this
+    stub stays for payloads the real PauseInfo would sanitise away, such as
+    the unencodable object in test_unencodable_run_state_falls_back_to_unknown."""
 
     def __init__(self, data: dict[str, Any]) -> None:
         self._data = dict(data)
@@ -1873,6 +1874,27 @@ class TestRunState(unittest.TestCase):
         self.assertEqual(since.utcoffset(), timedelta(0))
         self.assertLessEqual(before, since)
         self.assertLessEqual(since, after)
+        self.assertEqual(self.service.method_calls, [])
+
+    def test_real_pause_info_records_like_the_stub(self) -> None:
+        """D-05: pins compatibility, not a drive -- the duck-typed recorder
+        already accepts the real PauseInfo, so this test passes at once."""
+        with self.server._run_in_flight():
+            self.server._record_pause(
+                PauseInfo(error_code=-645, error_name="WrongPlateType", percent=0,
+                          event_payload=dict(_WRONG_PLATE_PAUSE["eventPayload"])))
+            run_state = self._run_state()
+
+        self.assertEqual(run_state["state"], "paused")
+        self.assertEqual(run_state["percent"], 0)
+        pause = run_state["pause"]
+        self.assertEqual(
+            set(pause), {"errorCode", "errorName", "percent", "eventPayload", "since"})
+        self.assertEqual(pause["errorCode"], -645)
+        self.assertEqual(pause["errorName"], "WrongPlateType")
+        self.assertEqual(pause["eventPayload"], _WRONG_PLATE_PAUSE["eventPayload"])
+        since = datetime.fromisoformat(pause["since"])
+        self.assertEqual(since.utcoffset(), timedelta(0))
         self.assertEqual(self.service.method_calls, [])
 
     def test_running_observation_clears_the_pause_and_paused_keeps_it(self) -> None:

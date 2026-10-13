@@ -373,10 +373,12 @@ def _recovery_reply(action: str, result: "dict | Refused") -> ExecuteCommandRepl
 
 
 class _PauseInfoLike(t.Protocol):
-    """A duck-typed stand-in for fast-mcp's PauseInfo (D-13): the pinned core
-    76f8c3f has no PauseInfo, so this module must not import it (nor
-    ResumeMarker, nor the new RunOptions fields). Phase 2 connects the
-    recorder as RunOptions(on_pause=self._record_pause) after the re-pin.
+    """A duck-typed stand-in for fast-mcp's PauseInfo (D-13): the re-pinned
+    core exports PauseInfo from fast_mcp.orchestration, but the adapter
+    invariant's allowed fast_mcp modules do not include that module, so
+    this file still never imports it (nor ResumeMarker). The real PauseInfo
+    satisfies this Protocol, and Transfer/RunProtocol pass
+    RunOptions(on_pause=self._record_pause) (D-04, D-05).
     `typing.Protocol` is used as `t.Protocol` because `fast_mcp.model.Protocol`
     is already imported under the bare name `Protocol`."""
 
@@ -385,9 +387,10 @@ class _PauseInfoLike(t.Protocol):
 
 class _DictPauseInfo:
     """Wraps a plain dict so FastServer.simulate_pause (D-20) can feed the
-    same _record_pause that Phase 2 wires as RunOptions(on_pause=...):
-    _PauseInfoLike only requires to_dict(). Stores and returns a copy, so
-    the caller's dict and the recorded one never alias."""
+    same _record_pause that Transfer and RunProtocol wire as
+    RunOptions(on_pause=self._record_pause): _PauseInfoLike only requires
+    to_dict(). Stores and returns a copy, so the caller's dict and the
+    recorded one never alias."""
 
     def __init__(self, data: dict[str, Any]) -> None:
         self._data = dict(data)
@@ -544,11 +547,10 @@ class FastServer(ToolServer):
                 self._run_record["pause"] = None
 
     def _record_pause(self, info: "_PauseInfoLike") -> None:
-        """Records the current pause for run_state (D-11, D-12). Phase 1 has
-        no caller in production code -- the simulated hook (Plan 01-05) and
-        the tests are the callers; Phase 2 wires it as
-        RunOptions(on_pause=self._record_pause). Records only: no service
-        call, no control method (D-16)."""
+        """Records the current pause for run_state (D-11, D-12). Transfer and
+        RunProtocol wire it as RunOptions(on_pause=self._record_pause); the
+        simulated hook (Plan 01-05) and the tests are its other callers.
+        Records only: no service call, no control method (D-16)."""
         pause = dict(info.to_dict())
         pause["since"] = datetime.now(timezone.utc).isoformat()
         with self._run_state_lock:
@@ -572,9 +574,9 @@ class FastServer(ToolServer):
         contact and no new gRPC command -- fast.proto's 1:1 command surface
         is unchanged. `pause=None` clears a hooked pause, as a successful
         Resume/Abort would; a dict is wrapped as _DictPauseInfo and fed to
-        the same _record_pause that Phase 2 wires as
-        RunOptions(on_pause=...). An out-of-process trigger (a gRPC command
-        or an env var) is a deferred idea, not built here."""
+        the same _record_pause that Transfer and RunProtocol wire as
+        RunOptions(on_pause=self._record_pause). An out-of-process trigger
+        (a gRPC command or an env var) is a deferred idea, not built here."""
         if not self.simulated:
             raise RuntimeError("simulate_pause is only available in simulated mode")
         if pause is None:
