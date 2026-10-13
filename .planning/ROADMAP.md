@@ -16,7 +16,7 @@ Companion milestone: galago-core "Live Run Control: queue & run page".
 - [x] **Phase 1: Adapter Control Path & Run State** - Control commands reach an in-flight run (completed 2026-10-13)
   without touching the tool's status, `run_state` is reported, and the safety invariants and tests
   are extended, all proven against a mocked `FastService`.
-- [ ] **Phase 2: Wait Through Pauses on the Pinned Core** - Re-pin to the wait-through-pauses core
+- [x] **Phase 2: Wait Through Pauses on the Pinned Core** - Re-pin to the wait-through-pauses core (completed 2026-10-13)
   and keep `Transfer`/`RunProtocol` steps open through pauses, with paused time excluded from the
   timeout.
 - [ ] **Phase 3: Deploy & Supervised Live Acceptance** - Deploy in the safe order once galago-core's
@@ -80,7 +80,7 @@ outcome.
   3. An operator abort ends the step "run aborted by operator at <p>%"; a timeout still never aborts.
   4. Paused time doesn't count toward the run timeout.
 
-**Plans**: 4/4 plans executed (sequential waves 1-4; every plan edits `tools/tests/fast_test.py`)
+**Plans**: 4/4 plans complete (sequential waves 1-4; every plan edits `tools/tests/fast_test.py`)
 
 Plans:
 **Wave 1**
