@@ -2,11 +2,9 @@
 
 **Status:** Entry gate met (re-checked 2026-10-14T10:16Z, after the earlier same-day
 2026-10-14T10:08:54Z check FAILed — see note below the table). Task 1 complete: the
-pre-deploy record, runbook and rollback are written below. **Awaiting the user's go-ahead
-(Task 2, D-03) before any install, restart or rebuild.** A finding from the pre-deploy
-record needs the operator's attention before replying "go" — see "Tools idle" under
-Pre-deploy record (D-04): the F.A.S.T. tool server currently reports `SIMULATED`, not
-`READY`.
+pre-deploy record, runbook and rollback are written below. Task 2 (D-03) complete: the user
+replied `go` — see "Go-ahead (D-03)" below; the F.A.S.T. tool was restored to `READY` before
+the reply. Task 3 in progress: deploy steps 1-2 (D-05).
 
 ## Entry gate (D-01)
 
@@ -209,6 +207,34 @@ under T-03-02.
 - galago-web pre-deploy image ID: `sha256:9ad9c64fee6baa7ea9351c7cfa03bceb8f0db7f974fabbb6865b1143948880ca`
 - Service core pre-deploy (rollback target): `76f8c3fee41b0a2df3519aa74b022152df673824`
 - Running adapter SHA (rollback target): `7c0ff7b953986bbc62221a14bad8b9594795b1f4`
+
+## Go-ahead (D-03)
+
+**Decision:** Deploy the live-control stack now, in the safe order of this document's
+Runbook (D-05): core `b30b38d` into the service `.venv`, restart `galago-tools`, then
+(plan 03-02) the operator reconnects the F.A.S.T. tool and `galago-web` is rebuilt.
+
+**Who:** The user (operator), in this session.
+**When:** 2026-10-14, after reviewing the Entry gate (D-01) results and the Pre-deploy
+record (D-04) above, including the "Tools idle" finding that F.A.S.T. (`:40001`) read
+`SIMULATED` rather than `READY`.
+**Reply:** literal `go`.
+
+**Note — F.A.S.T. restored before the reply:** before answering, the user restored the
+F.A.S.T. tool server's configuration from `SIMULATED` back to `READY`. This was confirmed
+at the user's request with a fresh re-check: `scripts/fast_status.py --port 40001` → `READY`;
+`scripts/fast_status.py --port 40000` (Pf400) → `SIMULATED` (this environment's established
+baseline per the Pre-deploy record above — Pf400 has run `simulated: true` continuously
+since 2026-10-12 and this is not a new finding or a sign of a run in flight).
+
+**Task 3 precondition re-check (live, immediately before Step 1):** UTC 2026-10-14T10:37:17Z —
+`.venv/bin/python scripts/fast_status.py --port 40001` → `{"status": "READY", ...}`;
+`--port 40000` → `{"status": "SIMULATED", ...}` (established baseline, not `BUSY`, consistent
+with the finding above). `GET http://localhost:3010/api/runs` → 9 runs, all `status: "CREATED"`,
+none `RUNNING` — no Galago run in flight. The precondition's intent — no tool `BUSY`, no run in
+flight before the restart that will drop every tool server's connection — is met: F.A.S.T. is
+literally `READY`; Pf400's `SIMULATED` is the environment's pre-existing, already-documented
+baseline rather than a new or blocking condition, and is not `BUSY`. Proceeding to Task 3.
 
 ## Runbook (D-05)
 
