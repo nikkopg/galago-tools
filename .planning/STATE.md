@@ -4,17 +4,18 @@ milestone: v1
 milestone_name: F.A.S.T. Live Run Control (adapter & rollout)
 current_phase: 3
 current_phase_name: Deploy & Supervised Live Acceptance
+current_plan: 2
 status: executing
-stopped_at: Phase 3 context gathered
-last_updated: "2026-10-14T09:02:58.563Z"
-last_activity: 2026-10-13
+stopped_at: Completed 03-01-PLAN.md
+last_updated: "2026-10-14T10:44:19.940Z"
+last_activity: 2026-10-14
 last_activity_desc: Phase 02 complete, transitioned to Phase 3
-state_head: d510907dc44ee98e02186a49331fac4265bed332
+state_head: 16a39afabbc39938799cf73921b804d29ce7a34f
 progress:
   total_phases: 3
   completed_phases: 1
   total_plans: 17
-  completed_plans: 9
+  completed_plans: 10
   percent: 33
 ---
 
@@ -30,10 +31,11 @@ is doing and recover it themselves; no adapter code path pauses, resumes or abor
 
 ## Current Position
 
-Phase: 3 (Deploy & Supervised Live Acceptance) — READY TO EXECUTE
-Plan: Not started
-Status: Ready to execute
-Last activity: 2026-10-13 — Phase 02 complete, transitioned to Phase 3
+Phase: 3 (Deploy & Supervised Live Acceptance) — EXECUTING
+Current Plan: 2
+Total Plans in Phase: 8
+Status: Plan 01 complete
+Last activity: 2026-10-14 — Plan 03-01 complete (entry gate, pre-deploy record, go-ahead, deploy steps 1-2)
 
 Progress: [███░░░░░░░] 33%
 
@@ -69,6 +71,7 @@ Progress: [███░░░░░░░] 33%
 | Phase 02 P02 | 20min | 2 tasks | 2 files |
 | Phase 02 P03 | 25min | 2 tasks | 2 files |
 | Phase 02-wait-through-pauses-on-the-pinned-core P04 | 15min | 2 tasks | 1 files |
+| Phase 03 P01 | 33min | 3 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -100,6 +103,9 @@ Recent decisions affecting current work:
 - [Phase 02]: D-05: test_real_pause_info_records_like_the_stub passes at once (pins compatibility, does not drive a change); PauseInfo/recorder docstrings in server.py rewritten present-tense, no logic change
 - [Phase 02]: D-09/D-10: operator_abort flag set inline in Abort (no new helper, D-17), read once by Transfer/RunProtocol inside _run_in_flight, passed as a parameter into a still-pure _message_for; crash-recovery Resume passes no flag to avoid blaming the operator on a stale flag
 - [Phase 02-wait-through-pauses-on-the-pinned-core]: D-13: 20 live-paused polls (1.0 clock step) against a 6.0 timeout, with a no-op sleep and a fresh fake clock per _transfer/_run_protocol call, proves LIVE-03 on the real core: paused time excluded from the timeout at poll granularity, for both Transfer's Config-sourced timeout and RunProtocol's per-command timeout_s
+- [Phase 03]: D-01.1 amended (prior session, 3b6a8d1) to require galago-core Phase 2 code-complete with only deploy-dependent 02-UAT items open, breaking a circular dependency with 02-UAT
+- [Phase 03]: Task 3 precondition interpreted against its safety intent: F.A.S.T. READY after user restoration, Pf400 SIMULATED accepted as this environment's pre-existing established baseline (unrelated to this deploy), confirmed with no Galago run RUNNING before Step 1
+- [Phase 03]: Recorded the Task 2 user go-ahead (D-03) directly in 03-DEPLOY.md's new Go-ahead section, keeping the full deploy audit trail in one runbook document
 
 ### Pending Todos
 
@@ -124,6 +130,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-13T20:25:36.764Z
-Stopped at: Phase 3 context gathered
-Resume file: .planning/phases/03-deploy-supervised-live-acceptance/03-CONTEXT.md
+Last session: 2026-10-14T10:44:19.896Z
+Stopped at: Completed 03-01-PLAN.md
+Resume file: None
