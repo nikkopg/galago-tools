@@ -4,18 +4,18 @@ milestone: v1
 milestone_name: F.A.S.T. Live Run Control (adapter & rollout)
 current_phase: 3
 current_phase_name: Deploy & Supervised Live Acceptance
-current_plan: 2
+current_plan: 3
 status: executing
-stopped_at: Completed 03-01-PLAN.md
-last_updated: "2026-10-14T10:44:19.940Z"
+stopped_at: Completed 03-02-PLAN.md
+last_updated: "2026-10-14T13:16:17.045Z"
 last_activity: 2026-10-14
 last_activity_desc: Phase 02 complete, transitioned to Phase 3
-state_head: 16a39afabbc39938799cf73921b804d29ce7a34f
+state_head: 05f8a4e8258cb03dc7fa33a4534a40553337bffb
 progress:
   total_phases: 3
   completed_phases: 1
   total_plans: 17
-  completed_plans: 10
+  completed_plans: 11
   percent: 33
 ---
 
@@ -32,7 +32,7 @@ is doing and recover it themselves; no adapter code path pauses, resumes or abor
 ## Current Position
 
 Phase: 3 (Deploy & Supervised Live Acceptance) — EXECUTING
-Current Plan: 2
+Current Plan: 3
 Total Plans in Phase: 8
 Status: Plan 01 complete
 Last activity: 2026-10-14 — Plan 03-01 complete (entry gate, pre-deploy record, go-ahead, deploy steps 1-2)
@@ -72,6 +72,7 @@ Progress: [███░░░░░░░] 33%
 | Phase 02 P03 | 25min | 2 tasks | 2 files |
 | Phase 02-wait-through-pauses-on-the-pinned-core P04 | 15min | 2 tasks | 1 files |
 | Phase 03 P01 | 33min | 3 tasks | 2 files |
+| Phase 03 P02 | ~2h24min | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -106,6 +107,8 @@ Recent decisions affecting current work:
 - [Phase 03]: D-01.1 amended (prior session, 3b6a8d1) to require galago-core Phase 2 code-complete with only deploy-dependent 02-UAT items open, breaking a circular dependency with 02-UAT
 - [Phase 03]: Task 3 precondition interpreted against its safety intent: F.A.S.T. READY after user restoration, Pf400 SIMULATED accepted as this environment's pre-existing established baseline (unrelated to this deploy), confirmed with no Galago run RUNNING before Step 1
 - [Phase 03]: Recorded the Task 2 user go-ahead (D-03) directly in 03-DEPLOY.md's new Go-ahead section, keeping the full deploy audit trail in one runbook document
+- [Phase 03]: User decision: 'No cache rebuild' after the cached docker compose up -d --build produced a byte-identical galago-web image ID; forced docker compose build --no-cache galago-web + up -d to genuinely satisfy the new-image-ID must-have
+- [Phase 03]: rollback-pre-live04 left un-retagged per user instruction; caveat recorded in 03-DEPLOY.md that it shares content with the new deploy (same galago-core HEAD) and is not a true pre-milestone rollback anchor
 
 ### Pending Todos
 
@@ -130,6 +133,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-14T10:44:19.896Z
-Stopped at: Completed 03-01-PLAN.md
+Last session: 2026-10-14T13:16:17.000Z
+Stopped at: Completed 03-02-PLAN.md
 Resume file: None

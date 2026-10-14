@@ -114,7 +114,7 @@ present.
   3. Pause → Resume ends SUCCESS; Pause → Abort ends "aborted by operator" with the queue FAILED.
   4. After restarting `galago-web` mid-run, the operator recovers through the tool page.
 
-**Plans**: 1/8 plans executed (sequential waves 1-8; plans 03-01 to 03-07 have blocking-human checkpoints; the
+**Plans**: 2/8 plans executed (sequential waves 1-8; plans 03-01 to 03-07 have blocking-human checkpoints; the
 instrument and services are shared, so nothing runs in parallel)
 
 Plans:
@@ -122,7 +122,7 @@ Plans:
 - [x] 03-01-PLAN.md — D-01 entry gate re-checked at execution (NOT met on 2026-10-14), pre-deploy record, runbook with rollback (`03-DEPLOY.md`), `scripts/fast_status.py`, the user's deploy go-ahead, tracer: core b30b38d into the service `.venv`, then `galago-tools` restarted (LIVE-04)
 
 **Wave 2** *(blocked on Wave 1 completion)*
-- [ ] 03-02-PLAN.md — operator reconnects the F.A.S.T. tool (run_state from the gated core), `galago-web` rebuilt with a rollback tag, `03-ACCEPTANCE.md` opened with LIVE-04 (LIVE-04)
+- [x] 03-02-PLAN.md — operator reconnects the F.A.S.T. tool (run_state from the gated core), `galago-web` rebuilt with a rollback tag, `03-ACCEPTANCE.md` opened with LIVE-04 (LIVE-04)
 
 **Wave 3** *(blocked on Wave 2 completion)*
 - [ ] 03-03-PLAN.md — simulated dry run (D-07): `scripts/fast_dryrun.py` harness on :40003 driving `simulate_pause`, operator walks the run page and tool page, teardown (LIVE-05/06/07)
