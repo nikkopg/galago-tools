@@ -358,10 +358,18 @@ window LIVE-04's safe order exists to prevent.
 
 | Step | UTC start | UTC end | Command | Check output | Result |
 |------|-----------|---------|---------|---------------|--------|
-| Step 1 | — | — | (not yet run) | — | pending (Task 3) |
-| Step 2 | — | — | (not yet run) | — | pending (Task 3) |
+| Step 1 | 2026-10-14T10:38:29Z | 2026-10-14T10:38:46Z | `~/.local/bin/uv pip install --python .venv/bin/python "git+file:///home/formulatrix/data/nikko/fast/fast-mcp@b30b38df48e8480f325228145ccae7915a56e437"` | Baseline (pre-install) run of `TestRequirementsPin` on the old core exited 1 (`ImportError: cannot import name 'PauseInfo' from 'fast_mcp.orchestration'`), proving the check discriminates. Install: `Uninstalled 1 package`/`Installed 1 package` (`fast-mcp` only, matching the D-04 dry-run preview). Post-install: `direct_url.json` assert passed, printed `pinned file:///home/formulatrix/data/nikko/fast/fast-mcp`; `TestRequirementsPin -v` → `Ran 3 tests in 0.003s` / `OK` (all 3 pass). `uv pip freeze` diff against the pre-deploy freeze: only the `fast-mcp` line changed (`76f8c3fe` → `b30b38d`), no other package. | PASS |
+| Step 2 | 2026-10-14T10:39:24Z (restart local 17:39:24 WIB) | 2026-10-14T10:39:38Z (both ports listening) | `systemctl --user restart galago-tools` | `systemctl --user is-active galago-tools` → `active`. `MainPID` `944069` → `4044033` (`ActiveEnterTimestamp` 2026-10-14 17:39:26 WIB). Journal since restart shows `Killed process F.A.S.T` (old), then `Started Pf400 on port 40000` and `Started F.A.S.T on port 40001`, no Python traceback. Newest trace-log folder `~/.local/share/galago/trace_logs/1791974367/F.A.S.T.log` contains `fast server started, listening on 40001` (count 1), no traceback. `fast_status.py --port 40001` → `{"status": "NOT_CONFIGURED", "run_state": null, ...}` (expected — no Configure sent, awaiting plan 03-02's operator reconnect). | PASS |
 | Step 2b reconnect | — | — | (not yet run — operator action) | — | pending (plan 03-02) |
 | Step 3 | — | — | (not yet run) | — | pending (plan 03-02) |
+
+### Post-deploy record (Task 3)
+
+- Deployed galago-tools HEAD: `fdbe1303b102c877e67ce9bca18600cc9ac8ed64`; last code commit (`tools interfaces setup.py requirements.txt`): `d9acdcf0e8f203cd553aaafad2e262b387bcdc06` (unchanged from the pre-deploy record — the editable install now serves this HEAD, including the regenerated proto with `run_state`/`Pause`).
+- Post-deploy MainPID: `4044033`, active since `2026-10-14 17:39:26 WIB`.
+- Post-deploy trace-log folder: `~/.local/share/galago/trace_logs/1791974367/`; F.A.S.T. log: `~/.local/share/galago/trace_logs/1791974367/F.A.S.T.log`. Later plans compare against this path to detect an unexpected restart.
+- `fast_status.py --port 40000` (Pf400) also reads `NOT_CONFIGURED` post-restart — expected, every tool server loses its configuration on restart; Pf400 is out of scope for this plan's reconnect (plan 03-02 covers F.A.S.T. only).
+- `galago-web` was not touched; Claude sent no `Configure`, `ExecuteCommand` or any other command to any tool in this task.
 
 ## Logs to watch (D-08)
 
