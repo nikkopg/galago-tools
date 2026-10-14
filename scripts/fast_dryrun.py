@@ -83,10 +83,15 @@ class DryRunFastServer(FastServer):
         self._pause_timer: Optional[threading.Timer] = None
         self._suppress_rearm = False
 
-    # RED (D-07): the real-Configure refusal is not yet implemented -- a
-    # request with simulated=False currently falls through to the inherited
-    # ToolServer.Configure, which does not refuse it. self_test()'s first
-    # assertion is expected to fail here.
+    def Configure(
+        self, request: tool_base_pb2.Config, context: grpc.ServicerContext
+    ) -> tool_base_pb2.ConfigureReply:
+        if not request.simulated:
+            logging.warning("DRYRUN Configure refused: real mode requested")
+            return tool_base_pb2.ConfigureReply(
+                response=tool_base_pb2.NOT_READY,
+                error_message="dry-run harness is simulated-only: turn Simulate on")
+        return super().Configure(request, context)
 
     def _configure(self, config: fast_pb2.Config) -> None:
         raise RuntimeError("dry-run harness never opens an instrument connection")
@@ -145,7 +150,8 @@ class DryRunFastServer(FastServer):
                 self._episodes_left = 0
         logging.info(
             "DRYRUN reply %s %s",
-            tool_base_pb2.ResponseCode.Name(reply.response), reply.error_message)
+            tool_base_pb2.ResponseCode.Name(reply.response),  # type: ignore[attr-defined]
+            reply.error_message)
         return reply
 
 
@@ -285,7 +291,7 @@ def self_test() -> int:
             if reply.response != tool_base_pb2.SUCCESS:
                 return fail(f"simulated Configure failed: {reply}")
             status = stub.GetStatus(empty_pb2.Empty())
-            if tool_base_pb2.ToolStatus.Name(status.status) != "SIMULATED":
+            if tool_base_pb2.ToolStatus.Name(status.status) != "SIMULATED":  # type: ignore[attr-defined]
                 return fail(f"status not SIMULATED: {status}")
             run_state = MessageToDict(status.run_state)
             if run_state.get("state") != "idle":
