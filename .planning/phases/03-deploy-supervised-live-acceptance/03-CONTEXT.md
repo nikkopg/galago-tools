@@ -35,8 +35,17 @@ for a failed scenario (D-14).
 ### Entry gate (prerequisites)
 - **D-01:** Phase 3 execution does not start until all of these hold. The first plan task checks
   them and stops (checkpoint) if any fails:
-  1. galago-core's "Live Run Control: queue & run page" milestone is complete and verified (on
-     2026-10-14 its Phase 2 is at plan 5 of 6, so this is **not yet met**).
+  1. galago-core's "Live Run Control: queue & run page" Phase 2 is code-complete: every plan has
+     a SUMMARY, `controller/` is clean, and `tsc`/vitest are green (checked under condition 3).
+     Its UAT does **not** need to be complete. Every 02-UAT item still open (pending, blocked or
+     issue) must be one that needs the deployed adapter (Pause, `run_state`, wait-through-pauses).
+     The executor lists each open item and why it depends on the deploy. Any open item that does
+     not depend on the deploy fails the gate. *Amended 2026-10-14 by the user: the original
+     wording ("milestone complete and verified") was circular. galago-core's 02-UAT tests 2
+     (Pause got `UNRECOGNIZED_COMMAND`) and 5 (no pause prompt) can only pass once this phase
+     deploys the adapter.* The deploy-dependent UAT items are re-tested after plan 03-02 (new
+     adapter + rebuilt galago-web), before the live scenarios. Test 5 is covered by 03-05's
+     LIVE-05 evidence.
   2. This repo's gate is green on `feat/fast-tool` (`bin/make proto test`, 143 tests at Phase 2).
   3. galago-core's `vendor/galago-tools` submodule points at a commit with `StatusReply.run_state`
      and the `Pause` command (today `cb7886d`, which has both; Phase 2 changed no proto), and its
