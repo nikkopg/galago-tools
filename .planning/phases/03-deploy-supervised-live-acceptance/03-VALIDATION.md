@@ -40,10 +40,15 @@ created: "2026-10-14"
 
 | Task ID | Plan | Wave | Requirement | Threat Ref | Secure Behavior | Test Type | Automated Command | File Exists | Status |
 |---------|------|------|-------------|------------|-----------------|-----------|-------------------|-------------|--------|
-| 3-xx (deploy) | TBD | TBD | LIVE-04 | ungated-core window | Core is gated before the new UI goes live | automated | `.venv/bin/python -m unittest tools.tests.fast_test.TestRequirementsPin -v`; `systemctl --user is-active galago-tools`; `docker ps --filter name=galago-web` | ✅ | ⬜ pending |
-| 3-xx (deck-3) | TBD | TBD | LIVE-05 | software acting as operator | Prompt names deck and plate; operator decides | manual | — | n/a | ⬜ pending |
-| 3-xx (pause/abort) | TBD | TBD | LIVE-06 | stale command | Abort wording exact; queue FAILED | manual + static pre-check | `grep -n "run aborted by operator at" tools/fast/server.py` | ✅ | ⬜ pending |
-| 3-xx (web restart) | TBD | TBD | LIVE-07 | — | Recovery only through the tool page | manual | — | n/a | ⬜ pending |
+| 3-01-T1 (entry gate) | 03-01 | 1 | LIVE-04 | T-03-05 | Nothing changes until D-01 holds and the user says go | automated | `PATH=$HOME/data/nikko/.venvs/galago-py310/bin:$PATH bash bin/make proto test`; galago-core `npm test` / `npm run test:unit`; 03-DEPLOY.md gate rows | ✅ | ⬜ pending |
+| 3-01-T3 (deploy steps 1-2, tracer) | 03-01 | 1 | LIVE-04 | T-03-01, T-03-02, T-03-03 | Core is gated before the adapter restarts | automated | `.venv/bin/python -m unittest tools.tests.fast_test.TestRequirementsPin -v`; `systemctl --user is-active galago-tools`; `.venv/bin/python scripts/fast_status.py --port 40001` | ✅ | ⬜ pending |
+| 3-02-T1/T2 (reconnect, galago-web rebuild) | 03-02 | 2 | LIVE-04 | T-03-06, T-03-07, T-03-08 | New UI only after the tool reports run_state from the gated core | automated + human-action | `scripts/fast_status.py`; `docker inspect galago-web`; `curl http://localhost:3010/runs`; build contains `is_tip_broken` | ✅ | ⬜ pending |
+| 3-03-T1/T2/T3 (dry run, D-07) | 03-03 | 3 | LIVE-05/06/07 | T-03-09, T-03-12 | Simulated-only harness can never reach the instrument | automated + manual walkthrough | `PYTHONPATH=. $HOME/data/nikko/.venvs/galago-py310/bin/python scripts/fast_dryrun.py --self-test` | ❌ W0: created by 03-03-T1 | ⬜ pending |
+| 3-04 (pause/resume) | 03-04 | 4 | LIVE-06 | T-03-14, T-03-15 | Every control command operator-sent; step stays open | manual (operator) + log record | record check: `awk` field count on 03-ACCEPTANCE.md LIVE-06a | n/a | ⬜ pending |
+| 3-05 (deck-3) | 03-05 | 5 | LIVE-05 | T-03-17, T-03-18 | Prompt names deck and plate; operator decides | manual (operator) + log record | record check on 03-ACCEPTANCE.md LIVE-05 | n/a | ⬜ pending |
+| 3-06 (pause/abort) | 03-06 | 6 | LIVE-06 | T-03-19, T-03-20 | Abort wording exact; queue FAILED; no later step | manual + static pre-check | `grep -c "run aborted by operator at" tools/fast/server.py` (precondition) | ✅ | ⬜ pending |
+| 3-07 (web restart) | 03-07 | 7 | LIVE-07 | T-03-21, T-03-22, T-03-23 | Recovery only through the tool page; restart only on go-restart | manual + automated restart checks | `docker inspect galago-web`; `scripts/fast_status.py` BUSY/paused after restart | n/a | ⬜ pending |
+| 3-08 (closeout) | 03-08 | 8 | LIVE-04..07 | T-03-24, T-03-25 | No unmapped control command; requirements complete only from evidence | automated | `PATH=$HOME/data/nikko/.venvs/galago-py310/bin:$PATH bash bin/make test`; Summary PASS count | ✅ | ⬜ pending |
 
 *Task IDs are filled in by the planner. Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
 
@@ -51,7 +56,7 @@ created: "2026-10-14"
 
 ## Wave 0 Requirements
 
-Existing infrastructure covers all phase requirements. The `simulate_pause` dry-run harness (RESEARCH Open Question 1) is an ops/QA tool, not a gated test file.
+Existing infrastructure covers all phase requirements. The `simulate_pause` dry-run harness (RESEARCH Open Question 1) is an ops/QA tool, not a gated test file: `scripts/fast_dryrun.py`, created by plan 03-03 Task 1 with its own `--self-test` (and ruff-checked by the gate's `ruff check .`).
 
 ---
 

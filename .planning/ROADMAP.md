@@ -114,7 +114,34 @@ present.
   3. Pause → Resume ends SUCCESS; Pause → Abort ends "aborted by operator" with the queue FAILED.
   4. After restarting `galago-web` mid-run, the operator recovers through the tool page.
 
-**Plans**: TBD
+**Plans**: 8 plans (sequential waves 1-8; plans 03-01 to 03-07 have blocking-human checkpoints; the
+instrument and services are shared, so nothing runs in parallel)
+
+Plans:
+**Wave 1**
+- [ ] 03-01-PLAN.md — D-01 entry gate re-checked at execution (NOT met on 2026-10-14), pre-deploy record, runbook with rollback (`03-DEPLOY.md`), `scripts/fast_status.py`, the user's deploy go-ahead, tracer: core b30b38d into the service `.venv`, then `galago-tools` restarted (LIVE-04)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [ ] 03-02-PLAN.md — operator reconnects the F.A.S.T. tool (run_state from the gated core), `galago-web` rebuilt with a rollback tag, `03-ACCEPTANCE.md` opened with LIVE-04 (LIVE-04)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [ ] 03-03-PLAN.md — simulated dry run (D-07): `scripts/fast_dryrun.py` harness on :40003 driving `simulate_pause`, operator walks the run page and tool page, teardown (LIVE-05/06/07)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+- [ ] 03-04-PLAN.md — live LIVE-06a: Pause -> Resume -> SUCCESS, operator-driven (LIVE-06)
+
+**Wave 5** *(blocked on Wave 4 completion)*
+- [ ] 03-05-PLAN.md — live LIVE-05: deck 3 empty -> prompt names deck and plate -> fix -> Resume -> same step SUCCESS (LIVE-05)
+
+**Wave 6** *(blocked on Wave 5 completion)*
+- [ ] 03-06-PLAN.md — live LIVE-06b: Pause -> Abort -> "run aborted by operator at <p>%", queue FAILED, no later step (LIVE-06)
+
+**Wave 7** *(blocked on Wave 6 completion)*
+- [ ] 03-07-PLAN.md — live LIVE-07: pause, restart `galago-web` on the operator's go-restart, recover from the tool page (LIVE-07)
+
+**Wave 8** *(blocked on Wave 7 completion)*
+- [ ] 03-08-PLAN.md — LIVE-07 record, safety-invariant audit of every control command since the deploy, post-acceptance gate, D-13 completeness (LIVE-04..07)
+
 **Safety**: every motion step needs the operator's explicit go-ahead, e-stop within reach.
 
 ## Backlog
