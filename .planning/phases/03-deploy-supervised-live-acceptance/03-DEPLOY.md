@@ -4,7 +4,13 @@
 2026-10-14T10:08:54Z check FAILed — see note below the table). Task 1 complete: the
 pre-deploy record, runbook and rollback are written below. Task 2 (D-03) complete: the user
 replied `go` — see "Go-ahead (D-03)" below; the F.A.S.T. tool was restored to `READY` before
-the reply. Task 3 in progress: deploy steps 1-2 (D-05).
+the reply. Plan 03-01's deploy steps 1-2 (D-05) complete. Plan 03-02 Step 2b (operator
+reconnect) PASSed; Step 3 (galago-web rebuild) initially ran via `docker compose up -d --build`
+and PASSed every content/connectivity check, but produced a byte-identical image ID (Docker
+cache hit on every layer, since `galago-web` had already been rebuilt from the same HEAD
+outside this runbook) — BLOCKED pending a user decision. The user chose a no-cache rebuild;
+that rebuild ran, produced a genuinely new image ID, and PASSed every Step 3 check — see the
+Step 3 row below.
 
 ## Entry gate (D-01)
 
@@ -332,6 +338,15 @@ TOOLBOX_PORT=11010 docker compose up -d --no-build --force-recreate galago-web
 Check: the running image ID equals the pre-deploy one
 (`sha256:9ad9c64fee6baa7ea9351c7cfa03bceb8f0db7f974fabbb6865b1143948880ca`).
 
+**Caveat (plan 03-02):** `rollback-pre-live04` (`sha256:9ad9c64...`) was built at
+`2026-10-14T08:10:47Z` from the **same** galago-core HEAD `d95c2e1` as the live-04 rebuild
+itself (an out-of-runbook rebuild that happened before this plan ran, recorded in the
+Pre-deploy record above). Rolling `galago-web` back to this tag restores **identical
+content** to what Step 3 just deployed, not the pre-milestone UI — the HEAD never changed
+across this deploy, only the image's cache state did. A true pre-milestone `galago-web`
+rollback (e.g. to undo the whole Phase 02 UI) would need a fresh `--no-cache` rebuild from
+the pre-milestone galago-core commit, not a retag of this anchor.
+
 ### (2) galago-tools — second
 
 ```
@@ -360,8 +375,30 @@ window LIVE-04's safe order exists to prevent.
 |------|-----------|---------|---------|---------------|--------|
 | Step 1 | 2026-10-14T10:38:29Z | 2026-10-14T10:38:46Z | `~/.local/bin/uv pip install --python .venv/bin/python "git+file:///home/formulatrix/data/nikko/fast/fast-mcp@b30b38df48e8480f325228145ccae7915a56e437"` | Baseline (pre-install) run of `TestRequirementsPin` on the old core exited 1 (`ImportError: cannot import name 'PauseInfo' from 'fast_mcp.orchestration'`), proving the check discriminates. Install: `Uninstalled 1 package`/`Installed 1 package` (`fast-mcp` only, matching the D-04 dry-run preview). Post-install: `direct_url.json` assert passed, printed `pinned file:///home/formulatrix/data/nikko/fast/fast-mcp`; `TestRequirementsPin -v` → `Ran 3 tests in 0.003s` / `OK` (all 3 pass). `uv pip freeze` diff against the pre-deploy freeze: only the `fast-mcp` line changed (`76f8c3fe` → `b30b38d`), no other package. | PASS |
 | Step 2 | 2026-10-14T10:39:24Z (restart local 17:39:24 WIB) | 2026-10-14T10:39:38Z (both ports listening) | `systemctl --user restart galago-tools` | `systemctl --user is-active galago-tools` → `active`. `MainPID` `944069` → `4044033` (`ActiveEnterTimestamp` 2026-10-14 17:39:26 WIB). Journal since restart shows `Killed process F.A.S.T` (old), then `Started Pf400 on port 40000` and `Started F.A.S.T on port 40001`, no Python traceback. Newest trace-log folder `~/.local/share/galago/trace_logs/1791974367/F.A.S.T.log` contains `fast server started, listening on 40001` (count 1), no traceback. `fast_status.py --port 40001` → `{"status": "NOT_CONFIGURED", "run_state": null, ...}` (expected — no Configure sent, awaiting plan 03-02's operator reconnect). | PASS |
-| Step 2b reconnect | — | — | (not yet run — operator action) | — | pending (plan 03-02) |
-| Step 3 | — | — | (not yet run) | — | pending (plan 03-02) |
+| Step 2b reconnect | — | 2026-10-14T10:50:24Z | Operator reconnected the F.A.S.T. tool from `galago-web` (Simulate off, configuration unchanged); operator reply: "connected, but i need to change to other page first then back to the tools page to see the ready status" (UI observation, non-blocking — recorded below). Claude sent no `Configure`. | `fast_status.py --port 40001` → `{"status": "READY", "run_state": {"percent": 0.0, "state": "idle", "pause": null}, ...}`. Newest trace-log folder unchanged (`~/.local/share/galago/trace_logs/1791974367/`); `F.A.S.T.log` line 3: `Received configuration: toolId: "F.A.S.T" fast { host: "10.150.1.170" port: 5003 expected_tray_id: 90 }` — host/port/`expected_tray_id` match the Pre-deploy record exactly, no `simulated` flag; `grep -ic traceback` over the 444-line log → `0`. | PASS |
+| Step 3 (cached attempt) | 2026-10-14T10:50:35Z | 2026-10-14T10:51:18Z | Pre-step-3 checks: `git -C galago-core rev-parse HEAD` → `d95c2e143ca13d8837bd9c248d6579777b2ebdc9` (equals the Entry-gate SHA); `git -C galago-core status --short controller/` → empty; `.dockerignore` present. Recorded running image `sha256:9ad9c64fee6baa7ea9351c7cfa03bceb8f0db7f974fabbb6865b1143948880ca` and tagged it `galago-core-galago-web:rollback-pre-live04` (D-06 anchor). Then, from `/home/formulatrix/data/nikko/galago-core`: `TOOLBOX_PORT=11010 docker compose up -d --build`. | Build output: every layer `CACHED`, `writing image sha256:9ad9c64fee6baa7ea9351c7cfa03bceb8f0db7f974fabbb6865b1143948880ca done`; `Container galago-web Recreate/Recreated/Started`. Post-build checks all PASSed (health/runs 200, `is_tip_broken`/`run_state` present, host port reachable, `fast_status.py` READY/idle, `galago-tools` MainPID unchanged) but the running image ID was **identical** to `rollback-pre-live04` — the build was satisfied entirely from Docker's cache because galago-core's `controller/` had not changed since the out-of-runbook rebuild already recorded in the Pre-deploy record (`2026-10-14T08:10:47Z`, same HEAD `d95c2e1`). | BLOCKED — identical image ID; not scored PASS/FAIL, see the no-cache rebuild row below |
+| Step 3 (no-cache rebuild, user decision) | 2026-10-14T13:08:07Z | 2026-10-14T13:10:08Z | User's explicit decision: "No cache rebuild" — force a no-cache rebuild so the must-have "galago-web container is running on a new image ID" is genuinely met, rather than accepting the cached, identical-content result above. Re-confirmed read-only immediately before the rebuild: `galago-web /api/runs` → `{"count": 0, "data": []}` (no `RUNNING` run); `fast_status.py --port 40001` → `READY`/`idle`; `galago-tools` MainPID `4044033` unchanged; galago-core HEAD still `d95c2e143ca13d8837bd9c248d6579777b2ebdc9`, `controller/` clean. The `rollback-pre-live04` tag was left untouched (still `sha256:9ad9c64...`) — not re-tagged. From `/home/formulatrix/data/nikko/galago-core`: `TOOLBOX_PORT=11010 docker compose build --no-cache galago-web` (ran 2026-10-14T13:08:07Z–13:10:02Z, exit 0, produced `sha256:26917ca79a781bb3b3563b481d1845ce1defeb92c33a0dc97e9368baf39029a2`), then `TOOLBOX_PORT=11010 docker compose up -d` (2026-10-14T13:10:08Z, `Container galago-web Recreate/Recreated/Started`; only one service, `galago-web`, is defined in `docker-compose.yml`, so nothing else was touched). | `docker inspect galago-web --format '{{.State.Status}} {{.Image}}'` → `running sha256:26917ca79a781bb3b3563b481d1845ce1defeb92c33a0dc97e9368baf39029a2` — differs from `rollback-pre-live04` (`sha256:9ad9c64...`). `curl /api/health` → `200`; `curl /runs` → `200`. `docker exec galago-web grep -rl is_tip_broken /app/.next/server` → `/app/.next/server/chunks/6756.js`. `docker exec galago-web grep -rl run_state /app/gen-interfaces` → `/app/gen-interfaces/tools/grpc_interfaces/tool_base.ts`. Container TCP probe to `host.docker.internal:40001` → `open`. `fast_status.py --port 40001` → `{"status": "READY", "run_state": {"state": "idle", ...}}`. `systemctl --user show galago-tools -p MainPID -p ActiveState` → `MainPID=4044033`, `ActiveState=active` (unchanged). All seven step-3 checks PASS. | PASS |
+
+**Note on the Step 3 finding (plan 03-02):** the first `docker compose up -d --build` run
+reused Docker's build cache for every layer because galago-core's `controller/` had not
+changed since an out-of-runbook rebuild already recorded in the Pre-deploy record
+(`2026-10-14T08:10:47Z`, same HEAD `d95c2e1`), producing a byte-identical image ID. Every
+content/connectivity/safety check PASSed in that attempt; only the literal must-have ("running
+image ID differs from the rollback tag") could not be satisfied by that exact command, because
+there was no new content for a rebuild to produce. Execution stopped there per plan 03-02's
+own instruction and the no-self-rollback directive, and the user was asked to decide. The user
+replied "No cache rebuild." Claude then ran `docker compose build --no-cache galago-web`
+followed by `docker compose up -d` (not `--build`, since the image was already freshly built),
+which produced a genuinely new image ID (`sha256:26917ca7...`) and PASSed every Step 3 check,
+including the one the cached attempt could not meet. Step 3 is now recorded `PASS`.
+
+**Safe order (LIVE-04):** four strictly increasing UTC times —
+step 1 check passed `2026-10-14T10:38:46Z` <
+`galago-tools` restart `2026-10-14T10:39:24Z` <
+step 2 run_state check passed `2026-10-14T10:50:24Z` <
+`galago-web` build start `2026-10-14T13:08:07Z` (the no-cache rebuild that produced the
+final, PASSing result; the earlier cached attempt's build start `2026-10-14T10:50:35Z` is
+also later than the step 2 check and does not break the order).
 
 ### Post-deploy record (Task 3)
 
