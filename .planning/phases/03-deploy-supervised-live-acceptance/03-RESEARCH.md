@@ -506,7 +506,7 @@ def simulate_pause(self, pause: Optional[dict[str, Any]]) -> None:
 
 **If this table is empty:** N/A — three low-risk assumptions above.
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 1. **How exactly should the `simulate_pause` dry-run harness be invoked and torn down?**
    - What we know: the method exists, has no gRPC surface, and no prior script in either repo
@@ -519,6 +519,9 @@ def simulate_pause(self, pause: Optional[dict[str, Any]]) -> None:
      disposable script under `.planning/phases/03.../scratch/` (untracked) is acceptable, or whether
      they'd rather skip the modal-rendering dry run and rely on galago-core's existing unit-level
      coverage (`pausePrompt.test.ts` etc., already passing) plus the live instrument scenarios.
+   - **RESOLVED:** 03-03-PLAN.md builds a committed, simulated-only ops script at
+     `scripts/fast_dryrun.py` (a FastServer subclass on port 40003 that refuses any non-simulated
+     Configure, with a `--self-test`), torn down at the end of that plan.
 
 2. **Does galago-core's Phase 2 UAT need to complete before Phase 3 planning, or only before Phase 3 execution?**
    - What we know: D-01 frames this as an execution-time checkpoint ("the first plan task checks
@@ -529,6 +532,8 @@ def simulate_pause(self, pause: Optional[dict[str, Any]]) -> None:
    - Recommendation: plan now per D-01's own instruction ("the first plan task checks them and
      stops") — this matches the explicit design intent and avoids blocking planning on another
      team/repo's pace.
+   - **RESOLVED:** planned now. 03-01-PLAN.md Task 1 re-checks the D-01 entry gate at execution time
+     and stops if galago-core's milestone is not complete and verified.
 
 ## Environment Availability
 
