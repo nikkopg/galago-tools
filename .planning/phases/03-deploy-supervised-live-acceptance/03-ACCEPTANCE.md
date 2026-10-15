@@ -15,6 +15,23 @@ phase (03-03 to 03-08) fill the remaining sections.
 | LIVE-06 | LIVE-06b: Pause → Abort → aborted by operator, queue FAILED | PASS | `## LIVE-06b` below — scored rerun after the D-14 fix (`7d77e23`, `201d987`); two earlier attempts (rehearsal, then the wording-defect attempt) kept as history in the same section |
 | LIVE-07 | LIVE-07: galago-web restart mid-run → tool-page recovery | PASS | `## LIVE-07` below — scored rerun after the D-14 queue-fix redeploy (galago-core `a0afd61`, `galago-web` `94bdfa7e`); attempt 1 (FAIL, the queue re-ran a previously operator-aborted LIVE-06b step) kept as history in the same section |
 
+Code unchanged since deploy: PASS — `git log --oneline d9acdcf0..HEAD -- tools interfaces
+setup.py requirements.txt` (the original LIVE-04 deploy's last code commit) lists exactly two
+commits, `7d77e23` and `201d987`, both the D-14 LIVE-06b adapter fix (`03-DEPLOY.md`'s "D-14
+redeploy (LIVE-06b adapter fix)" subsection): gate re-run green at the time (144 tests, ruff and
+mypy clean), redeployed via `systemctl --user restart galago-tools` on the user's "go", and the
+failed scenario (LIVE-06b attempt 2) rerun afterward as the scored PASS. `git diff --stat
+201d987 HEAD -- tools/ interfaces/ setup.py requirements.txt` (the last actually-deployed SHA) is
+empty — no code has changed since that redeploy.
+Post-acceptance gate: `bin/make test` exit 0 — 144 tests passed (unittest + pytest), `ruff check
+.` "All checks passed!" (covers `scripts/fast_status.py` and `scripts/fast_dryrun.py`), `mypy
+--config-file=pyproject.toml tools` "Success: no issues found in 89 source files". `bin/make
+proto` was not run (would delete the pb2 files the running service imports from this checkout).
+Dry-run self-test: PASS — `PYTHONPATH=. python scripts/fast_dryrun.py --self-test` exit 0,
+printed `SELF-TEST OK`.
+Edge-probe fallback: 4 items (A-EDGE-LIVE-04 to A-EDGE-LIVE-07), 0 resolved truths, 4 flagged
+assumptions (see `## Flagged assumptions` below).
+
 ## LIVE-04 Deploy
 
 - Date/time: 2026-10-14, 2026-10-14T10:38:29Z (Step 1 start) through 2026-10-14T13:10:08Z
