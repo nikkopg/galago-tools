@@ -4,18 +4,18 @@ milestone: v1
 milestone_name: F.A.S.T. Live Run Control (adapter & rollout)
 current_phase: 3
 current_phase_name: Deploy & Supervised Live Acceptance
-current_plan: 5
+current_plan: 6
 status: executing
-stopped_at: Completed 03-04-PLAN.md (LIVE-06a PASS)
-last_updated: "2026-10-15T03:34:32.767Z"
+stopped_at: Completed 03-05-PLAN.md (LIVE-05 PASS after D-14 fix)
+last_updated: "2026-10-15T04:19:27.540Z"
 last_activity: 2026-10-14
 last_activity_desc: Phase 02 complete, transitioned to Phase 3
-state_head: 1c65808db93647c52d51f160db8279fca31053a1
+state_head: 243a1de0cea32a2e63ad5ac73b8c7b5ac3cfde24
 progress:
   total_phases: 3
   completed_phases: 1
   total_plans: 17
-  completed_plans: 13
+  completed_plans: 14
   percent: 33
 ---
 
@@ -32,7 +32,7 @@ is doing and recover it themselves; no adapter code path pauses, resumes or abor
 ## Current Position
 
 Phase: 3 (Deploy & Supervised Live Acceptance) — EXECUTING
-Current Plan: 5
+Current Plan: 6
 Total Plans in Phase: 8
 Status: Plan 01 complete
 Last activity: 2026-10-14 — Plan 03-01 complete (entry gate, pre-deploy record, go-ahead, deploy steps 1-2)
@@ -75,6 +75,7 @@ Progress: [███░░░░░░░] 33%
 | Phase 03 P02 | ~2h24min | 2 tasks | 2 files |
 | Phase 03 P03-03 | ~13h elapsed (active ~40min) | 3 tasks | 2 files |
 | Phase 03 P04 | 15min | 3 tasks | 2 files |
+| Phase 03 P05 | ~25min | 3 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -116,6 +117,8 @@ Recent decisions affecting current work:
 - [Phase 03]: Dry run (D-07) Result: PASS recorded only after independently re-deriving the command sequence from the harness log and the production F.A.S.T.log window, not solely from the operator's summary
 - [Phase 03]: LIVE-06a recorded PASS despite operator running protocol "test" (num_rows 1, two simulated Pf400 moves) instead of the planned single-transfer protocol (num_rows 8) — D-11's pass criteria held regardless; deviation flagged in 03-ACCEPTANCE.md for user review
 - [Phase 03]: Did NOT mark LIVE-06 complete in REQUIREMENTS.md after LIVE-06a — it is only half of LIVE-06; LIVE-06b (Pause -> Abort, plan 03-06) must also PASS first
+- [Phase 03]: LIVE-05 scored PASS on rerun after D-14 none-plate fix (galago-core ad87ea5) and galago-web redeploy (b0e183e); first attempt (FAIL, found -1) kept as history in the same 03-ACCEPTANCE.md section
+- [Phase 03]: Recorded two honest caveats on the LIVE-05 rerun rather than treating it as fully re-verified: no live fast_status.py pause snapshot was taken, and deck-3-empty at start was only indirectly confirmed by the operator
 
 ### Pending Todos
 
@@ -140,6 +143,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-15T03:34:26.151Z
-Stopped at: Completed 03-04-PLAN.md (LIVE-06a PASS)
+Last session: 2026-10-15T04:19:27.494Z
+Stopped at: Completed 03-05-PLAN.md (LIVE-05 PASS after D-14 fix)
 Resume file: None
