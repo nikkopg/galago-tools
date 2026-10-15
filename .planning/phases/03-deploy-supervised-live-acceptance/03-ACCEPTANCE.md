@@ -9,7 +9,7 @@ phase (03-03 to 03-08) fill the remaining sections.
 | Requirement | Scenario | Result | Evidence |
 |---|---|---|---|
 | LIVE-04 | LIVE-04 Deploy (core → galago-tools → galago-web, safe order) | PASS | `03-DEPLOY.md` Deploy evidence table (Steps 1, 2, 2b reconnect, Step 3 cached + no-cache); `## LIVE-04 Deploy` below |
-| — | Dry run (D-07) | not run | — |
+| — | Dry run (D-07) | PASS | `## Dry run (D-07)` below |
 | LIVE-06 | LIVE-06a: Pause → Resume → SUCCESS | not run | — |
 | LIVE-05 | LIVE-05: Deck 3 empty → prompt → fix deck → Resume → SUCCESS | not run | — |
 | LIVE-06 | LIVE-06b: Pause → Abort → aborted by operator, queue FAILED | not run | — |
@@ -17,9 +17,9 @@ phase (03-03 to 03-08) fill the remaining sections.
 
 ## LIVE-04 Deploy
 
-- **Date/time:** 2026-10-14, 2026-10-14T10:38:29Z (Step 1 start) through 2026-10-14T13:10:08Z
+- Date/time: 2026-10-14, 2026-10-14T10:38:29Z (Step 1 start) through 2026-10-14T13:10:08Z
   (no-cache Step 3 `docker compose up -d` complete), UTC.
-- **Operator:** the user gave the go-ahead (D-03, literal reply `go`) and reconnected the
+- Operator: the user gave the go-ahead (D-03, literal reply `go`) and reconnected the
   production F.A.S.T. tool from `galago-web` (Step 2b, Simulate off, configuration unchanged);
   the user also made the Step 3 "No cache rebuild" decision after the cached attempt's finding.
   Claude ran every command and check; Claude sent no `Configure`, `ExecuteCommand`, or any
@@ -77,7 +77,97 @@ phase (03-03 to 03-08) fill the remaining sections.
 
 ## Dry run (D-07)
 
-(Not run — plan 03-03 fills this section.)
+- Date/time: 2026-10-15T02:06:06Z (run start) to 2026-10-15T02:14:15Z (final resume reply),
+  UTC; 2026-10-15 09:06:06 WIB to 2026-10-15 09:14:15 WIB. Harness itself was started
+  2026-10-14T13:25:21Z (2026-10-14 20:25:21 WIB) and configured simulated at
+  2026-10-15T02:01:38Z (2026-10-15 09:01:38 WIB).
+- Operator: the user registered FAST-DRYRUN (port 40003, host `sim-no-contact.invalid`,
+  Simulate on), created the DRYRUN protocol, ran the walkthrough's nine steps in the deployed
+  `galago-web` UI, chose Return liquid = yes at the abort prompt, and deleted FAST-DRYRUN
+  afterward. Operator replies in order: "done, FAST-DRYRUN set to 40003 and simulated, created
+  DRYRUN protocol"; "followed you 1-9 steps, check my last run"; "resume in tool page is
+  disabled" (sent while the step was still running, before the 09:13:46 reply — correct step-4
+  behavior, not a fault); "deleted FAST-DRYRUN, all visual checks passed". Claude ran the harness,
+  read the logs, and sent no command to FAST-DRYRUN or to the production F.A.S.T. tool.
+- Harness: `scripts/fast_dryrun.py` at commit `5cd20eb92962430b678701e1c9dc620ab1a903b2`;
+  port 40003; `--auto-pause-after 90 --auto-pause-count 2` (rearm delay 5s, default); log
+  `$HOME/.local/share/galago/dryrun/harness-20261014T132521Z.log`.
+- Checklist results:
+  1. PASS — run started 09:06:06 WIB; the harness log shows the `fast transfer` command sent at
+     that time and `Running command Transfer`/BUSY in the same line; operator confirmed the
+     control bar rendered tool, command, running badge and progress during the run ("followed
+     you 1-9 steps" / "all visual checks passed").
+  2. PASS — Pause instrument sent a `pause` command at 09:06:18 WIB, reply SUCCESS at 09:06:19;
+     operator confirmed the confirmation dialog opened and the simulated pause changed nothing
+     in the run state, as expected.
+  3. PASS — no abort or other command appears in the harness log between the 09:06:19 pause
+     reply and the 09:07:36 auto-pause (episode 1); this absence is the evidence that Stop ->
+     Cancel sent nothing, matching the operator's account that the Abort confirmation opened
+     with Return-liquid unselected, no countdown, and Cancel closed it with no command sent.
+  4. PASS — operator reported "resume in tool page is disabled" while the step was still
+     running (before the 09:13:46 transfer reply), matching the Run Recovery card's expected
+     disabled state and "A run step is tracking this tool; use the run page." text while a run
+     step tracks the tool.
+  5. PASS — auto-pause episode 1 fired at 09:07:36 WIB, 90s after the 09:06:06 run start,
+     carrying `WRONG_PLATE_PAUSE` (errorCode -645, errorName WrongPlateType, percent 40,
+     eventPayload.wrongDetection [{expectedPlateID 1, detectedPlateID null, position 3}]), which
+     renders as "WrongPlateType (-645)" / "Deck 3: expected plate 1, found none"; operator
+     confirmed via "all visual checks passed".
+  6. PASS — Resume sent with `is_tip_broken "no"` at 09:08:36 WIB, reply SUCCESS at 09:08:51
+     (15s simulated Resume estimate), matching the operator's chosen "Tip broken? no".
+  7. PASS — auto-pause episode 2 fired at 09:08:56 WIB (5s rearm delay after the 09:08:51
+     Resume SUCCESS, as designed); Abort sent with `return_liquid "yes"` at 09:09:35 WIB, reply
+     SUCCESS at 09:09:50 (15s simulated Abort estimate); operator's Return-liquid choice: **yes**.
+  8. PASS — the transfer itself replied SUCCESS at 09:13:46 WIB (step ended); the tool-page
+     Resume was sent with `is_tip_broken "no"` at 09:14:00 WIB (after the step ended), reply
+     SUCCESS at 09:14:15; operator confirmed the Run Recovery card was enabled at that point and
+     reported success.
+  9. PASS — operator confirmed "deleted FAST-DRYRUN"; independently re-verified via
+     `tool.getAll` on the deployed `galago-web` API, which now lists only `Pf400` (port 40000)
+     and `F.A.S.T` (port 40001) — no FAST-DRYRUN record remains. No ufw rule was added for
+     40003 in Task 1 (the container reached the harness directly), so none needed removal. The
+     DRYRUN protocol record was not reported deleted; the plan treats that as optional and
+     leaves it to the operator.
+- Commands seen: harness log, in order, all SUCCESS:
+  - 09:06:06 WIB `fast.transfer` (deck 1->3, plate 1->1, A1->A1, 8x1, 260, fresh, expected_tray_id
+    0 — the form's blank-field default) — reply SUCCESS at 09:13:46 (step end).
+  - 09:06:18 WIB `fast.pause` -> SUCCESS 09:06:19.
+  - 09:07:36 WIB auto-pause episode 1 (no operator command; harness-internal).
+  - 09:08:36 WIB `fast.resume` (`is_tip_broken "no"`) -> SUCCESS 09:08:51.
+  - 09:08:56 WIB auto-pause episode 2 (no operator command; harness-internal).
+  - 09:09:35 WIB `fast.abort` (`return_liquid "yes"`) -> SUCCESS 09:09:50.
+  - 09:13:46 WIB transfer reply SUCCESS (step ends).
+  - 09:14:00 WIB `fast.resume` (`is_tip_broken "no"`, tool page, after the step ended) ->
+    SUCCESS 09:14:15.
+  - **Note — two extra operator-initiated commands, not in the walkthrough script:**
+    09:11:22 WIB `fast.pause` -> SUCCESS 09:11:23, and 09:11:46 WIB `fast.abort`
+    (`return_liquid "no"`) -> SUCCESS 09:12:01. Both occurred after the scripted abort
+    (09:09:35-09:09:50) and before the transfer's own reply (09:13:46), i.e. while the run was
+    still in flight and unpaused (both auto-pause episodes already spent). The operator did not
+    state what produced them when asked; recorded here honestly rather than attributed to Stop
+    -> Cancel (which the log independently shows sent nothing, item 3 above) or to any scripted
+    step. They do not change the pass/fail of any of the nine walkthrough items and both replied
+    SUCCESS, so they carry no safety implication for D-07.
+- Production tool untouched: `~/.local/share/galago/trace_logs/1791974367/F.A.S.T.log`
+  (694,871 lines total) contains zero `Running command` lines in the entire file, and the window
+  2026-10-15 09:06:06-09:14:15 WIB (02:06:06-02:14:15 UTC) contains only `HTTP Request: GET
+  http://10.150.1.170:5003/status` polling lines (112 lines, all `200 OK`). No `Configure`,
+  `ExecuteCommand`, `Pause`, `Resume`, or `Abort` reached the production F.A.S.T. tool at any
+  point during the dry run.
+- Teardown: `quit` written to the control FIFO shortly after the Task 2 operator reply
+  (2026-10-15, after 09:14 WIB); PID 17097 exited within 2s without needing SIGTERM; `ss -ltn`
+  shows nothing listening on port 40003; the control
+  FIFO (`$HOME/.local/share/galago/dryrun/control`) is gone (removed by the harness on quit); the
+  log file is kept per the plan. FAST-DRYRUN was removed from the workcell (operator-reported and
+  independently confirmed via `tool.getAll`). No ufw rule was ever added for port 40003, so none
+  needed removal.
+- Result: PASS
+  - All nine walkthrough items passed, the harness command sequence matched (transfer, pause,
+    resume `is_tip_broken no`, abort with the operator's `return_liquid yes`, and a final resume
+    `is_tip_broken no` after the transfer's reply), no command reached the production F.A.S.T.
+    tool, and the harness and its workcell record were fully torn down. The two extra,
+    unexplained operator-initiated commands at 09:11 are noted above but do not affect this
+    result. The live scenarios (03-04 to 03-07) may proceed.
 
 ## LIVE-06a: Pause -> Resume -> SUCCESS
 
