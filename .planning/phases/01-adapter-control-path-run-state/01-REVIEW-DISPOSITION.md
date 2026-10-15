@@ -3,40 +3,50 @@ phase: 01
 review: 01-REVIEW.md
 titles: json
 findings:
+  - id: WR-01
+    severity: warning
+    disposition: open
+    title: "`Resume()`'s crash-recovery gate bypasses the module's own `_accepted()` fail-closed rule"
+  - id: WR-02
+    severity: warning
+    disposition: open
+    title: "`DryRunFastServer`'s auto-pause timer state is shared across overlapping simulated Transfers"
+  - id: WR-03
+    severity: warning
+    disposition: open
+    title: "`_read_control` dies silently on any exception other than `OSError`"
+  - id: IN-01
+    severity: info
+    disposition: open
+    title: "Crash-recovery `Resume()` never attributes a concurrent, non-stale operator Abort"
+  - id: IN-02
+    severity: info
+    disposition: open
+    title: "Redundant `.gitignore` entry"
+  - id: IN-03
+    severity: info
+    disposition: open
+    title: "`COMMAND_TO_SERVICE_METHOD` is production-module state with no production consumer"
   - id: CR-01
     severity: critical
     disposition: fixed
     title: "`_run_in_flight()` resets the run record on every entry, not just the first, silently clobbering an in-flight pause"
-  - id: WR-01
-    severity: warning
-    disposition: fixed
-    title: "`_log_progress` writes `percent` into `run_state` without the `_run_percent()` sanitization every other path uses"
-  - id: IN-01
-    severity: info
-    disposition: open
-    title: "`_run_record`'s initial state is seeded as `\"running\"` although no run is in flight"
-  - id: IN-02
-    severity: info
-    disposition: open
-    title: "`tool_base.proto` has no trailing newline"
-  - id: IN-03
-    severity: info
-    disposition: open
-    title: "`_run_percent`'s return type annotation doesn't match the int branch's actual return value"
-open: 3
-total: 5
-recorded: 2026-10-13T02:42:00.846Z
+open: 6
+total: 7
+recorded: 2026-10-15T13:04:03.957Z
 ---
 
 # Phase 01: Code Review Disposition
 
 | Finding | Severity | Disposition | Source |
 |---------|----------|-------------|--------|
-| CR-01 | critical | fixed | 01-REVIEW-FIX.md |
-| WR-01 | warning | fixed | 01-REVIEW-FIX.md |
+| WR-01 | warning | open | - |
+| WR-02 | warning | open | - |
+| WR-03 | warning | open | - |
 | IN-01 | info | open | - |
 | IN-02 | info | open | - |
 | IN-03 | info | open | - |
+| CR-01 | critical | fixed | 01-REVIEW-FIX.md (not in the current review) |
 
 Dispositions: `open` (recorded, not yet triaged), `fixed`, `skipped`, `deferred`.
 Set `deferred` by hand and put the reason in the Source cell; both are preserved. A `|` in the reason is kept as prose and escaped on the next run.
