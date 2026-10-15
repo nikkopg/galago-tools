@@ -3009,6 +3009,57 @@ class TestRecoveryCommands(unittest.TestCase):
         self.assertIn("instrument rejected resume: errorCode -2", reply.error_message)
         service.wait.assert_not_called()
 
+    def _resume_with_reply(self, body: dict[str, Any]) -> tuple[Any, Any]:
+        """CR-01 regression harness for Resume's crash-recovery branch.
+        Scripts the same gate/running/idle+done readings
+        `test_resume_while_paused_waits_for_the_run_and_reports_ran` uses, so
+        a wrongly accepted reply ends visibly as SUCCESS instead of silently
+        passing by exhausting too few statuses. Uses the real core only
+        (D-14); never MagicMock(spec=FastService) here."""
+        self.transport.reset_mock()
+        self._statuses(
+            {"currentState": "paused"},  # core state gate
+            {"currentState": "running", "percentProgress": 50},
+            {"currentState": "idle", "percentProgress": 100,
+             "lastEvent": {"messageType": 5, "payload": {"errorCode": 0}}},
+        )
+        self.transport.resume.return_value = body
+        self.assertFalse(self.server._motion_lock.locked())
+        with patch.object(self.service, "wait", wraps=self.service.wait) as wait_spy:
+            reply = self.server.Resume(fast_pb2.Command.Resume(is_tip_broken="no"))
+        return reply, wait_spy
+
+    def _assert_rejected_without_waiting(self, reply: Any, wait_spy: Any, code: Any) -> None:
+        """Asserts a crash-recovery resume rejection: no wait call, no other
+        control command issued by the adapter itself, motion lock free
+        afterwards."""
+        self.assertEqual(reply.response, ERROR_FROM_TOOL)
+        self.assertEqual(reply.error_message,
+                          f"instrument rejected resume: errorCode {code}")
+        wait_spy.assert_not_called()
+        self.assertEqual(self.transport.get_status.call_count, 1)
+        self.transport.resume.assert_called_once_with(is_tip_broken=False)
+        self.transport.abort.assert_not_called()
+        self.transport.pause.assert_not_called()
+        self.assertFalse(self.server._motion_lock.locked())
+
+    def test_crash_recovery_resume_bool_false_error_code_is_not_success(self) -> None:
+        """CR-01 regression mirroring test_abort_bool_false_error_code_is_not_success
+        for Resume's crash-recovery branch; `False == 0` in Python, but a
+        boolean errorCode is never an accepted (int 0) reply, so Resume
+        returns the rejection and never waits on a run that was never
+        resumed."""
+        reply, wait_spy = self._resume_with_reply({"errorCode": False})
+        self._assert_rejected_without_waiting(reply, wait_spy, False)
+
+    def test_crash_recovery_resume_reply_without_error_code_is_not_success(self) -> None:
+        """Mirrors test_abort_reply_without_error_code_is_not_success. This
+        pins behaviour that is already correct, so the fix cannot regress
+        it: the core itself counts a missing errorCode as accepted when it
+        marks its ResumeMarker, but the adapter must not."""
+        reply, wait_spy = self._resume_with_reply({})
+        self._assert_rejected_without_waiting(reply, wait_spy, None)
+
     def test_missing_or_unclear_decision_is_invalid_arguments_in_real_mode(self) -> None:
         self.server.simulated = False
         cases = [

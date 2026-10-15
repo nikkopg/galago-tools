@@ -394,9 +394,10 @@ def _accepted(result: "dict | Refused") -> bool:
     literal int 0. Mirrors fast_mcp.orchestration._pause_info's own rule
     (`type(code) is int`): a bool, str or other non-int errorCode never
     counts as accepted, even though e.g. `False == 0` in Python. Used by
-    both _recovery_reply's SUCCESS mapping and Abort()'s operator-abort
-    bookkeeping so the stricter definition can never diverge between the
-    two safety-sensitive call sites."""
+    _recovery_reply's SUCCESS mapping, Abort()'s operator-abort bookkeeping,
+    and Resume()'s crash-recovery gate before service.wait (CR-01), so the
+    stricter definition can never diverge between its call sites; no code in
+    this module compares errorCode inline."""
     if not isinstance(result, dict):
         return False
     code = result.get("errorCode")
@@ -908,13 +909,17 @@ class FastServer(ToolServer):
         lock -- adapter bookkeeping about its own threads, never an
         instrument-state check (D-08):
         - Lock acquired: no motion command is in flight (crash recovery).
-          Resumes, then WAITS for the resumed run to reach a terminal state,
-          with the same timeout and progress logging as Transfer, holding
-          the lock for the whole wait so no new Transfer can start under it.
-          The re-pinned core masks a stale leading `paused` reading after an
-          accepted resume, so this wait reports the resumed run's real
-          outcome; it keeps the default (non-through) wait, so a fresh pause
-          still ends it as Paused with the actionable message (D-07, D-08).
+          Resumes, then starts the wait only once `_accepted()` confirms the
+          instrument accepted the resume (CR-01); any other reply -- a
+          Refused, or a non-int-0 or missing errorCode -- returns the
+          rejection at once without waiting. Once accepted, WAITS for the
+          resumed run to reach a terminal state, with the same timeout and
+          progress logging as Transfer, holding the lock for the whole wait
+          so no new Transfer can start under it. The re-pinned core masks a
+          stale leading `paused` reading after an accepted resume, so this
+          wait reports the resumed run's real outcome; it keeps the default
+          (non-through) wait, so a fresh pause still ends it as Paused with
+          the actionable message (D-07, D-08).
         - Lock not acquired: a run is in flight. Resumes and returns as soon
           as the instrument accepts; no wait, and never releases a lock this
           call did not acquire -- the in-flight step's own wait reports the
@@ -936,7 +941,7 @@ class FastServer(ToolServer):
             try:
                 try:
                     accepted = service.resume(is_tip_broken=is_tip_broken)
-                    if isinstance(accepted, Refused) or accepted.get("errorCode") != 0:
+                    if not _accepted(accepted):
                         return _recovery_reply("resume", accepted)
                     result = service.wait(
                         RunHandle(plates=None, stale_done=False),
