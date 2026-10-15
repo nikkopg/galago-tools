@@ -169,6 +169,5 @@ Items acknowledged and deferred at milestone close, most recent first:
 ## Session Continuity
 
 Last session: 2026-10-15T14:11:38.439Z
-Stopped at: Phase 02 complete — all phases complete
-`/gsd-complete-milestone`
+Stopped at: Phase 02 gap closure complete (CR-01 fixed, re-verified passed) — all phases complete; next: `/gsd-complete-milestone`
 Resume file: None

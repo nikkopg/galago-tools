@@ -58,7 +58,8 @@ commands. This repo's final phase (live acceptance) needs both milestones done.
   override, two-path Resume, `StatusReply.run_state`, fail-closed decisions, extended no-auto-abort
   invariant, real-mode concurrency test, simulated-mode control commands and pause hook) — Phase 1
 - ✓ LIVE-01..LIVE-03: `Transfer`/`RunProtocol` wait through pauses on the re-pinned fast-mcp core
-  (`b30b38d`), paused time excluded from the timeout — Phase 2
+  (`b30b38d`), paused time excluded from the timeout — Phase 2 (re-verified after gap-closure
+  plan 02-05 fixed CR-01: crash-recovery `Resume` now gates its wait on `_accepted()`)
 - ✓ LIVE-04: Deployed in the safe order (core → service `.venv` → `galago-tools` restart →
   `galago-web` rebuild), no window with a new UI against an ungated core — Phase 3
 - ✓ LIVE-05: Supervised live deck-3-empty scenario — pause prompt names the deck/plate, operator
@@ -164,4 +165,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-10-15 after Phase 3 (milestone v1 complete — all 17 requirements validated)*
+*Last updated: 2026-10-15 after Phase 2 gap closure (CR-01 fixed; milestone v1 complete — all 17 requirements validated)*
