@@ -554,6 +554,49 @@ also later than the step 2 check and does not break the order).
   must not re-run the aborted step) per the note added under `03-ACCEPTANCE.md`'s `## LIVE-06b`
   Result.
 
+### D-14 redeploy (queue re-run fix)
+
+- LIVE-07 attempt 1 (above) exposed a galago-core queue defect: an operator-aborted step stayed in
+  `_queue` and re-ran on the next `startNext()`. Per D-14, the scenario stopped pending a
+  galago-core fix.
+- galago-core fixed it (quick task `261015-h0q`): commits `4b575ed`, `5598347`, `e18a177`,
+  `a0afd61`. An accepted operator Abort (sent through `galago-web`'s run controls) now calls
+  `fail(..., {dequeue: true})`, which removes that step from the `_queue` table, so `startNext`
+  cannot re-run it; other failures keep the upstream retry behavior; a late-accepted abort is
+  handled by `_recordAcceptedAbort` → `dequeue`.
+- galago-core HEAD at the rebuild was `a0afd61`, with a later docs-only commit `539464a` recording
+  a todo: "Queue errors 'Item N not found' after clear during abort" (minor, pre-existing —
+  clearing the queue while an aborted step is still finishing produces a spurious error state; not
+  fixed here). `vendor/galago-tools` gitlink unchanged (`cb7886d`); `controller/` clean — no proto
+  or adapter-facing change, so only `galago-web` needs a rebuild.
+- Rebuild (`galago-web` only, following this runbook's safe order — core and `galago-tools` are
+  unaffected): image `sha256:94bdfa7e4dba1cc98923b096995f68a07e9aced6e5972e624a205bc0a3abe6ba`,
+  built 2026-10-15 14:05:18 WIB. `/api/health` returns 200. The fix verified present in the
+  deployed server bundle: `/app/.next/server/chunks/6756.js` carries the `dequeue: true` fail-path.
+- `galago-tools` untouched by this redeploy: MainPID `836290` (unchanged), F.A.S.T. listener PID
+  `867162` (unchanged), `F.A.S.T.log` line 2 still reads the pre-existing `12:04:42 | INFO | fast
+  server started, listening on 40001` (no new restart). F.A.S.T. stayed `READY` through the
+  redeploy, so no operator reconnect was needed this time (unlike the `galago-tools`-service
+  redeploys above, which do require a reconnect).
+- The operator reran LIVE-06b's follow-up check and LIVE-07 after this redeploy; `03-ACCEPTANCE.md`
+  now scores both PASS (the LIVE-06b follow-up note under `## LIVE-06b`, and the scored rerun under
+  `## LIVE-07`), with LIVE-07 attempt 1 kept there as history.
+- Two residual galago-core queue findings surfaced by these reruns (FINDING (a): an aborted run's
+  later steps stay queued; FINDING (b): a `galago-web`-restart-orphaned step's queue row stays
+  `STARTED` and would re-run) are NOT fixed by this redeploy — they are recorded in
+  `03-ACCEPTANCE.md`'s `## Flagged assumptions` as blocking items for the phase close-out decision
+  in plan 03-08, each with an operator workaround (Clear All before starting another run).
+- Rollback (D-06, this fix only): `rollback-pre-live04` (`9ad9c64`, from `galago-core` `d95c2e1`)
+  would undo this fix along with every other post-deploy galago-core/`galago-web` change recorded
+  in this document (the LIVE-05 none-plate fix, the LIVE-06b wording-adjacent `galago-web`
+  content, and this queue fix) — it predates all of them. A rollback of this fix alone would need a
+  fresh `galago-web` rebuild from galago-core HEAD immediately before `4b575ed`, not the
+  `rollback-pre-live04` tag.
+- **New no-restart baseline, unchanged from the LIVE-07 attempt 1 entry above**: `galago-tools`
+  MainPID `836290`, F.A.S.T. listener PID `867162`, trace-log folder `1792039261`. This redeploy
+  did not touch `galago-tools`, so the baseline carries forward unchanged into the LIVE-07 rerun
+  and the LIVE-06b follow-up check.
+
 ## Logs to watch (D-08)
 
 - Manager/journal lines (does NOT carry tool command lines — verified 2026-10-14):
