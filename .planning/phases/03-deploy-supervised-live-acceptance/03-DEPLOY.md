@@ -597,6 +597,30 @@ also later than the step 2 check and does not break the order).
   did not touch `galago-tools`, so the baseline carries forward unchanged into the LIVE-07 rerun
   and the LIVE-06b follow-up check.
 
+### CR-01 redeploy (2026-10-16, after milestone re-verification)
+
+- Why: Phase 2 gap-closure plan 02-05 (`134e097` fix, `7c2e15a` test) changed `Resume`'s
+  crash-recovery branch after the last deploy (`201d987`). The user chose redeploy, no live rerun:
+  LIVE-07 used the in-flight Resume path, which CR-01 did not touch (see `03-VERIFICATION.md`
+  Resolution).
+- Gate: `PATH=$HOME/data/nikko/.venvs/galago-py310/bin:$PATH bash bin/make proto test` 147
+  passed; ruff clean; mypy clean. Pre-restart: F.A.S.T. `READY`/idle, `galago-web` queue empty.
+- Log backup: trace folder `1792039261` copied to
+  `~/.local/share/galago/log-backups/pre-cr01-redeploy-*/`.
+- Restart, on the user's "go 1": `systemctl --user restart galago-tools` at 2026-10-16 05:47:21
+  WIB. MainPID `836290` -> `1940146`; F.A.S.T. listener `867162` -> `1940246`; new trace folder
+  `1792104444`, `F.A.S.T.log` line 2 `fast server started, listening on 40001`, no traceback.
+  Editable install, so the service runs HEAD.
+- Reconnect: at the user's request, Claude sent `Configure` over gRPC with the pre-restart configs
+  (F.A.S.T. real mode `10.150.1.170:5003`, `expected_tray_id` 90; Pf400 `simulated: true`). This
+  departs from the operator-only reconnect rule, at the user's instruction. F.A.S.T. `READY`
+  (idle), Pf400 `SIMULATED`. No motion command sent. Core and `galago-web` not touched (no proto
+  change).
+- New no-restart baseline: MainPID `1940146`, F.A.S.T. listener `1940246`, trace folder
+  `1792104444`.
+- Rollback: `git revert 7c2e15a 134e097`, re-run the gate, `systemctl --user restart galago-tools`,
+  reconnect F.A.S.T.
+
 ## Logs to watch (D-08)
 
 - Manager/journal lines (does NOT carry tool command lines — verified 2026-10-14):

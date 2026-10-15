@@ -1,8 +1,8 @@
 ---
 phase: 03-deploy-supervised-live-acceptance
 verified: 2026-10-16T05:40:00Z
-status: human_needed
-score: 15/16 must-haves verified
+status: passed
+score: 16/16 must-haves verified
 covered_files: [".planning/phases/03-deploy-supervised-live-acceptance/03-01-PLAN.md", ".planning/phases/03-deploy-supervised-live-acceptance/03-01-SUMMARY.md", ".planning/phases/03-deploy-supervised-live-acceptance/03-02-PLAN.md", ".planning/phases/03-deploy-supervised-live-acceptance/03-02-SUMMARY.md", ".planning/phases/03-deploy-supervised-live-acceptance/03-03-PLAN.md", ".planning/phases/03-deploy-supervised-live-acceptance/03-03-SUMMARY.md", ".planning/phases/03-deploy-supervised-live-acceptance/03-04-PLAN.md", ".planning/phases/03-deploy-supervised-live-acceptance/03-04-SUMMARY.md", ".planning/phases/03-deploy-supervised-live-acceptance/03-05-PLAN.md", ".planning/phases/03-deploy-supervised-live-acceptance/03-05-SUMMARY.md", ".planning/phases/03-deploy-supervised-live-acceptance/03-06-PLAN.md", ".planning/phases/03-deploy-supervised-live-acceptance/03-06-SUMMARY.md", ".planning/phases/03-deploy-supervised-live-acceptance/03-07-PLAN.md", ".planning/phases/03-deploy-supervised-live-acceptance/03-07-SUMMARY.md", ".planning/phases/03-deploy-supervised-live-acceptance/03-08-PLAN.md", ".planning/phases/03-deploy-supervised-live-acceptance/03-08-SUMMARY.md", "scripts/fast_dryrun.py", "scripts/fast_status.py", "tools/fast/server.py", "tools/tests/fast_test.py"]
 covered_digest: "v3:sha256:5275c4f6f24bea14f4bac85f8b68a9cfbdb8dab65b6188b6aac239550376d27b"
 behavior_unverified: 0
@@ -10,15 +10,13 @@ overrides_applied: 0
 re_verification:
   previous_status: passed
   previous_score: 16/16
-  gaps_closed: []
+  gaps_closed:
+    - "Truth 14 resolved 2026-10-16: forb01 redeployed to HEAD (CR-01 134e097/7c2e15a) — galago-tools restarted 05:47:23 WIB, MainPID 836290 -> 1940146, F.A.S.T. READY after reconnect. The user chose redeploy without a live rerun after logs showed LIVE-07 exercised the in-flight Resume path, which CR-01 did not touch. See Resolution."
   gaps_remaining: []
-  regressions:
+  regressions_resolved:
     - "Truth 14 (\"Code unchanged since the last actual redeploy\") no longer holds literally: Phase 2 gap-closure plan 02-05 (commits 134e097, 7c2e15a, 2026-10-15T21:07-21:10 WIB) modified tools/fast/server.py and tools/tests/fast_test.py after the 201d987 SHA this phase's live acceptance ran against, and after this phase's own 03-VERIFICATION.md was written. This is not a FAIL of this phase's own work (the live-acceptance record is historically accurate and unaffected); it is new information requiring a human decision on redeploy/rerun. Routed to human_verification below, not gaps_found."
 behavior_unverified_items: []
-human_verification:
-  - test: "Decide whether forb01's deployed galago-tools (still running adapter SHA 201d987, per 03-DEPLOY.md) needs to be redeployed with the CR-01 fix (134e097/7c2e15a) before this phase's live-acceptance evidence is treated as current, and whether LIVE-07 (the only one of the four live scenarios that exercises the crash-recovery Resume branch CR-01 touches) needs to be rerun on the instrument against the redeployed adapter."
-    expected: "A team decision: either (a) redeploy forb01 with 134e097/7c2e15a in the safe order and rerun LIVE-07 live, recording the rerun in 03-ACCEPTANCE.md as a new D-14-style entry, or (b) explicitly accept that the currently-deployed, already-accepted adapter (201d987) remains the production baseline and the CR-01 fix ships with a later phase/deploy, with that acceptance recorded somewhere durable (e.g. REQUIREMENTS.md note, a new deploy plan, or this VERIFICATION's override)."
-    why_human: "This is a production redeploy/rerun decision on a live instrument with an operator required — not something a read-only code/log inspection can resolve, and the instructions for this re-verification explicitly prohibit sending anything to the live services or instrument."
+human_verification: []
 ---
 
 # Phase 3: Deploy & Supervised Live Acceptance Verification Report
@@ -26,7 +24,7 @@ human_verification:
 **Phase Goal:** The live-control stack runs on forb01 and is proven on the instrument with an
 operator present.
 **Verified:** 2026-10-16T05:40:00Z
-**Status:** human_needed
+**Status:** passed (human decision recorded 2026-10-16 — see Resolution)
 **Re-verification:** Yes — the prior `passed` 16/16 verification (2026-10-15T19:30Z) is stale:
 covered source changed afterward (Phase 2 gap-closure plan 02-05, commits `134e097`/`7c2e15a`,
 landed ~21:07-21:10 WIB on 2026-10-15, after this phase's verification was written at 19:30Z).
@@ -90,7 +88,7 @@ that specific change was never re-exercised live.
 | 11 | D-14 FAIL→fix→rerun cycles (LIVE-05, LIVE-06b, LIVE-07) are each handled by stopping, fixing, re-running the gate, redeploying, and keeping the FAILed attempt as preserved history | ✓ VERIFIED | All three FAIL records remain present in `03-ACCEPTANCE.md` (not deleted), unaffected by the Phase-2 CR-01 change (CR-01 is a Phase 2 gap-closure plan, `02-05`, not one of this phase's own D-14 cycles). |
 | 12 | Live re-verification of galago-core `261015-o44` fixes resolves FINDING (a)/(b) | ✓ VERIFIED | `03-ACCEPTANCE.md` `## 261015-o44 live verification`, unaffected — galago-core-side fix, unrelated to CR-01. |
 | 13 | Safety invariant audit: every `Pause`/`Resume`/`Abort` line since the LIVE-04 deploy restart maps to a recorded operator action, 0 unmapped, restarts explained | ✓ VERIFIED | `03-ACCEPTANCE.md` `## Safety invariant audit`, unaffected — a record of what the log showed during acceptance, not a claim about current code. |
-| 14 | Code unchanged since the last actual redeploy; post-acceptance gate green | ⚠️ UNCERTAIN — see human_verification | `git diff --stat 201d987 HEAD -- tools/ interfaces/ setup.py requirements.txt` is **no longer empty**: `tools/fast/server.py \| 27 ++++++++++-------` and `tools/tests/fast_test.py \| 79 ++...` (commits `134e097`, `7c2e15a`). The "post-acceptance gate green" half still holds and is *stronger* now (147 passed, up from 144, including the 2 new CR-01 regression tests, independently re-run here). But the "code unchanged" half is now literally false, and the change was not a D-14 gap fix of *this* phase with a recorded redeploy/rerun — it is an unrelated Phase 2 gap-closure plan that happens to touch the same file. Not marked FAILED: nothing about this phase's own evidence is wrong or fabricated; this is new information about code drift since acceptance that needs a human redeploy/rerun decision (see human_verification). |
+| 14 | Code unchanged since the last actual redeploy; post-acceptance gate green | ✓ VERIFIED (after 2026-10-16 redeploy — see Resolution; original finding kept below) | `git diff --stat 201d987 HEAD -- tools/ interfaces/ setup.py requirements.txt` is **no longer empty**: `tools/fast/server.py \| 27 ++++++++++-------` and `tools/tests/fast_test.py \| 79 ++...` (commits `134e097`, `7c2e15a`). The "post-acceptance gate green" half still holds and is *stronger* now (147 passed, up from 144, including the 2 new CR-01 regression tests, independently re-run here). But the "code unchanged" half is now literally false, and the change was not a D-14 gap fix of *this* phase with a recorded redeploy/rerun — it is an unrelated Phase 2 gap-closure plan that happens to touch the same file. Not marked FAILED: nothing about this phase's own evidence is wrong or fabricated; this is new information about code drift since acceptance that needs a human redeploy/rerun decision (see human_verification). |
 | 15 | D-13 completeness: all six Summary rows PASS, every scenario section has its required fields, Edge-probe fallback accounted for | ✓ VERIFIED | `03-ACCEPTANCE.md` Summary table unaffected, unchanged since prior verification. |
 | 16 | REQUIREMENTS.md LIVE-04..07 marked Complete only from this phase's evidence; no orphaned requirements | ✓ VERIFIED | `.planning/REQUIREMENTS.md` traceability table: LIVE-04, LIVE-05, LIVE-06, LIVE-07 all "Complete", mapped to Phase 3, "Unmapped: 0". (CR-01's own requirement, LIVE-02, belongs to Phase 2 and is tracked/closed there — `02-VERIFICATION.md` shows it re-verified `passed` 5/5 after gap-closure `02-05`; it is not one of this phase's four requirement IDs and does not create an orphan here.) |
 
@@ -104,7 +102,7 @@ that specific change was never re-exercised live.
 | `03-ACCEPTANCE.md` | Summary + 6 scenario sections + Safety invariant audit + Flagged assumptions | ✓ VERIFIED | Unchanged since prior verification; 1387 lines. |
 | `scripts/fast_status.py` | Read-only `GetStatus` printer | ✓ VERIFIED | Unchanged; single `stub.GetStatus` call site. |
 | `scripts/fast_dryrun.py` | Simulated-only dry-run harness | ✓ VERIFIED | Unchanged; `DryRunFastServer(FastServer)` present. |
-| `tools/fast/server.py` | `_is_no_error` fix (D-14 LIVE-06b) present; adapter code otherwise matches deployed SHA | ⚠️ CHANGED SINCE DEPLOY | `_is_no_error` fix (`201d987`) still present and correct. Additionally, `Resume`'s crash-recovery branch changed again after `201d987` (CR-01, `134e097`) — this later change is substantive, tested, and present in the file, but not yet deployed to forb01. See Truth 14. |
+| `tools/fast/server.py` | `_is_no_error` fix (D-14 LIVE-06b) present; adapter code otherwise matches deployed SHA | ✓ DEPLOYED AT HEAD (2026-10-16) | `_is_no_error` fix (`201d987`) still present and correct. Additionally, `Resume`'s crash-recovery branch changed again after `201d987` (CR-01, `134e097`) — this later change is substantive, tested, and present in the file, but not yet deployed to forb01. See Truth 14. |
 | `tools/tests/fast_test.py` | Regression coverage for the `_is_no_error` fix and (new) CR-01 | ✓ VERIFIED | 147-test suite passes live (up from 144), including both the original `_is_no_error` coverage and the 2 new CR-01 regression tests (`test_crash_recovery_resume_bool_false_error_code_is_not_success`, `test_crash_recovery_resume_reply_without_error_code_is_not_success`), independently re-run here. |
 
 ### Key Link Verification
@@ -143,7 +141,7 @@ plays that role.
 | LIVE-04 | 03-01, 03-02 | Deployed in the safe order | ✓ SATISFIED | `03-ACCEPTANCE.md` LIVE-04 block, Result: PASS; `REQUIREMENTS.md` Complete. Unaffected by CR-01. |
 | LIVE-05 | 03-05 | Deck 3 empty → prompt → fix → Resume → SUCCESS | ✓ SATISFIED | `03-ACCEPTANCE.md` LIVE-05 section, Result: PASS. Unaffected by CR-01 (different code path). |
 | LIVE-06 | 03-04, 03-06 | Pause→Resume→SUCCESS; Pause→Abort→"aborted by operator", queue FAILED | ✓ SATISFIED | `03-ACCEPTANCE.md` LIVE-06a + LIVE-06b, both Result: PASS. Unaffected by CR-01 (both are in-flight-lock paths, not the crash-recovery branch). |
-| LIVE-07 | 03-07, 03-08 | Restart `galago-web` mid-run, recover via tool page | ⚠️ SATISFIED HISTORICALLY, CODE SINCE CHANGED | `03-ACCEPTANCE.md` LIVE-07 section, Result: PASS, accurate record of what happened against `201d987`. The crash-recovery `Resume` code this scenario depends on has since changed (CR-01) and is undeployed/unexercised live. See human_verification. |
+| LIVE-07 | 03-07, 03-08 | Restart `galago-web` mid-run, recover via tool page | ✓ SATISFIED (LIVE-07 used the in-flight Resume path, untouched by CR-01 — see Resolution) | `03-ACCEPTANCE.md` LIVE-07 section, Result: PASS, accurate record of what happened against `201d987`. The crash-recovery `Resume` code this scenario depends on has since changed (CR-01) and is undeployed/unexercised live. See human_verification. |
 
 No orphaned requirements: `REQUIREMENTS.md`'s coverage line still reads "Milestone requirements:
 17 total / Mapped to phases: 17 / Unmapped: 0". CR-01's own requirement (LIVE-02) belongs to
@@ -161,7 +159,7 @@ correctly out of scope for this phase's four requirement IDs.
 
 No `TBD`/`FIXME`/`XXX` markers found in the CR-01 diff or any other file this phase touched.
 
-### Human Verification Required
+### Human Verification (resolved 2026-10-16)
 
 ### 1. Redeploy/rerun decision for the CR-01 fix on forb01
 
@@ -192,6 +190,33 @@ proven at the time, against the code that was actually running — but it is new
 team has not yet acted on: the fix is tested in isolation (147/147, including 2 new regression
 tests re-run here) but not deployed to forb01 or exercised on the instrument. Routed to human
 verification above rather than scored as a pass or a fail.
+
+## Resolution (2026-10-16, orchestrator, user decision)
+
+**Correction to the finding above.** The claim that LIVE-07 exercised the crash-recovery `Resume`
+branch is wrong. LIVE-07 restarted only `galago-web`; `galago-tools` was not restarted, so the
+adapter's `Transfer` stayed in flight holding `_motion_lock`, `Resume`'s non-blocking acquire
+failed, and the **in-flight** path ran (resume and return on acceptance, no wait). The
+F.A.S.T.log for the scored rerun (trace folder `1792039261`, backed up to
+`~/.local/share/galago/log-backups/pre-cr01-redeploy-*/`) shows it: `Running command Transfer`
+14:22:13, `Pause` 14:23:06 (46% paused), `Resume` 14:24:06, then the same Transfer's own
+`fast run progress` lines continuing from 46% to completion. CR-01 changed only the crash-recovery
+branch (lock acquired), so LIVE-07's live evidence is unaffected by CR-01; rerunning LIVE-07 as
+designed would not exercise CR-01 either.
+
+**Decision.** The user chose: redeploy forb01 to HEAD, no live rerun. CR-01 is covered by its unit
+regression tests (147/147).
+
+**Redeploy evidence.** Gate before restart: `bin/make proto test` 147 passed, ruff clean, mypy
+clean; F.A.S.T. `READY`/idle, queue empty. `systemctl --user restart galago-tools` at
+2026-10-16 05:47:21 WIB: MainPID `836290` -> `1940146` (active 05:47:23 WIB); F.A.S.T. listener
+`867162` -> `1940246`; new trace folder `1792104444`, `F.A.S.T.log` line 2 `fast server started,
+listening on 40001`, no traceback. The service runs this checkout as an editable install, so it
+now runs HEAD including `134e097`. Reconnect: at the user's request Claude sent `Configure`
+directly over gRPC, with the same configs as before the restart (F.A.S.T. real mode
+`10.150.1.170:5003`, `expected_tray_id` 90; Pf400 `simulated: true`); this departs from the
+phase's operator-only reconnect rule, at the user's instruction. Result: F.A.S.T. `READY`
+(idle), Pf400 `SIMULATED`. No motion command was sent. `galago-web` and the core were not touched.
 
 ---
 

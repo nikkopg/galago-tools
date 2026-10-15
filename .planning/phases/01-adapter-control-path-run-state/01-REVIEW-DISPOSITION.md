@@ -5,7 +5,7 @@ titles: json
 findings:
   - id: WR-01
     severity: warning
-    disposition: open
+    disposition: fixed
     title: "`Resume()`'s crash-recovery gate bypasses the module's own `_accepted()` fail-closed rule"
   - id: WR-02
     severity: warning
@@ -31,7 +31,7 @@ findings:
     severity: critical
     disposition: fixed
     title: "`_run_in_flight()` resets the run record on every entry, not just the first, silently clobbering an in-flight pause"
-open: 6
+open: 5
 total: 7
 recorded: 2026-10-15T13:04:03.957Z
 ---
@@ -40,7 +40,7 @@ recorded: 2026-10-15T13:04:03.957Z
 
 | Finding | Severity | Disposition | Source |
 |---------|----------|-------------|--------|
-| WR-01 | warning | open | - |
+| WR-01 | warning | fixed | Phase 2 plan 02-05 (134e097, 7c2e15a) — same defect as 02-REVIEW CR-01; deployed 2026-10-16 |
 | WR-02 | warning | open | - |
 | WR-03 | warning | open | - |
 | IN-01 | info | open | - |
