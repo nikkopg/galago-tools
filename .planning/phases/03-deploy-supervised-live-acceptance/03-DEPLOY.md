@@ -477,6 +477,59 @@ also later than the step 2 check and does not break the order).
   Rolling back to it would undo all of Phase 2's code-review/UI-review fixes (WR-01..WR-07, the
   control-bar fixes) **and** this D-14 none-plate fix.
 
+### D-14 redeploy (LIVE-06b adapter fix)
+
+- LIVE-06b's attempt 2 (plan 03-06, `03-ACCEPTANCE.md`) exposed a wording defect: the instrument
+  reports an operator abort as `error_name NoError` / `error_code 0`, not as empty/`None` fields,
+  so `tools/fast/server.py`'s `_message_for` appended a `": [outcome]"` suffix the D-09/D-11
+  wording does not call for ("run aborted by operator at 22%: NoError (0)"). Per D-14, the
+  scenario stopped there pending a fix.
+- This repo fixed it on 2026-10-15: `7d77e23` (RED test for the `NoError (0)` suffix) then
+  `201d987` (fix: `_is_no_error` now treats a `NoError`/`0` report with no message as no error, so
+  the wording reads `"run aborted by operator at <p>%"` with no suffix; real errors keep their
+  suffix; the non-operator abort wording is unchanged).
+- Gate, re-run fresh before redeploying: `PATH=$HOME/data/nikko/.venvs/galago-py310/bin:$PATH bash
+  bin/make proto test` exit 0, **144 tests passed**; `ruff check tools/fast/server.py
+  tools/tests/fast_test.py` → "All checks passed!"; `mypy tools/fast/server.py` → "Success: no
+  issues found in 1 source file". This is an adapter-only fix: no proto change, so galago-core's
+  `vendor/galago-tools` gitlink (`cb7886d`) and galago-web are unaffected by the fix itself.
+- Redeploy, on the user's literal "go": `systemctl --user restart galago-tools` at
+  2026-10-15T04:40:59Z (11:40:59 WIB). Journal: the manager stopped the old tool processes
+  (Pf400 `727872`, F.A.S.T. `727894`) at 11:40:59-11:41:00 WIB, then started fresh: `MainPID`
+  `4044033` -> `836290` (`ActiveEnterTimestamp` 2026-10-15 11:41:00 WIB); new F.A.S.T. listener PID
+  `727894` -> `836333`; new Pf400 listener PID `836310`. New trace-log folder
+  `~/.local/share/galago/trace_logs/1792039261/`; `F.A.S.T.log` line 2:
+  `2026-10-15 11:41:02 | INFO | fast server started, listening on 40001` — no traceback.
+  `fast_status.py --port 40001` read `NOT_CONFIGURED` immediately after (expected, awaiting the
+  operator's reconnect). galago-core (`b30b38d` core, `d4726ff`-derived `galago-web`) was not
+  touched.
+- **Connect-all-tools incident (galago-core observation, non-blocking, out of scope for this
+  phase)**: at 11:42:04 WIB a "Connect all tools" action from the `:8081` manager page sent
+  F.A.S.T. an **empty** config (`fast {\n}`); the log shows `2026-10-15 11:42:04 | ERROR | Failed
+  to configure Tool=F.A.S.T-fast: Config.host is required`. Pf400 failed the same way
+  (`"[Errno -2] Name or service not known"`). Nothing moved. Root cause (galago-core, out of
+  scope): `ToolsComponent.tsx` sends `{[tool.type]: tool.config}` to "Connect all", but the stored
+  config is already wrapped as `{fast:{...}}`, so the nested key is dropped and the handler
+  receives an empty object. Recorded here for the user's awareness; not fixed in this phase.
+- The operator then reconnected F.A.S.T. from its own tool page at 11:44:12 WIB (`Received
+  configuration`: host `10.150.1.170`, port 5003, `expected_tray_id` 90, no `simulated` flag —
+  real mode), and reconnected Pf400 with Simulate ON (status `SIMULATED`, this environment's
+  established baseline per the Pre-deploy record above, not a new finding).
+- The operator reran LIVE-06b after this redeploy; plan 03-06's `03-ACCEPTANCE.md` record now
+  scores it PASS, with both earlier attempts (the rehearsal missing `get_status`, and the wording-
+  defect attempt that found this bug) kept there as history.
+- Rollback (D-06, this fix only): `git revert 201d987` (restores the `": [outcome]"` suffix
+  behavior), then `PATH=$HOME/data/nikko/.venvs/galago-py310/bin:$PATH bash bin/make proto test`
+  to confirm the gate, then `systemctl --user restart galago-tools` and the operator reconnects
+  F.A.S.T. from `galago-web`. The broader rollback anchor (`rollback-pre-live04`,
+  `9ad9c64`, from `d95c2e1`) is unaffected — this fix never touched the proto or `galago-web`, so
+  that anchor's caveat (undoes Phase 2 WR fixes + the LIVE-05 none-plate fix) is unchanged by this
+  entry.
+- **New no-restart baseline for 03-07 and later plans**: `galago-tools` MainPID `836290`, F.A.S.T.
+  listener PID `836333`, trace-log folder `1792039261` (`F.A.S.T.log` line 2:
+  `2026-10-15 11:41:02 ... fast server started`). From 03-07 on, compare against these values
+  (not the earlier `4044033`/`727894`/`1791974367` baseline) to detect an unexpected restart.
+
 ## Logs to watch (D-08)
 
 - Manager/journal lines (does NOT carry tool command lines — verified 2026-10-14):

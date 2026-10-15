@@ -12,7 +12,7 @@ phase (03-03 to 03-08) fill the remaining sections.
 | — | Dry run (D-07) | PASS | `## Dry run (D-07)` below |
 | LIVE-06 | LIVE-06a: Pause → Resume → SUCCESS | PASS | `## LIVE-06a: Pause -> Resume -> SUCCESS` below |
 | LIVE-05 | LIVE-05: Deck 3 empty → prompt → fix deck → Resume → SUCCESS | PASS | `## LIVE-05` below — rerun after the D-14 fix (galago-core `ad87ea5`, galago-web `b0e183e`); first attempt (FAIL, "found -1") kept as history in the same section |
-| LIVE-06 | LIVE-06b: Pause → Abort → aborted by operator, queue FAILED | not run | — |
+| LIVE-06 | LIVE-06b: Pause → Abort → aborted by operator, queue FAILED | PASS | `## LIVE-06b` below — scored rerun after the D-14 fix (`7d77e23`, `201d987`); two earlier attempts (rehearsal, then the wording-defect attempt) kept as history in the same section |
 | LIVE-07 | LIVE-07: galago-web restart mid-run → tool-page recovery | not run | — |
 
 ## LIVE-04 Deploy
@@ -485,7 +485,226 @@ phase (03-03 to 03-08) fill the remaining sections.
     followed are recorded in `03-DEPLOY.md`'s "D-14 redeploy (LIVE-05 fix)" subsection.
 ## LIVE-06b: Pause -> Abort -> aborted by operator, queue FAILED
 
-(Not run — plan 03-06 fills this section.)
+- Date/time: scored rerun — run `154151287281e7000` created 2026-10-15T04:45:02.053Z (11:45:02
+  WIB); within it: Transfer started 04:45:03.564Z (11:45:03 WIB), operator Pause sent 11:45:29
+  WIB (12% paused at 11:45:30 WIB), operator Abort sent 11:46:12 WIB (returnLiquid=false),
+  ERROR_FROM_TOOL at 11:46:13 WIB (`failedAt` 04:46:13.158Z). All times 2026-10-15 WIB, galago-web
+  image `b0e183e5513d11f80494e83d214f14c42dcbe8931d4616aee995f5ec8271f317`, `galago-tools`
+  post-redeploy (MainPID `836290`, F.A.S.T. listener `836333`).
+  - **Attempt 1 (rehearsal, not scored)**: run `154147d89501e7000`, created 04:24:41.514Z
+    (11:24:41 WIB). The protocol had only the Transfer step — the `get_status` step was missing —
+    so this attempt could not show the later step failing to run, and is not scored. Transfer
+    started 11:25:03 WIB, Pause sent 11:25:27 WIB (12% paused at 11:25:31 WIB), Abort sent
+    11:27:32 WIB (`returnLiquid=false`), ERROR_FROM_TOOL at 11:27:33 WIB with
+    `error_message: "run aborted by operator at 12%: NoError (0)"`. `fast_status.py` polled live
+    at 11:26:18 WIB during the pause: `status BUSY`, `run_state.percent 12.0`,
+    `run_state.state paused`, `pause.errorName "NoError"`, `pause.errorCode 0`,
+    `pause.isHardPause false`, `pause.since "2026-10-15T04:25:31+00:00"`. Queue (`queueId 110`)
+    went FAILED with error `"Error from tool \"F.A.S.T\": run aborted by operator at 12%:
+    NoError (0)"`.
+  - **Attempt 2 (not scored — exposed the D-14 defect)**: run `15414b331c01e7000`, with both
+    Transfer and `get_status` steps (protocol fixed). A second run, `15414b1f8301e7000`, created
+    04:31:51Z, sent nothing to the tool and was superseded. Transfer started 11:32:02 WIB, Pause
+    sent 11:32:38 WIB (22% paused at 11:32:39 WIB), Abort sent 11:32:46 WIB
+    (`returnLiquid=false`), ERROR_FROM_TOOL at 11:32:47 WIB with
+    `error_message: "run aborted by operator at 22%: NoError (0)"`. Queue: Transfer (`queueId 113`)
+    FAILED with error `"Error from tool \"F.A.S.T\": run aborted by operator at 22%: NoError (0)"`;
+    `get_status` (`queueId 114`) stayed CREATED and never ran — no `Running command GetStatus`
+    appears anywhere in the F.A.S.T.log, even 8+ minutes later. Operator's answer for this attempt,
+    verbatim: "i didnt return liquid, abort disabled" — Return liquid was **no**, and Abort stayed
+    disabled until a choice was made (nothing preselected). This attempt was not scored because of
+    the `": NoError (0)"` suffix, a wording defect (see D-14 fix below).
+- Operator: the user, at the instrument with the e-stop within reach, created the two-step
+  LIVE-06b protocol (Transfer then `get_status`), started each run, pressed Pause once the head
+  was moving, and Aborted with a Return-liquid choice of their own each time. Claude sent no
+  command to any tool on any attempt; Claude read `fast_status.py`, the production F.A.S.T.log,
+  `galago-web`'s run/queue records (read-only `GET`/tRPC query calls only) and the journal.
+  - **Precondition note:** the plan's Task 1 precondition check `grep -c 'run aborted by operator
+    at' tools/fast/server.py` expects `1` but, re-run now, prints `3` — `tools/fast/server.py:330`
+    and `:884` are docstring occurrences of the same phrase, and only `:361` is the code line that
+    produces the wording. The wording itself is unchanged in substance; the count was a planning
+    miscount, not a sign of drift, recorded here plainly per the continuation instructions.
+  - **D-14 fix (found live during attempt 2)**: the instrument reports an operator abort as
+    `error_name NoError` / `error_code 0`, not as empty/`None` fields, so
+    `tools/fast/server.py`'s `_message_for` appended the `": [outcome]"` suffix even though D-09/
+    D-11 expect it only for a real error. Fixed in this repo: `7d77e23` (RED test,
+    `test_operator_abort_with_no_error_report_has_no_suffix`-shaped coverage in
+    `tools/tests/fast_test.py`) then `201d987` (fix: `_is_no_error` now treats a `NoError`/`0`
+    report with no message as no error, so the wording reads `"run aborted by operator at <p>%"`
+    with no suffix; real errors keep their suffix; the non-operator abort wording is unchanged).
+    Gate, re-run fresh for this record: `PATH=$HOME/data/nikko/.venvs/galago-py310/bin:$PATH bash
+    bin/make proto test` exit 0, **144 tests passed**; `ruff check tools/fast/server.py
+    tools/tests/fast_test.py` → "All checks passed!"; `mypy tools/fast/server.py` → "Success: no
+    issues found in 1 source file". `grep -n 'run aborted by operator at'
+    tools/fast/server.py` now shows lines 330 (docstring), 361 (code), 884 (docstring) — 3 matches,
+    1 code line, consistent with the precondition note above.
+  - **Redeploy (adapter fix only, no proto/schema change)**: on the user's literal "go",
+    `systemctl --user restart galago-tools` at 2026-10-15T04:40:59Z (11:40:59 WIB). Journal:
+    manager killed the old Pf400 (`727872`) and F.A.S.T. (`727894`) processes at 11:40:59-11:41:00
+    WIB, then started fresh: `MainPID` `4044033` -> `836290`, active since `2026-10-15 11:41:00
+    WIB`; new F.A.S.T. listener PID `727894` -> `836333`; new Pf400 PID `836310`. New trace-log
+    folder `~/.local/share/galago/trace_logs/1792039261/`; `F.A.S.T.log` line 2:
+    `2026-10-15 11:41:02 | INFO | fast server started, listening on 40001` — no traceback.
+    `fast_status.py --port 40001` read `NOT_CONFIGURED` immediately after (expected, awaiting
+    reconnect).
+    - **Connect-all-tools incident (galago-core observation, non-blocking, out of scope)**: at
+      11:42:04 WIB a "Connect all tools" action from the `:8081` manager page sent F.A.S.T. an
+      **empty** config (`fast {\n}`); the log shows
+      `2026-10-15 11:42:04 | ERROR | Failed to configure Tool=F.A.S.T-fast: Config.host is
+      required`, and `fast_status.py` would have read `FAILED` (not re-polled live at that
+      instant; the next polled read is the post-reconnect `READY` below). Pf400 failed the same
+      way (`"[Errno -2] Name or service not known"`, confirmed still present in its
+      `error_message` field at time of writing). Nothing moved. Root cause (galago-core, out of
+      scope for this phase): `ToolsComponent.tsx` sends `{[tool.type]: tool.config}` to "Connect
+      all", but the stored config is already wrapped as `{fast:{...}}`, so the nested key is
+      dropped and the handler receives an empty object. Recorded as a galago-core observation per
+      the continuation instructions, not fixed here.
+    - **Reconnect**: the operator reconnected F.A.S.T. from its own tool page at 11:44:12 WIB
+      (`Received configuration`: host `10.150.1.170`, port 5003, `expected_tray_id` 90, no
+      `simulated` flag — real mode) and reconnected Pf400 with Simulate ON (status `SIMULATED`,
+      this environment's established baseline per `03-DEPLOY.md`'s Pre-deploy record, not a new
+      finding).
+- Transfer parameters: the two-step protocol as used on every attempt — F.A.S.T transfer
+  source_deck 1, dest_deck 3, source_plate_id 1, dest_plate_id 1, A3 to A3 (column 3), num_rows 8,
+  num_cols 1, volume 50, tip_reuse fresh, expected_tray_id 0 (blank, Config value applies); then
+  F.A.S.T get_status (read-only, no args) — matching the plan's D-10 proposal exactly. Attempt 1's
+  protocol lacked the `get_status` step (fixed before attempt 2).
+- Decisions chosen: Return liquid? **no** on every attempt (`returnLiquid=false` in every Abort
+  request). The operator's reply for attempt 2, verbatim: "i didnt return liquid, abort disabled"
+  — confirming Return liquid? started unselected and Abort stayed disabled until a choice was
+  made. The operator's reply for the scored rerun: "paused at 12%, start 11.45.03, paused
+  11.45.30, return-liquid no, run page shows error_from_tool" — the choice (no) is restated, but
+  the operator did not re-state "unselected" for this specific run. No `fast_status.py` snapshot
+  was taken during this run's pause either. Both points are carried forward honestly rather than
+  assumed: the "nothing preselected" behavior is the same dialog on the same `galago-web` build
+  (`b0e183e`) that attempt 2 already confirmed unselected minutes earlier against the identical
+  code path, so the record relies on that confirmation rather than a fresh one for the rerun
+  (A-EDGE-LIVE-06-style honesty, not a new assumption).
+- Log excerpt: scored rerun, production F.A.S.T.log (local time; the production log was
+  overwritten in place by the 11:40:59 WIB restart — this excerpt is from a backup copy taken
+  before the overwrite would have destroyed it, `fast-log-20261015T1147-newadapter.log`, itself a
+  copy of the post-redeploy `~/.local/share/galago/trace_logs/1792039261/F.A.S.T.log`):
+  ```
+  2026-10-15 11:41:02 | INFO | fast server started, listening on 40001
+  2026-10-15 11:44:12 | INFO | Received configuration: toolId: "F.A.S.T" ...
+  2026-10-15 11:45:03 | INFO | Running command Transfer
+  2026-10-15 11:45:04 | INFO | fast run progress 0% (running)
+  ...
+  2026-10-15 11:45:29 | INFO | Running command Pause
+  2026-10-15 11:45:30 | INFO | fast run progress 12% (paused)
+  2026-10-15 11:46:12 | INFO | Running command Abort
+  2026-10-15 11:46:13 | INFO | fast run progress 12% (aborted)
+  2026-10-15 11:46:13 | DEBUG | ExecuteCommand Response: response: ERROR_FROM_TOOL
+  error_message: "run aborted by operator at 12%"
+  ```
+  No `Running command GetStatus` line appears anywhere in this log (0 occurrences, re-checked at
+  time of writing) — the `get_status` step never ran.
+  - **Attempt 1** (backup `fast-log-20261015T1129.log`):
+    ```
+    2026-10-15 11:25:03 | INFO | Running command Transfer
+    2026-10-15 11:25:27 | INFO | Running command Pause
+    2026-10-15 11:25:31 | INFO | fast run progress 12% (paused)
+    2026-10-15 11:27:32 | INFO | Running command Abort
+    2026-10-15 11:27:33 | INFO | fast run progress 12% (aborted)
+    2026-10-15 11:27:33 | DEBUG | ExecuteCommand Response: response: ERROR_FROM_TOOL
+    error_message: "run aborted by operator at 12%: NoError (0)"
+    ```
+  - **Attempt 2** (backup `fast-log-20261015T1140.log`):
+    ```
+    2026-10-15 11:32:02 | INFO | Running command Transfer
+    2026-10-15 11:32:38 | INFO | Running command Pause
+    2026-10-15 11:32:39 | INFO | fast run progress 22% (paused)
+    2026-10-15 11:32:46 | INFO | Running command Abort
+    2026-10-15 11:32:47 | INFO | fast run progress 22% (aborted)
+    2026-10-15 11:32:47 | DEBUG | ExecuteCommand Response: response: ERROR_FROM_TOOL
+    error_message: "run aborted by operator at 22%: NoError (0)"
+    ```
+    No `Running command GetStatus` appears in this log either, including 8+ minutes after the
+    abort (checked live at 11:40 WIB, before the restart).
+- Final step result: the scored rerun's Transfer ends `ExecuteCommand Response: response:
+  ERROR_FROM_TOOL` at 11:46:13 WIB with `error_message: "run aborted by operator at 12%"` (no
+  suffix — the D-14 fix applied); `galago-web`'s `commandQueue.getAll` independently confirms
+  `queueId 115`, `runId 154151287281e7000`, `status FAILED`,
+  `error.message "Error from tool \"F.A.S.T\": run aborted by operator at 12%"`,
+  `failedAt "2026-10-15T04:46:13.158Z"` — the identical instant and identical wording (no
+  suffix). The operator confirmed: "run page shows error_from_tool" — the run view did show error
+  text this time, so the A-EDGE-LIVE-06 fallback (treating the log as authoritative when the run
+  view shows nothing) was not needed for this record.
+  - **Attempt 1**: ERROR_FROM_TOOL "run aborted by operator at 12%: NoError (0)" at 11:27:33 WIB;
+    not scored (protocol lacked `get_status`).
+  - **Attempt 2**: ERROR_FROM_TOOL "run aborted by operator at 22%: NoError (0)" at 11:32:47 WIB;
+    not scored (wording defect, fixed by D-14 above).
+- Queue state: `galago-web` run `154151287281e7000` (protocol `LIVE-06b`, `protocolId 4`):
+  `commandQueue.getAll` (read-only tRPC query, re-checked at time of writing) shows `queueId 115`
+  (transfer) `status FAILED`, `startedAt 04:45:03.564Z`, `failedAt 04:46:13.158Z`; `queueId 116`
+  (get_status) `status CREATED` — never started, never completed. `commandQueue.state` (read-only
+  tRPC query) reads `"FAILED"`. `GET http://localhost:3010/api/runs` independently confirms the
+  run record: `protocolName "LIVE-06b"`, two commands (`transfer` then `get_status`), the
+  `get_status` command's top-level status still `CREATED` with no `startedAt`/`completedAt`.
+  - **Attempt 1**: `queueId 110` (transfer only, single-step protocol) FAILED, matching the log.
+  - **Attempt 2**: `queueId 113` (transfer) FAILED; `queueId 114` (get_status) CREATED — never
+    ran, matching the log's absence of any `Running command GetStatus` line.
+- Control commands in window: scored-rerun window 11:43:03-11:48:13 WIB (2 min before the
+  Transfer's 11:45:03 WIB start to 2 min after the 11:46:13 WIB abort reply). Counts in the
+  window: Transfer=1, Pause=1, Resume=0, Abort=1, GetStatus=0 — matches the operator's reported
+  actions exactly (one Pause, one Abort, no Resume, and critically no GetStatus), all
+  operator-sent: yes. `journalctl --user -u galago-tools --since "2026-10-15 11:43:03" --until
+  "2026-10-15 11:48:13"` (re-checked) shows no tool-manager activity in that narrower window
+  (the restart and reconnects all happened earlier, 11:40:59-11:44:12 WIB, well before this
+  window opens) — no restart or reconfiguration occurred during the scored run itself.
+  - **Attempt 1**: window 11:23:03-11:29:33 WIB (approx.), Transfer=1, Pause=1, Resume=0, Abort=1,
+    GetStatus=0 (protocol had no `get_status` step).
+  - **Attempt 2**: window 11:30:02-11:34:47 WIB (approx.), Transfer=1, Pause=1, Resume=0, Abort=1,
+    GetStatus=0 — the later step never ran even though it existed in the protocol.
+- Screenshots: none provided (any attempt).
+- D-11 criteria: observed on the scored rerun, the one scored run per D-11's "one abort run is
+  enough":
+  - Return liquid? had no preselection: Observed: met (attempt 2's confirmation — "abort
+    disabled [until chosen]" — on the identical `galago-web` build `b0e183e` and the same dialog;
+    not re-confirmed verbatim for the scored rerun itself, carried forward honestly as a named
+    caveat above rather than silently assumed).
+  - The step ended ERROR_FROM_TOOL "run aborted by operator at [p]%": Observed: **met** —
+    `ERROR_FROM_TOOL` at 11:46:13 WIB, `error_message "run aborted by operator at 12%"`, exactly
+    the D-09/D-11 wording with no suffix, confirmed in both the F.A.S.T.log and
+    `commandQueue.getAll`'s `error.message`.
+  - The queue is FAILED: Observed: met — `commandQueue.state` reads `"FAILED"`; `queueId 115`
+    status `FAILED`.
+  - No later step ran: Observed: met — `queueId 116` (`get_status`) stayed `CREATED`; zero
+    `Running command GetStatus` lines anywhere in the post-redeploy F.A.S.T.log.
+  - The operator's choice is recorded: Observed: met — Return liquid `no`
+    (`returnLiquid=false` in the Abort HTTP call), operator-confirmed ("return-liquid no").
+  - No control command the operator did not send: Observed: met — window counts Transfer=1,
+    Pause=1, Resume=0, Abort=1, GetStatus=0, exactly matching the operator's reported actions; no
+    tool-manager restart/reconfiguration occurred inside the 11:43:03-11:48:13 WIB window itself
+    (the redeploy and both Connect-all/reconnect events predate it).
+  - **Non-blocking galago-core observation (out of scope)**: after the abort, the run page's Gantt
+    timeline keeps drawing the Transfer bar out to its estimated duration instead of ending it at
+    the failure. This does not affect the queue: galago-core's `command_queue.ts` `break`s out of
+    its dispatch loop on a failed step (verified in code and in the state above — `queueId 116`
+    never started). Recorded for the user's awareness; not fixed in this phase (galago-core debt,
+    out of scope).
+- Result: PASS
+  - Every D-11 criterion holds on the scored rerun (`154151287281e7000`, protocol `LIVE-06b`,
+    galago-web `b0e183e`, `galago-tools` post-redeploy MainPID `836290`/F.A.S.T. listener
+    `836333`): Return liquid had no preselection (via attempt 2's confirmation on the same build
+    and dialog); the step ended `ERROR_FROM_TOOL` "run aborted by operator at 12%" with no
+    suffix; the queue is FAILED; the `get_status` step never ran; the operator's Return-liquid
+    choice (no) is recorded; no control command the operator did not send appears in the window.
+    D-11 states one scored abort run is enough. Two earlier attempts are kept as history above:
+    attempt 1 (rehearsal, not scored — the protocol lacked the `get_status` step needed to prove
+    "no later step runs") and attempt 2 (not scored — exposed a wording defect, D-14, where the
+    instrument's `NoError`/`errorCode 0` abort report produced a `": NoError (0)"` suffix on the
+    "aborted by operator" text). The defect was fixed in this repo (`7d77e23`, `201d987`), the gate
+    re-ran green (144 tests, ruff clean, mypy clean), and `galago-tools` was redeployed
+    (`systemctl --user restart galago-tools`, MainPID `4044033` -> `836290`) on the user's explicit
+    "go" before this scored rerun. One non-blocking galago-core incident occurred during the
+    redeploy window (an empty-config "Connect all tools" push, unrelated to this fix, recorded
+    above as a galago-core observation) and was resolved by the operator reconnecting F.A.S.T.
+    directly before the scored run. Caveats carried forward honestly: no live `fast_status.py`
+    pause snapshot was taken during the scored rerun's pause (the log's "12% (paused)" line plus
+    the operator's report are the evidence), and the operator did not re-state "unselected" for
+    this specific run (attempt 2's confirmation on the identical build/dialog is cited instead).
+    LIVE-06a (03-04, PASS) and LIVE-06b (this record, PASS) together satisfy requirement LIVE-06.
 
 ## LIVE-07: galago-web restart mid-run -> tool-page recovery
 
