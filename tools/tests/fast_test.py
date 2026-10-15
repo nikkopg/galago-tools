@@ -2109,6 +2109,30 @@ class TestOperatorAbortWording(unittest.TestCase):
             _message_for(no_error, None),
             "run aborted at 40%: no error reported")
 
+    def test_message_for_treats_the_instruments_noerror_outcome_as_no_error(self) -> None:
+        # The real instrument reports an operator abort as NoError (0), not as
+        # empty fields (LIVE-06b, 2026-10-15: "...at 12%: NoError (0)").
+        reported_no_error = Aborted(outcome=RunOutcome(
+            state="aborted", done=False, error_code=0, error_name="NoError", percent=12))
+        code_zero_only = Aborted(outcome=RunOutcome(
+            state="aborted", done=False, error_code=0, percent=12))
+        noerror_with_message = Aborted(outcome=RunOutcome(
+            state="aborted", done=False, error_code=0, error_name="NoError",
+            message="tray ejected", percent=12))
+
+        self.assertEqual(
+            _message_for(reported_no_error, None, operator_abort=True),
+            "run aborted by operator at 12%")
+        self.assertEqual(
+            _message_for(code_zero_only, None, operator_abort=True),
+            "run aborted by operator at 12%")
+        self.assertEqual(
+            _message_for(noerror_with_message, None, operator_abort=True),
+            "run aborted by operator at 12%: NoError (0): tray ejected")
+        self.assertEqual(
+            _message_for(reported_no_error, None, operator_abort=False),
+            "run aborted at 12%: NoError (0)")
+
     def test_timed_out_cancelled_and_paused_text_ignores_the_flag(self) -> None:
         timed_out = TimedOut(outcome=RunOutcome(state="timeout", done=False, percent=40))
         cancelled = Cancelled(percent=40)
