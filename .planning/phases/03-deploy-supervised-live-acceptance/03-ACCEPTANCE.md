@@ -11,7 +11,7 @@ phase (03-03 to 03-08) fill the remaining sections.
 | LIVE-04 | LIVE-04 Deploy (core → galago-tools → galago-web, safe order) | PASS | `03-DEPLOY.md` Deploy evidence table (Steps 1, 2, 2b reconnect, Step 3 cached + no-cache); `## LIVE-04 Deploy` below |
 | — | Dry run (D-07) | PASS | `## Dry run (D-07)` below |
 | LIVE-06 | LIVE-06a: Pause → Resume → SUCCESS | PASS | `## LIVE-06a: Pause -> Resume -> SUCCESS` below |
-| LIVE-05 | LIVE-05: Deck 3 empty → prompt → fix deck → Resume → SUCCESS | FAIL | `## LIVE-05` below — D-11 pause-detail criterion: prompt renders "found -1" instead of "found none" (galago-core `pausePrompt.ts` sentinel-mapping bug) |
+| LIVE-05 | LIVE-05: Deck 3 empty → prompt → fix deck → Resume → SUCCESS | PASS | `## LIVE-05` below — rerun after the D-14 fix (galago-core `ad87ea5`, galago-web `b0e183e`); first attempt (FAIL, "found -1") kept as history in the same section |
 | LIVE-06 | LIVE-06b: Pause → Abort → aborted by operator, queue FAILED | not run | — |
 | LIVE-07 | LIVE-07: galago-web restart mid-run → tool-page recovery | not run | — |
 
@@ -297,141 +297,192 @@ phase (03-03 to 03-08) fill the remaining sections.
 
 ## LIVE-05: Deck 3 empty -> prompt -> fix deck -> Resume -> SUCCESS
 
-- Date/time: pre-scenario run created 2026-10-15T03:37:54.909Z, ran 03:38:03.865Z-03:38:52.527Z
-  UTC (10:38:03-10:38:52 WIB); scenario run created 2026-10-15T03:39:00.737Z (10:39:00 WIB), ran
-  03:39:04.840Z-03:44:52.654Z UTC (10:39:04-10:44:52 WIB). Within the scenario: Transfer started
-  10:39:04 WIB; instrument paused itself at 10:39:13 WIB (0%, no operator Pause command); plate
-  placed on deck 3 at an unreported time (operator did not give it); operator Resume sent
-  10:44:03 WIB, running again 10:44:04 WIB; Transfer ended SUCCESS 10:44:52 WIB.
-- Operator: the user, at the instrument with the e-stop within reach, created protocol LIVE-05,
-  started the pre-scenario run (forgetting to remove the destination plate from deck 3 first,
-  so it ran to SUCCESS without pausing), then removed the plate and started the scenario run
-  that is the one scored here, read the `tool_paused` prompt, placed plate 1 on deck 3, chose
-  Tip broken? no, and pressed Resume. Operator replies: Task 1 "prompt: WrongPlateType (-645) /
-  deck3: expected plate 1, found -1 / nothing preselected: yes (start 10.39.00, protocol +
-  parameters as used, checklist confirmed)"; Task 2 "previous run i forgot to remove plate on
-  the deck 3, thats why it suceeded. done, check my last run" (no deck-fix/plate-placed time
-  given; the resume time is read from the log, 10:44:03). Claude sent no command; Claude read
-  `fast_status.py`, the production F.A.S.T.log, `journalctl`, `systemctl show -p MainPID`, and
-  `galago-web`'s `commandQueue.getAll` (tRPC) and `/api/runs` (read-only `GET`/query calls only,
-  no write).
-- Transfer parameters: as used, both runs identical — F.A.S.T transfer source_deck 1, dest_deck 3,
-  source_plate_id 1, dest_plate_id 1, A2 to A2 (source_start_col 2, dest_start_col 2), num_rows 8,
-  num_cols 1, volume 10, tip_reuse fresh, expected_tray_id blank (0, Config value applies) —
-  matching the plan's D-10 proposal exactly. Deck 3 was NOT empty at the pre-scenario run's start
-  (operator had not yet removed the destination plate from the prior run), so it is excluded from
-  the scenario below and recorded separately:
-  - **Pre-scenario run** (not the LIVE-05 scenario — record it as such): `galago-web` run
-    `1541326eee81e7000`, protocol LIVE-05, created 03:37:54.909Z. Deck 3 occupied by a leftover
-    plate from the operator's own prior setup; the Transfer ran 10:38:03-10:38:52 WIB and ended
-    SUCCESS without pausing, because no plate was missing. Excluded from the window counts below.
-  - **Scenario run** (scored for D-11): `galago-web` run `154132ef8081e7000`, protocol LIVE-05,
-    created 03:39:00.737Z (10:39:00 WIB), with deck 3 genuinely empty at start.
-- Decisions chosen: Tip broken? no (tip intact), confirmed by the operator; nothing preselected
-  (operator: "nothing preselected: yes").
-- Log excerpt: production F.A.S.T.log, `~/.local/share/galago/trace_logs/1791974367/F.A.S.T.log`
-  (local time), scenario run only:
+- Date/time: scored (rerun) run created 2026-10-15T04:05:50.517Z (11:05:50 WIB); within it: Transfer
+  started 11:06:05 WIB, instrument paused itself at 11:06:13 WIB (0%, no operator Pause command),
+  plate placed on deck 3 at an unreported time (operator did not give it; between 11:06:13 and
+  11:06:27 WIB per the log), operator Resume sent 11:06:27 WIB, running again 11:06:27 WIB, Transfer
+  ended SUCCESS 11:07:13 WIB. A superseded run, `15413f0fc681e7000`, was created
+  2026-10-15T04:05:30Z (11:05:30 WIB) but sent no Transfer to the tool; the operator said "use the
+  latest LIVE-05" without explaining it — recorded as superseded, excluded from the window below,
+  likely created before the operator's 11:05:44 WIB F.A.S.T. reconnect.
+  - **First attempt (FAIL, D-14)**: scenario run `154132ef8081e7000`, created
+    2026-10-15T03:39:00.737Z (10:39:00 WIB), ran 03:39:04.840Z-03:44:52.654Z UTC
+    (10:39:04-10:44:52 WIB), against galago-core HEAD `d4726ff` / galago-web image
+    `sha256:10e7493...`. Scored FAIL on 2026-10-15 (commit `eb8ca7f`) because the rendered pause
+    detail read "found -1" instead of "found none" — kept as history under each bullet below and
+    under Result.
+- Operator: the user, at the instrument with the e-stop within reach, reran protocol LIVE-05 after
+  galago-core's none-plate fix (quick task 261015-f48, commits `07fb7fa`, `e6b0e97`, `ad87ea5`) and
+  the `galago-web` rebuild that followed it, read the `tool_paused` prompt, placed plate 1 on deck 3,
+  chose Tip broken? no, and pressed Resume. Operator replies, verbatim, in order: (1) "galago-core
+  none plate fix is done, reran the LIVE-05. check"; (2) "reason was -645, yes they were unselected,
+  use the latest LIVE-05, step completed"; (3), in answer to "Did the prompt read 'Deck 3: expected
+  plate 1, found none'?": "yes it says none now". The operator did not report the deck-fix
+  (plate-placed) time, and did not explicitly confirm deck 3 was empty at the rerun's start beyond
+  the instrument pausing itself on -645 — both noted plainly, not assumed. Claude sent no command;
+  Claude re-verified read-only the D-14 fix (galago-core commits, the deployed `galago-web` bundle,
+  that `galago-tools` was not restarted) and read `fast_status.py` and the production F.A.S.T.log
+  for the rerun window.
+  - **First attempt (FAIL, D-14) operator record** (kept for history): the user created protocol
+    LIVE-05, started a pre-scenario run forgetting to remove the destination plate from deck 3 first
+    (so it ran to SUCCESS without pausing), then removed the plate and started the scenario run
+    scored FAIL, read the prompt, placed plate 1, chose Tip broken? no, and pressed Resume. Operator
+    replies then: Task 1 "prompt: WrongPlateType (-645) / deck3: expected plate 1, found -1 /
+    nothing preselected: yes (start 10.39.00, protocol + parameters as used, checklist confirmed)";
+    Task 2 "previous run i forgot to remove plate on the deck 3, thats why it suceeded. done, check
+    my last run".
+- Transfer parameters: as used in the rerun — F.A.S.T transfer source_deck 1, dest_deck 3,
+  source_plate_id 1, dest_plate_id 1, A2 to A2, num_rows 8, num_cols 1, volume 10, tip_reuse fresh,
+  expected_tray_id 0 (blank, Config value applies) — matching the plan's D-10 proposal exactly and
+  identical to the first attempt's parameters.
+  - **First attempt (FAIL, D-14)**: both the pre-scenario run `1541326eee81e7000` (deck 3 NOT empty,
+    SUCCESS without pausing, excluded) and the scenario run `154132ef8081e7000` (deck 3 genuinely
+    empty, scored FAIL) used these identical parameters; full detail preserved in git history
+    (commit `eb8ca7f`).
+- Decisions chosen: Tip broken? no (tip intact); nothing preselected (operator: "reason was -645,
+  yes they were unselected" — confirming the Tip broken?/Return liquid? choices were unselected
+  before Resume, same as the first attempt).
+- Log excerpt: production F.A.S.T.log (local time), rerun scenario window only:
   ```
-  2026-10-15 10:39:04 | INFO | Running command Transfer
-  2026-10-15 10:39:05 | INFO | fast run progress 0% (running)
-  2026-10-15 10:39:13 | INFO | fast run progress 0% (paused)
+  2026-10-15 11:06:05 | INFO | Running command Transfer
+  2026-10-15 11:06:05 | INFO | HTTP Request: POST http://10.150.1.170:5003/protocol/run "HTTP/1.1 200 OK"
+  2026-10-15 11:06:05 | INFO | fast run progress 0% (running)
+  2026-10-15 11:06:13 | INFO | fast run progress 0% (paused)
   ...
-  2026-10-15 10:44:03 | INFO | Running command Resume
-  2026-10-15 10:44:03 | INFO | HTTP Request: PUT http://10.150.1.170:5003/protocol/resume?isTipBroken=false "HTTP/1.1 200 OK"
-  2026-10-15 10:44:04 | INFO | fast run progress 0% (running)
+  2026-10-15 11:06:27 | INFO | Running command Resume
+  2026-10-15 11:06:27 | INFO | HTTP Request: PUT http://10.150.1.170:5003/protocol/resume?isTipBroken=false "HTTP/1.1 200 OK"
+  2026-10-15 11:06:27 | INFO | fast run progress 0% (running)
   ...
-  2026-10-15 10:44:52 | INFO | fast run progress 100% (idle)
-  2026-10-15 10:44:52 | DEBUG | ExecuteCommand Response: response: SUCCESS
+  2026-10-15 11:07:13 | DEBUG | ExecuteCommand Response: response: SUCCESS
   ```
-  No "Running command Pause" line appears anywhere in the window — the instrument paused on its
-  own before any aspirate, exactly as D-11 requires. `fast_status.py` polled at 10:41:44 WIB
-  during the pause (quoted as observed, not assumed — A-EDGE-LIVE-05):
-  ```json
-  {"status":"BUSY","run_state":{"percent":0.0,"state":"paused","pause":{"percent":0.0,"since":"2026-10-15T03:39:13.318197+00:00","errorName":"WrongPlateType","errorCode":-645.0,"eventPayload":{"wrongDetection":[{"detectedPlateID":-1.0,"position":3.0,"expectedPlateID":1.0}],"trayType":1.0}}}}
-  ```
-  Rendered detail the operator reported from the `tool_paused` prompt: "deck3: expected plate 1,
-  found -1". The eventPayload's `detectedPlateID` is `-1` (the instrument's sentinel for "no
-  plate detected"), not `null`/`undefined`/`""`; galago-core's `pausePrompt.ts` (read-only,
-  `controller/components/runs/pausePrompt.ts:203-207`, `describeWrongDetectionEntry`) maps only
-  `null`, `undefined` and `""` to the word "none" and otherwise renders `String(detectedRaw)` —
-  so `-1` renders literally as "found -1" instead of the expected "found none". The adapter
-  passed the instrument's `eventPayload` through unchanged (confirmed: the `fast_status.py` JSON
-  above matches what the prompt was built from); this is not a galago-tools fault.
+  No "Running command Pause" line appears anywhere in the window — the instrument paused on its own
+  before any aspirate, exactly as D-11 requires. No `fast_status.py` poll was taken while this run
+  was paused (the pause payload was NOT snapshotted live this time) — stated plainly, not assumed
+  (A-EDGE-LIVE-05). The -645/WrongPlateType reason rests on the operator's direct report ("reason
+  was -645") plus the physical inference that the instrument paused itself at 0% before any aspirate
+  with deck 3 reported empty at the start, consistent with the first attempt's directly-captured
+  payload on the identical protocol and parameters (`errorCode -645.0`, `errorName "WrongPlateType"`,
+  `eventPayload {"wrongDetection":[{"detectedPlateID":-1.0,"position":3.0,"expectedPlateID":1.0}],
+  "trayType":1.0}`, quoted in the first-attempt history below).
+  Rendered detail the operator reported from the `tool_paused` prompt this time: "yes it says none
+  now", in direct answer to "Did the prompt read 'Deck 3: expected plate 1, found none'?" — i.e. the
+  prompt now reads "Deck 3: expected plate 1, found none". This is the fixed rendering: galago-core's
+  `pausePrompt.ts` (quick task 261015-f48, commits `07fb7fa`/`e6b0e97`/`ad87ea5`, HEAD `ad87ea5`,
+  2026-10-15 11:00:07 WIB) adds `isNoPlateDetected`, which maps `null`, `undefined`, `""`, `-1` and
+  `"-1"` to "none" (unit tests added); the deployed `galago-web` bundle was verified (read-only) to
+  carry the fix: `docker exec galago-web grep -o '.\{0,40\}-1===r.\{0,40\}'
+  /app/.next/static/chunks/pages/runs-8bc5bbafd0ab0b33.js` shows the bundle contains
+  `-1===r||"-1"===r?"none"`.
+  - **First attempt (FAIL, D-14)**: production F.A.S.T.log, scenario run only:
+    ```
+    2026-10-15 10:39:04 | INFO | Running command Transfer
+    2026-10-15 10:39:05 | INFO | fast run progress 0% (running)
+    2026-10-15 10:39:13 | INFO | fast run progress 0% (paused)
+    ...
+    2026-10-15 10:44:03 | INFO | Running command Resume
+    2026-10-15 10:44:03 | INFO | HTTP Request: PUT http://10.150.1.170:5003/protocol/resume?isTipBroken=false "HTTP/1.1 200 OK"
+    2026-10-15 10:44:04 | INFO | fast run progress 0% (running)
+    ...
+    2026-10-15 10:44:52 | INFO | fast run progress 100% (idle)
+    2026-10-15 10:44:52 | DEBUG | ExecuteCommand Response: response: SUCCESS
+    ```
+    `fast_status.py` polled live at 10:41:44 WIB during the pause (A-EDGE-LIVE-05):
+    ```json
+    {"status":"BUSY","run_state":{"percent":0.0,"state":"paused","pause":{"percent":0.0,"since":"2026-10-15T03:39:13.318197+00:00","errorName":"WrongPlateType","errorCode":-645.0,"eventPayload":{"wrongDetection":[{"detectedPlateID":-1.0,"position":3.0,"expectedPlateID":1.0}],"trayType":1.0}}}}
+    ```
+    Rendered detail then: "deck3: expected plate 1, found -1" — the sentinel `-1` stringified
+    literally instead of mapping to "none"; root cause and fix are in `03-DEPLOY.md`'s "D-14
+    redeploy (LIVE-05 fix)" subsection.
 - Final step result: the Transfer's own response line, `ExecuteCommand Response: response: SUCCESS`
-  at 10:44:52 WIB (03:44:52.654Z), for the same Transfer opened at 10:39:04 WIB (one `Running
-  command Transfer` in the scenario window, no retry, no second step). `commandQueue.getAll`
-  independently confirms `queueId 107`, `runId 154132ef8081e7000`, `status COMPLETED`,
-  `startedAt 03:39:04.840Z`, `completedAt 03:44:52.654Z` — the identical instant as the log's
-  SUCCESS line.
-- Queue state: `galago-web` `commandQueue.getAll` (read-only tRPC query, re-verified directly via
-  `curl http://localhost:3010/api/trpc/commandQueue.getAll`) shows: pre-scenario run
-  `1541326eee81e7000` `queueId 106` COMPLETED `startedAt 03:38:03.865Z` -> `completedAt
-  03:38:52.527Z`; scenario run `154132ef8081e7000` `queueId 107` COMPLETED `startedAt
-  03:39:04.840Z` -> `completedAt 03:44:52.654Z`. `/api/runs` independently confirms both runs'
-  `protocolName: "LIVE-05"` and `createdAt` timestamps match the Transfer parameters quoted
-  above.
-- Control commands in window: scenario window 10:37:04-10:46:52 WIB (2 min before the scenario
-  Transfer's start to 2 min after its end; the pre-scenario run is excluded per its own row
-  above). Counts in the scenario window: Transfer=1, Pause=0, Resume=1, Abort=0 — matches the
-  operator's reported actions exactly (no Pause command — the instrument paused on its own; one
-  Resume, operator-sent), all operator-sent: yes. `journalctl --user -u galago-tools --since
-  "2026-10-15 10:36:00" --until "2026-10-15 10:47:00"` shows no entries (no tool restart);
-  `systemctl --user show galago-tools -p MainPID` -> `4044033`, unchanged throughout; `ss -ltnp`
-  confirms the F.A.S.T. listener on port 40001 is still PID `727894` (the same PID from before
-  the window), so no tool-server restart occurred either (this phase's earlier MainPID-only
-  check was shown to miss a tool-server-level restart in plan 03-04's correction; this plan
-  checked both the service MainPID and the listener PID directly).
-- Screenshots: none provided.
+  at 11:07:13 WIB, for the same Transfer opened at 11:06:05 WIB (one `Running command Transfer` in
+  the rerun window, no retry, no second step).
+  - **First attempt (FAIL, D-14)**: `ExecuteCommand Response: response: SUCCESS` at 10:44:52 WIB for
+    the Transfer opened 10:39:04 WIB; `commandQueue.getAll` independently confirmed `queueId 107`,
+    `runId 154132ef8081e7000`, COMPLETED at the identical instant (kept for history; that queue entry
+    no longer exists — see Queue state below).
+- Queue state: `galago-web` `commandQueue.getAll` (read-only tRPC query) is now empty for both the
+  rerun and the first attempt — the queue was cleared since the first attempt's record was made — so
+  it cannot be used as evidence for the rerun; stated plainly rather than claiming queue evidence
+  that is no longer available. The rerun's SUCCESS is instead evidenced by the F.A.S.T.log's
+  `ExecuteCommand Response: response: SUCCESS` line and `fast_status.py` reporting `READY`/idle
+  immediately after.
+  - **First attempt (FAIL, D-14)**: `commandQueue.getAll` then showed pre-scenario run
+    `1541326eee81e7000` `queueId 106` COMPLETED and scenario run `154132ef8081e7000` `queueId 107`
+    COMPLETED, matching the log exactly (kept for history).
+- Control commands in window: rerun window 11:04:05-11:09:13 WIB (2 min before the rerun Transfer's
+  start to 2 min after its end). Counts in the window: Transfer=1, Pause=0, Resume=1, Abort=0 —
+  matches the operator's reported actions exactly (no Pause command — the instrument paused on its
+  own; one Resume, operator-sent), all operator-sent: yes. `journalctl --user -u galago-tools` shows
+  no entries in the window (no tool restart, consistent with the D-14 redeploy note that
+  `galago-tools` was not restarted); `systemctl --user show galago-tools -p MainPID` -> `4044033`,
+  unchanged; the F.A.S.T. listener on port 40001 is still PID `727894` — no tool-server restart
+  either.
+  - **First attempt (FAIL, D-14)**: window 10:37:04-10:46:52 WIB, Transfer=1, Pause=0, Resume=1,
+    Abort=0, same MainPID `4044033` and listener PID `727894` throughout (kept for history).
+- Screenshots: none provided (neither attempt).
 - D-11 criteria:
   - The instrument pauses itself with WrongPlateType (-645), no "Running command Pause" in the
-    window: `fast_status.py` recorded `status BUSY`, `run_state.state paused`, `pause.errorCode
-    -645.0`, `pause.errorName "WrongPlateType"`; the F.A.S.T.log shows `fast run progress 0%
-    (paused)` at 10:39:13 WIB immediately after the Transfer started, with no `Running command
-    Pause` line anywhere in the window. Observed: met.
-  - The pause's eventPayload names deck position 3, expected plate 1, detected none: the
-    eventPayload is `{"wrongDetection":[{"detectedPlateID":-1.0,"position":3.0,
-    "expectedPlateID":1.0}],"trayType":1.0}` — position 3 and expectedPlateID 1 are correctly
-    named, but `detectedPlateID` is the sentinel `-1`, not `null`, so the payload itself does not
-    carry a "none"/null detection value for this instrument. Observed: not met as specified (the
-    payload shape differs from the assumed null-sentinel; A-EDGE-LIVE-05 flagged exactly this
-    possibility).
-  - The `tool_paused` prompt shows the reason (WrongPlateType (-645)) and "Deck 3: expected
-    plate 1, found none", with nothing preselected: the operator reported the reason correctly
-    ("WrongPlateType (-645)") and nothing preselected ("yes"), but the rendered detail line read
-    "deck3: expected plate 1, found -1", not "found none" — `pausePrompt.ts`'s
-    `describeWrongDetectionEntry` (line 203-207) maps only `null`/`undefined`/`""` to "none" and
-    otherwise stringifies the raw value, so the sentinel `-1` renders literally. Observed: **not
-    met** — this is the failing criterion.
-  - After the operator places plate 1 on deck 3 and resumes with Tip broken? no, the same step
-    ends SUCCESS: exactly one `Running command Transfer` in the scenario window (10:39:04 WIB),
-    one `Running command Resume` (10:44:03 WIB, HTTP PUT `.../protocol/resume?isTipBroken=false`
-    -> 200 OK), and the same Transfer's `ExecuteCommand Response: response: SUCCESS` at
-    10:44:52 WIB; `commandQueue.getAll` confirms `queueId 107` COMPLETED at the identical instant;
-    no retry, no second step. Observed: met.
-  - No control command the operator did not send: window counts Transfer=1, Pause=0, Resume=1,
-    Abort=0, exactly matching the operator's reported actions; `journalctl` shows no tool
-    restart in the window; `systemctl` MainPID stayed `4044033` and the F.A.S.T. listener PID
-    stayed `727894` throughout (no restart, so no other command source is possible). Observed:
-    met.
-- Result: FAIL
-  - Every other D-11 criterion holds: the instrument paused itself with WrongPlateType (-645)
-    and no Pause command; the reason text and "nothing preselected" state were correctly shown;
-    after the operator's deck fix and Resume (tip intact), the SAME step ended SUCCESS with one
-    Transfer, one Resume, no retry and no second step; the window's control commands exactly
-    match the operator's actions (Pause 0, Resume 1, Abort 0). This evidence also demonstrates
-    the 2026-10-12 incident's recovery behavior that this milestone exists to prove, and also
-    covers galago-core 02-UAT test 5 (deferred there to this phase; RESEARCH A2, `03-DEPLOY.md`
-    "Deferred galago-core 02-UAT items"). **The sole failing criterion** is the rendered pause
-    detail: the prompt showed "deck3: expected plate 1, found -1" instead of "Deck 3: expected
-    plate 1, found none", because the instrument's wrong-plate sentinel is `-1`, not `null`, and
-    galago-core's `pausePrompt.ts` `describeWrongDetectionEntry` (`controller/components/runs/
-    pausePrompt.ts:203-207`) only treats `null`/`undefined`/`""` as "none". Per D-13 ("PASS only
-    if every criterion holds") and D-14 ("MUST NOT continue after a failed observation"), this
-    scenario is scored FAIL and the phase stops here pending a fix. Root cause and fix route are
-    in the plan 03-05 checkpoint returned alongside this record. galago-tools and `fast-mcp` are
-    not implicated: the adapter passed the instrument's `eventPayload` through unchanged; the bug
-    is solely in galago-core's plain-language rendering of the `-1` sentinel.
-
+    window: Observed: met. The F.A.S.T.log shows `fast run progress 0% (paused)` at 11:06:13 WIB
+    immediately after the Transfer started, with no `Running command Pause` line anywhere in the
+    window; the operator directly reported "reason was -645". No live `fast_status.py` poll was
+    taken during this pause (unlike the first attempt) — stated plainly; the -645/WrongPlateType
+    attribution rests on the operator's report plus the physical inference (self-pause at 0%
+    pre-aspirate, deck 3 reported empty) and is consistent with the first attempt's
+    directly-captured payload on the identical parameters.
+  - The pause's eventPayload names deck position 3, expected plate 1, detected none: not
+    independently re-captured this run (no live snapshot taken). The first attempt's
+    directly-captured payload on the identical protocol/parameters was
+    `{"wrongDetection":[{"detectedPlateID":-1.0,"position":3.0,"expectedPlateID":1.0}],
+    "trayType":1.0}` — position 3 and expectedPlateID 1 named correctly, `detectedPlateID` the
+    sentinel `-1`. The fix (`isNoPlateDetected`) now maps that same `-1` sentinel to "none" at
+    render time, confirmed present in the deployed bundle. Observed this run: the rendered text is
+    "none" (operator-confirmed), consistent with the fixed mapping applied to the same underlying
+    sentinel; not re-verified from a fresh raw payload.
+  - The `tool_paused` prompt shows the reason (WrongPlateType (-645)) and "Deck 3: expected plate 1,
+    found none", with nothing preselected: Observed: **met**. The operator reported the reason
+    correctly ("reason was -645") and, asked directly "Did the prompt read 'Deck 3: expected plate
+    1, found none'?", replied "yes it says none now"; nothing preselected ("yes they were
+    unselected"). This reverses the first attempt's sole failing criterion ("found -1"), with the
+    fix verified present in the deployed `galago-web` bundle (`-1===r||"-1"===r?"none"` in
+    `/app/.next/static/chunks/pages/runs-8bc5bbafd0ab0b33.js`).
+  - After the operator places plate 1 on deck 3 and resumes with Tip broken? no, the same step ends
+    SUCCESS: Observed: met. Exactly one `Running command Transfer` in the rerun window (11:06:05
+    WIB), one `Running command Resume` (11:06:27 WIB, HTTP PUT
+    `.../protocol/resume?isTipBroken=false` -> 200 OK), and the same Transfer's `ExecuteCommand
+    Response: response: SUCCESS` at 11:07:13 WIB; no retry, no second step.
+  - No control command the operator did not send: Observed: met. Window counts Transfer=1, Pause=0,
+    Resume=1, Abort=0, exactly matching the operator's reported actions; `journalctl` shows no tool
+    restart in the window; `systemctl` MainPID stayed `4044033` and the F.A.S.T. listener PID stayed
+    `727894` throughout.
+- Result: PASS
+  - Rerun after the D-14 fix: galago-core `ad87ea5` (quick task 261015-f48), `galago-web` image
+    `b0e183e` (built 2026-10-15 11:02:27 WIB, container created 2026-10-15T04:02:31Z), `galago-tools`
+    unrestarted (MainPID `4044033`, F.A.S.T. listener PID `727894`). Every D-11 criterion now holds:
+    the reason -645 is shown (operator-reported); the detail line reads "Deck 3: expected plate 1,
+    found none" (operator-observed on the fixed build; the fix is verified present in the deployed
+    bundle); nothing is preselected; after Resume with tip intact "no", the SAME step ended SUCCESS,
+    with no retry and no second step; no control command the operator did not send. Two caveats
+    carried forward honestly rather than assumed away: no `fast_status.py` snapshot was taken while
+    this run was paused (A-EDGE-LIVE-05 — the -645 reason and payload shape rest on the operator's
+    report plus consistency with the first attempt's directly-captured payload on identical
+    parameters, not a fresh snapshot), and the operator did not explicitly state deck 3 was empty at
+    the rerun's start beyond the instrument pausing itself on -645. This evidence also demonstrates
+    the 2026-10-12 incident's recovery behavior that this milestone exists to prove, and also covers
+    galago-core 02-UAT test 5 (deferred there to this phase; RESEARCH A2, `03-DEPLOY.md` "Deferred
+    galago-core 02-UAT items").
+  - **First attempt (FAIL, D-14)**: scenario run `154132ef8081e7000`, scored FAIL on 2026-10-15
+    (commit `eb8ca7f`) because the rendered pause detail read "deck3: expected plate 1, found -1"
+    instead of "Deck 3: expected plate 1, found none" — galago-core's `pausePrompt.ts`
+    `describeWrongDetectionEntry` (`controller/components/runs/pausePrompt.ts:203-207`, as it stood
+    before the fix) mapped only `null`/`undefined`/`""` to "none" and otherwise stringified the raw
+    value, so the instrument's `-1` sentinel rendered literally. Every other D-11 criterion held on
+    that attempt too (self-pause, no Pause command, correct reason text, nothing preselected,
+    SUCCESS after the deck fix and Resume with one Transfer/one Resume/no retry, and control
+    commands matching the operator's actions exactly). galago-tools and `fast-mcp` were not
+    implicated: the adapter passed the instrument's `eventPayload` through unchanged; the bug was
+    solely in galago-core's plain-language rendering of the `-1` sentinel. The fix (quick task
+    261015-f48, galago-core commits `07fb7fa`/`e6b0e97`/`ad87ea5`) and the `galago-web` redeploy that
+    followed are recorded in `03-DEPLOY.md`'s "D-14 redeploy (LIVE-05 fix)" subsection.
 ## LIVE-06b: Pause -> Abort -> aborted by operator, queue FAILED
 
 (Not run — plan 03-06 fills this section.)

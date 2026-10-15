@@ -445,6 +445,38 @@ also later than the step 2 check and does not break the order).
 - A tool-server restart **overwrites `F.A.S.T.log` in place**. Read the production log evidence
   for a scenario before anything restarts.
 
+### D-14 redeploy (LIVE-05 fix)
+
+- LIVE-05's first attempt (plan 03-05) scored FAIL (`03-ACCEPTANCE.md`, commit `eb8ca7f`): the
+  instrument's wrong-plate sentinel `-1` rendered literally as "found -1" instead of "found none"
+  in the `tool_paused` prompt, because galago-core's `pausePrompt.ts` `describeWrongDetectionEntry`
+  mapped only `null`/`undefined`/`""` to "none". Per D-14, the scenario stopped there pending a fix.
+- galago-core fixed it on 2026-10-15 as quick task `261015-f48`, commits `07fb7fa`, `e6b0e97` and
+  `ad87ea5` (HEAD `ad87ea5`, 11:00:07 WIB): `controller/components/runs/pausePrompt.ts` gained a new
+  `isNoPlateDetected` function that maps `null`, `undefined`, `""`, `-1` and `"-1"` to "none"; unit
+  tests were added. The `vendor/galago-tools` gitlink is still `cb7886d`, so the protos are
+  unchanged — this is a galago-core-only fix.
+- `galago-web` was rebuilt again outside this runbook at 2026-10-15 11:02:27 WIB. New image:
+  `sha256:b0e183e5513d11f80494e83d214f14c42dcbe8931d4616aee995f5ec8271f317`; the container was
+  created at `2026-10-15T04:02:31Z`. It replaces the `10e7493591f...` image recorded in the
+  "Post-deploy galago-web rebuild" note above.
+- Bundle check (read-only, before the rerun): `docker exec galago-web grep -o
+  '.\{0,40\}-1===r.\{0,40\}' /app/.next/static/chunks/pages/runs-8bc5bbafd0ab0b33.js` showed the
+  deployed bundle contains `-1===r||"-1"===r?"none"`, confirming the fix is present in what the
+  operator's browser actually runs.
+- `galago-tools` was **not** restarted for this redeploy: MainPID stayed `4044033`, the F.A.S.T.
+  listener PID stayed `727894`, `F.A.S.T.log` line 2 still read `2026-10-15 10:16:36 ... fast server
+  started`, and `journalctl --user -u galago-tools` showed no entries since 10:45. The safe order
+  still holds: core and tools are unchanged, only the web layer was rebuilt.
+- The operator reconnected F.A.S.T. at 11:05:44 WIB before rerunning the scenario; the "Received
+  configuration" log line shows host `10.150.1.170`, port `5003`, `expected_tray_id` 90, no
+  simulated flag.
+- The operator reran LIVE-05 after this redeploy; plan 03-05's `03-ACCEPTANCE.md` record now scores
+  it PASS, with the first attempt kept there as history.
+- Rollback (D-06): `rollback-pre-live04` (`9ad9c64`, from `d95c2e1`) is still the recorded anchor.
+  Rolling back to it would undo all of Phase 2's code-review/UI-review fixes (WR-01..WR-07, the
+  control-bar fixes) **and** this D-14 none-plate fix.
+
 ## Logs to watch (D-08)
 
 - Manager/journal lines (does NOT carry tool command lines — verified 2026-10-14):
