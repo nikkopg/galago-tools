@@ -12,21 +12,22 @@ last_activity_desc: Phase 03 complete
 state_head: 6314d5ade94f22500af1e0f6c3cfdff23450bac0
 progress:
   total_phases: 3
-  completed_phases: 1
+  completed_phases: 3
   total_plans: 17
   completed_plans: 17
-  percent: 33
+  percent: 100
 ---
 
 # Project State
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-10-12)
+See: .planning/PROJECT.md (updated 2026-10-15)
 
 **Core value:** An operator running a F.A.S.T. step from Galago can always see what the instrument
 is doing and recover it themselves; no adapter code path pauses, resumes or aborts on its own.
-**Current focus:** Phase 02 — Wait Through Pauses on the Pinned Core
+**Current focus:** Milestone v1 complete — all 3 phases done; next is milestone close
+(`/gsd-complete-milestone`)
 
 ## Current Position
 
@@ -36,7 +37,7 @@ Total Plans in Phase: 8
 Status: All phases complete
 Last activity: 2026-10-15 — Phase 03 complete
 
-Progress: [███░░░░░░░] 33%
+Progress: [████████████████████] 17/17 plans (100%)
 
 ## Performance Metrics
 
@@ -132,6 +133,9 @@ Recent decisions affecting current work:
 - [Phase 03]: Compared code-unchanged-since-deploy against the LAST deployed SHA (201d987, the D-14 LIVE-06b adapter fix), not the original LIVE-04 deploy SHA (d9acdcf0)
 - [Phase 03]: FINDING (a) and FINDING (b) (galago-core queue defects flagged by plans 03-06/03-07) marked RESOLVED after live-verifying galago-core 261015-o44 (662bb12, 38b5d17, 7627bf6) read-only against the F.A.S.T.log and a copy of queue.db
 - [Phase 03]: Named two Safety invariant audit gaps precisely (2026-10-14 ~17:47->10:16:36 WIB; 2026-10-15 ~11:47->12:02:49 WIB) rather than overstate log coverage; all 20 surviving control-command lines mapped to a recorded operator action, 0 unmapped
+- [Phase 03 - Transition]: Milestone v1 complete — all 17 requirements (ADP-01..10, LIVE-01..07) moved to PROJECT.md's Validated section; "Active" requirements now empty.
+- [Phase 03 - Transition]: Logged the deploy-order, D-14 FAIL->fix->rerun defect cycle, and the `galago-tools` manager (`:8081`)-restart-overwrites-F.A.S.T.log caveat as new rows in PROJECT.md's Key Decisions table for future milestones/repos to reference.
+- [Phase 03 - Transition]: Open code-review disposition (WR-01, WR-02, 3 info items) and galago-core's queue/UI observations (Gantt bar past abort, "Connect all tools" empty configs, "Item N not found", tool-page staleness) carried forward as open debt in PROJECT.md's Context — not milestone-blocking.
 
 ### Pending Todos
 
@@ -139,12 +143,17 @@ None yet.
 
 ### Blockers/Concerns
 
-- [Phase 1]: The `FastServer.ExecuteCommand` override is a research recommendation, not yet built
-  (MEDIUM confidence) — write the failing real-mode concurrency test first.
 - [Phase 2]: fast-mcp `fix/run-recovery-gate` (holding `76f8c3f` and `b30b38d`) is not on GitLab;
   a clean install from the pin fails until it is pushed. Install from the local clone meanwhile.
-- [Phase 3]: Depends on galago-core's companion milestone; the proto change from Phase 1 must
-  reach galago-core through its `vendor/galago-tools` submodule, regenerated with ts-proto 1.151.1.
+- [Phase 3]: Code review disposition left `open`: WR-01 (dry-run harness phantom-paused race,
+  dev-only, harness already torn down) and WR-02 (`_is_no_error`'s `==` vs. the module's
+  `type(code) is int` convention) plus 3 info items — not milestone-blocking, tracked in
+  `.planning/phases/03-deploy-supervised-live-acceptance/03-REVIEW-DISPOSITION.md`.
+- [Phase 3]: galago-core debt out of this repo's scope: run-page Gantt bar draws past an abort;
+  "Connect all tools" sends empty configs; "Item N not found" when the queue clears mid-abort;
+  F.A.S.T. tool-page status can render stale after a reconnect.
+- [Phase 3]: Branches on both repos are not pushed (deferred D-02) — pushing is the user's own
+  action; push only to the `nikkopg` fork remote.
 
 ## Deferred Items
 
@@ -156,6 +165,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-15T12:00:21.150Z
-Stopped at: Phase 03 complete — all phases complete
+Last session: 2026-10-15
+Stopped at: Phase 03 complete, milestone v1 complete (3/3 phases, 17/17 plans) — ready for
+`/gsd-complete-milestone`
 Resume file: None

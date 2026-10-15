@@ -54,9 +54,24 @@ commands. This repo's final phase (live acceptance) needs both milestones done.
 - ✓ Deployed on forb01: core in `.venv`, `galago-tools` systemd user service (manager on `:8081`,
   Tool Box on `:11010`, F.A.S.T. driver on `:40001` against `10.150.1.170:5003`)
 
+- ✓ ADP-01..ADP-10: adapter control path (soft-only Pause, lock-free/gate-bypassing `ExecuteCommand`
+  override, two-path Resume, `StatusReply.run_state`, fail-closed decisions, extended no-auto-abort
+  invariant, real-mode concurrency test, simulated-mode control commands and pause hook) — Phase 1
+- ✓ LIVE-01..LIVE-03: `Transfer`/`RunProtocol` wait through pauses on the re-pinned fast-mcp core
+  (`b30b38d`), paused time excluded from the timeout — Phase 2
+- ✓ LIVE-04: Deployed in the safe order (core → service `.venv` → `galago-tools` restart →
+  `galago-web` rebuild), no window with a new UI against an ungated core — Phase 3
+- ✓ LIVE-05: Supervised live deck-3-empty scenario — pause prompt names the deck/plate, operator
+  fixes the deck and resumes, the same step ends SUCCESS — Phase 3
+- ✓ LIVE-06: Supervised live Pause → Resume → SUCCESS, and Pause → Abort → "aborted by operator at
+  `<p>`%" with the queue FAILED — Phase 3
+- ✓ LIVE-07: Supervised live `galago-web` restart mid-run, operator recovers through the tool page —
+  Phase 3
+
 ### Active
 
-See `.planning/REQUIREMENTS.md` (ADP-*, LIVE-*).
+None — all v1 requirements (ADP-01..10, LIVE-01..07) are validated and proven live on the
+instrument. Full traceability: `.planning/REQUIREMENTS.md`.
 
 ### Out of Scope
 
@@ -90,6 +105,22 @@ See `.planning/REQUIREMENTS.md` (ADP-*, LIVE-*).
 - **Research:** `.planning/research/` (copied from the fast-mcp planning, 2026-10-12; cross-repo).
 - **Planning history:** this milestone was first drafted in fast-mcp's `.planning/` and moved here
   on 2026-10-12 so each repo plans its own changes.
+- **Deploy order (Phase 3):** core into the service `.venv` → restart `galago-tools` → rebuild
+  `galago-web`; never rebuild `galago-web` before the core/adapter restart (an older core has no
+  state gate on abort/resume and the adapter adds none).
+- **galago-tools manager caveat:** the manager page on `:8081` can restart an individual tool server
+  (e.g. F.A.S.T. on `:40001`) without restarting the `galago-tools` service itself. That overwrites
+  `F.A.S.T.log` in place, so any no-restart / log-coverage check must track the tool-server listener
+  PID, not just the `galago-tools` service MainPID.
+- **Open debt carried forward (not milestone-blocking):**
+  - Code review disposition open: WR-01 (dry-run harness phantom-paused race, dev-only), WR-02
+    (`_is_no_error`'s `==` vs. the module's `type(code) is int` convention) plus 3 info items —
+    `.planning/phases/03-deploy-supervised-live-acceptance/03-REVIEW-DISPOSITION.md`.
+  - galago-core observations (out of this repo's scope, not fixed here): run-page Gantt bar keeps
+    drawing past an abort; "Connect all tools" sends empty configs to tools; "Item N not found" when
+    the queue is cleared mid-abort; F.A.S.T. tool-page status can render stale after a reconnect.
+  - Branches are not pushed (deferred D-02): pushing is the user's own action. Per local setup notes,
+    push only to the `nikkopg` fork remote.
 
 ## Constraints
 
@@ -106,11 +137,14 @@ See `.planning/REQUIREMENTS.md` (ADP-*, LIVE-*).
 
 | Decision | Rationale | Outcome |
 |----------|-----------|---------|
-| Plan the Galago side per repo (this repo: adapter + rollout; galago-core: queue + UI) | Clearer separation; each repo plans the code it changes | — Pending |
-| D1 run state via additive `StatusReply.run_state` Struct | Reuses the existing GetStatus heartbeat; other tools unaffected | — Pending |
-| D5 soft pause only | `hardPause` undocumented | — Pending |
-| Override `ExecuteCommand` in `FastServer` instead of editing `base_server.py` | `base_server.py` is shared by every tool type | — Pending |
-| Live acceptance owned here | This repo is the integration owner for the F.A.S.T. | — Pending |
+| Plan the Galago side per repo (this repo: adapter + rollout; galago-core: queue + UI) | Clearer separation; each repo plans the code it changes | Shipped — adapter + rollout here (Phases 1-3), galago-core's queue + run page in its own `.planning/` |
+| D1 run state via additive `StatusReply.run_state` Struct | Reuses the existing GetStatus heartbeat; other tools unaffected | Shipped — ADP-05, Phase 1 |
+| D5 soft pause only | `hardPause` undocumented | Shipped — ADP-01, Phase 1; hard pause remains a Future Requirement |
+| Override `ExecuteCommand` in `FastServer` instead of editing `base_server.py` | `base_server.py` is shared by every tool type | Shipped — ADP-02, Phase 1; `tools/base_server.py` confirmed unchanged through Phase 3 close-out |
+| Live acceptance owned here | This repo is the integration owner for the F.A.S.T. | Shipped — Phase 3: LIVE-04..07 all PASS on the instrument, D-13 evidence in `03-ACCEPTANCE.md` |
+| Deploy order: core → `galago-tools` → `galago-web` | An older core has no state gate on abort/resume and the adapter adds none; rebuilding the UI first risks a window where the new UI runs against an ungated core | Shipped — LIVE-04, Phase 3; four strictly increasing UTC timestamps recorded in `03-DEPLOY.md` |
+| D-14 FAIL→fix→rerun cycles handled by stop/fix/gate/redeploy/rerun, never silent pass | Live defects found on real hardware must be fixed and re-verified, not worked around in the evidence record | Found and fixed three real defects live: galago-core's `pausePrompt` rendered the no-plate sentinel as literal `"-1"`; this repo's adapter appended a spurious `": NoError (0)"` suffix to the operator-abort wording (fixed `201d987`); galago-core's queue re-ran operator-aborted or `galago-web`-restart-orphaned steps (fixed by galago-core quick tasks `261015-h0q` and `261015-o44`, each live-verified) |
+| galago-tools manager (`:8081`) can restart a tool server without a service restart | Operators may use the manager page directly, outside the deploy runbook | Overwrites `F.A.S.T.log` in place; any no-restart or log-coverage check must track the tool-server listener PID, not the `galago-tools` service MainPID (confirmed during Phase 3's Safety invariant audit) |
 
 ## Evolution
 
@@ -130,4 +164,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-10-12 after project initialization (moved from fast-mcp planning)*
+*Last updated: 2026-10-15 after Phase 3 (milestone v1 complete — all 17 requirements validated)*
