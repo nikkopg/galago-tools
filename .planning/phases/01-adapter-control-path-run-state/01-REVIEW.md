@@ -1,136 +1,128 @@
 ---
 phase: 01-adapter-control-path-run-state
-reviewed: 2026-10-12T22:44:20Z
+reviewed: 2026-10-15T00:00:00Z
 depth: standard
-files_reviewed: 4
+files_reviewed: 6
 files_reviewed_list:
-  - interfaces/tools/grpc_interfaces/fast.proto
-  - interfaces/tools/grpc_interfaces/tool_base.proto
+  - .gitignore
+  - scripts/fast_dryrun.py
+  - scripts/fast_status.py
+  - tools/fast/requirements.txt
   - tools/fast/server.py
   - tools/tests/fast_test.py
 findings:
-  critical: 1
-  warning: 1
+  critical: 0
+  warning: 3
   info: 3
-  total: 5
+  total: 6
 status: issues_found
 ---
 
-# Phase 01: Code Review Report
+# Phase 01: Code Review Report (incremental re-review)
 
-**Reviewed:** 2026-10-12T22:44:20Z
+**Reviewed:** 2026-10-15
 **Depth:** standard
-**Files Reviewed:** 4
+**Files Reviewed:** 6
 **Status:** issues_found
 
 ## Summary
 
-Reviewed the diff against `8febd4b` for the fast.proto/tool_base.proto schema additions (`Pause`, `StatusReply.run_state`) and the corresponding `tools/fast/server.py` adapter logic (control-command bypass of `base_server`'s readiness gate, the `_run_state_lock`/`_active_runs`/`_run_record` bookkeeping, the simulated `simulate_pause` dev hook, and Resume's two-path non-blocking-lock logic), plus the accompanying `tools/tests/fast_test.py`.
-
-The safety invariants called out in the design doc hold up well under tracing: no code path in `server.py` calls `pause`/`resume`/`abort` on its own initiative (only `Pause()`/`Resume()`/`Abort()` do, and those are only reachable from the operator's own control commands); the adapter never compares against an instrument-state string on the control path (mechanically enforced by the file's own `TestAdapterInvariant` AST checker); physical yes/no decisions are never defaulted (`_decision` returns `None` on anything but exact "yes"/"no", and `None` is always rejected, never coerced to `False`); and `_build_run_state()`/`_get_status`/`GetStatus` never call anything beyond `.status()` on the service, so run-state observation cannot command the instrument.
-
-One genuine concurrency/correctness bug was found in the new `_run_in_flight()` bookkeeping (it unconditionally resets the run record on *every* entry, not just the first, so an overlapping second run silently wipes out a recorded pause for a run that is still in flight) and one data-integrity inconsistency was found in `_log_progress` (it writes `percent` into `run_state` without running it through the same `_run_percent()` sanitizer that every other ingestion path in this file uses). Both are documented below, with lower-severity notes for the rest.
-
-## Critical Issues
-
-### CR-01: `_run_in_flight()` resets the run record on every entry, not just the first, silently clobbering an in-flight pause
-
-**File:** `tools/fast/server.py:514-530`
-
-**Issue:** `_run_in_flight()` is explicitly documented and tested as counter-based ("a counted run, not a boolean", D-19) so that two overlapping `LONG_RUNNING_COMMANDS` runs can be tracked simultaneously (`test_two_overlapping_simulated_transfers_read_running_until_both_end`). But its entry path unconditionally reassigns `self._run_record` on *every* call, regardless of the current `_active_runs` value:
-
-```python
-with self._run_state_lock:
-    self._active_runs += 1
-    self._run_record = {"state": "running", "percent": None, "pause": None}
-```
-
-Contrast this with the exit path, which correctly only touches shared state when the counter *transitions* to zero (`if self._active_runs == 0: self._run_record["pause"] = None`). The entry path has no equivalent `if self._active_runs == 0:` guard.
-
-Concretely: if run A is in flight (`_active_runs == 1`) and has a pause recorded via `_record_pause`/`simulate_pause` (`_run_record["pause"]` is set, `_run_record["state"] == "paused"`), and a second overlapping run B then enters `_run_in_flight()` (`_active_runs` 1→2), B's entry **wipes the dict back to `{"state": "running", "percent": None, "pause": None}`**, erasing A's recorded pause even though A is still in flight and nothing resumed or aborted it. `_build_run_state()` will now report `"running"` instead of `"paused"` for A until A's pause is (if ever) re-recorded — with no Resume/Abort command having been issued. This directly undermines the stated guarantee in `_build_run_state()`'s own docstring: "a recorded pause always reads paused with its detail regardless of whether a run is in flight."
-
-In real mode this can't happen today because `Transfer`/`RunProtocol` both take `_motion_lock` before entering `_run_in_flight()`, so only one can be in flight at a time. But in simulated mode — the exact scenario this phase's `simulate_pause` hook (ADP-10, D-20) exists to exercise for galago-core's pause-prompt UI testing — `_motion_lock` is never touched (base_server's simulated dispatch sleeps without calling `Transfer()`/`RunProtocol()` at all), so two overlapping simulated Transfers genuinely can both be in flight concurrently, and this is a live, reachable bug in exactly the feature this phase ships. It is not covered by `test_two_overlapping_simulated_transfers_read_running_until_both_end` because that test never records a pause during the overlap.
-
-**Fix:** Only (re)initialize the record on the 0→1 transition, mirroring the exit path's 1→0 guard:
-
-```python
-@contextmanager
-def _run_in_flight(self) -> Iterator[None]:
-    with self._run_state_lock:
-        if self._active_runs == 0:
-            self._run_record = {"state": "running", "percent": None, "pause": None}
-        self._active_runs += 1
-    try:
-        yield
-    finally:
-        with self._run_state_lock:
-            self._active_runs -= 1
-            if self._active_runs == 0:
-                self._run_record["pause"] = None
-```
+This is an incremental re-review of Phase 1's control-path/run-state files, covering changes made during Phases 2-3 (diff base `d2cead47`). `tools/fast/server.py` grew operator-abort bookkeeping (`_accepted`, `operator_abort` wording) and wait-through-pauses wiring; `scripts/fast_dryrun.py` is an entirely new simulated-only dry-run harness; `tools/tests/fast_test.py` grew substantially, including an AST-based adapter-invariant checker. The code is heavily and thoughtfully tested (the WR-01 `_accepted()` fail-closed rule for `errorCode` type-strictness is regression-tested against bools and strings for Abort/Pause). However, that same fail-closed rule was not applied uniformly: `Resume()`'s crash-recovery acceptance gate still uses a looser, pre-WR-01-style check that the rest of the module deliberately moved away from, and no test exercises it with a non-int `errorCode`. The new dry-run harness also has two concurrency/robustness gaps that are untested. No critical/security-impacting defects were found; the issues below are correctness and robustness gaps.
 
 ## Warnings
 
-### WR-01: `_log_progress` writes `percent` into `run_state` without the `_run_percent()` sanitization every other path uses
+### WR-01: `Resume()`'s crash-recovery gate bypasses the module's own `_accepted()` fail-closed rule
 
-**File:** `tools/fast/server.py:532-538`
+**File:** `tools/fast/server.py:939`
+**Issue:** `_accepted()` (server.py:391-403) is documented as "the single definition of 'the instrument accepted the command'... used by both `_recovery_reply`'s SUCCESS mapping and `Abort()`'s operator-abort bookkeeping so the stricter definition can never diverge between the two safety-sensitive call sites." It exists specifically to guard against `False == 0` and `"0" != 0` in Python (regression-tested in `fast_test.py` at `test_abort_bool_false_error_code_is_not_success`, `test_abort_bool_true_error_code_is_not_success`, `test_abort_str_zero_error_code_is_not_success`, and the parametrized `test_only_an_accepted_abort_sets_the_flag`).
 
-**Issue:** `_run_percent()` is documented as the canonical guard for anything that ends up in `run_state["percent"]` (D-11/ADP-05): "a bool, a string, NaN/infinity, or a missing value becomes None." It is applied on the `service.status()` mapping path (`_build_run_state`, line 634) and on the `_record_pause` path (line 551). It is **not** applied in `_log_progress`:
+  `Resume()`'s crash-recovery branch (lock acquired, no run in flight) does **not** call `_accepted()`:
+  ```python
+  accepted = service.resume(is_tip_broken=is_tip_broken)
+  if isinstance(accepted, Refused) or accepted.get("errorCode") != 0:
+      return _recovery_reply("resume", accepted)
+  result = service.wait(...)
+  ```
+  If `service.resume(...)` ever returns `{"errorCode": False}` (or any other value that is `== 0` but not `type(code) is int`), `accepted.get("errorCode") != 0` evaluates `False`, so the code treats the resume as accepted and proceeds to call `service.wait(...)` — holding `_motion_lock` for the whole wait — instead of immediately reporting the rejection via `_recovery_reply`, which *would* correctly classify the same value as not-accepted. This is exactly the asymmetry WR-01 was introduced to eliminate at the other two call sites (`Abort()` and `_recovery_reply`'s own SUCCESS mapping), but it was missed here. No test in `fast_test.py` exercises this branch with a non-int `errorCode` (confirmed by grep: `test_resume_in_flight_failures_never_wait_or_release_the_owners_lock` only covers `Refused` and `{"errorCode": -2}`).
+**Fix:**
+  ```python
+  accepted = service.resume(is_tip_broken=is_tip_broken)
+  if isinstance(accepted, Refused) or not _accepted(accepted):
+      return _recovery_reply("resume", accepted)
+  result = service.wait(...)
+  ```
+  Add a regression test mirroring `test_abort_bool_false_error_code_is_not_success` for the crash-recovery Resume path (lock acquired, `service.resume.return_value = {"errorCode": False}`), asserting `service.wait` is never called.
 
-```python
-def _log_progress(self, percent: int, state: str) -> None:
-    logging.info("fast run progress %s%% (%s)", percent, state)
-    with self._run_state_lock:
-        self._run_record["percent"] = percent
-        self._run_record["state"] = state
-        if state == "running":
-            self._run_record["pause"] = None
-```
+### WR-02: `DryRunFastServer`'s auto-pause timer state is shared across overlapping simulated Transfers
 
-`_log_progress` is wired as `RunOptions(on_progress=self._log_progress)` for `Transfer`, `RunProtocol`, and `Resume`'s crash-recovery wait — i.e. it is the one callback that receives progress directly from `fast_mcp`/the instrument during a real run, the same class of untyped, instrument-sourced data that `_run_percent` exists to sanitize elsewhere in this file. If a percent value that `_run_percent` would reject (e.g. `NaN`, a bool, a string) is ever delivered through this callback, it is stored into `_run_record["percent"]` verbatim and then read back unfiltered by `_build_run_state()`'s real-mode in-flight branch (`"percent": self._run_record["percent"]`, line 619) straight into the gRPC `run_state` reply — the one code path in the file where this specific sanitizer is bypassed.
+**File:** `scripts/fast_dryrun.py:99-155`
+**Issue:** `_arm_auto_pause`, `_fire_auto_pause`, and `ExecuteCommand`'s post-dispatch cleanup all mutate single instance attributes (`self._pause_timer`, `self._episodes_left`). The underlying `FastServer`/base_server already supports (and is tested to support, `fast_test.py::test_two_overlapping_simulated_transfers_read_running_until_both_end`) two overlapping simulated Transfers via the `_active_runs` counter. In the dry-run harness, if a second Transfer request arrives while a first is still sleeping:
+  - `_arm_auto_pause()` for the second call cancels the first call's timer and resets `_episodes_left` to `_auto_pause_count`, discarding whatever auto-pause progress the first (still in-flight) transfer had armed.
+  - When either Transfer's `ExecuteCommand` call returns, it unconditionally does:
+    ```python
+    with self._auto_pause_lock:
+        if self._pause_timer is not None:
+            self._pause_timer.cancel()
+            self._pause_timer = None
+        self._episodes_left = 0
+    ```
+    cancelling the *other* transfer's still-pending timer and zeroing its episode count, regardless of whether that other transfer is still in flight (`self._active_runs` is not consulted here).
 
-**Fix:** Route through the same sanitizer used everywhere else, following the same "only overwrite when valid" pattern already used in `_record_pause`:
+  Net effect: anyone driving two overlapping Transfers through this harness (e.g., a UI test that double-clicks Run, or a test script issuing a second Transfer before the first's sleep ends) can silently lose the auto-pause episodes for whichever transfer is still running once the other one finishes — with no error or log indicating why the expected pause never fired.
+**Fix:** Scope the auto-pause arm/cancel/reset to "no run remains in flight" rather than "this ExecuteCommand call returned", e.g. only cancel/reset in the `finally` when `self._active_runs == 0` (read under `_run_state_lock`), or key `_pause_timer`/`_episodes_left` by a per-call token so overlapping calls cannot clobber each other.
 
-```python
-def _log_progress(self, percent: int, state: str) -> None:
-    logging.info("fast run progress %s%% (%s)", percent, state)
-    with self._run_state_lock:
-        sanitized = _run_percent(percent)
-        if sanitized is not None:
-            self._run_record["percent"] = sanitized
-        self._run_record["state"] = state
-        if state == "running":
-            self._run_record["pause"] = None
-```
+### WR-03: `_read_control` dies silently on any exception other than `OSError`
+
+**File:** `scripts/fast_dryrun.py:191-202`
+**Issue:**
+  ```python
+  def _read_control(server: DryRunFastServer, path: str, stop: threading.Event) -> None:
+      while not stop.is_set():
+          try:
+              with open(path, "r") as fifo:
+                  for line in fifo:
+                      if not handle_command(server, line):
+                          stop.set()
+                          return
+          except OSError:
+              if stop.is_set():
+                  return
+              time.sleep(0.1)
+  ```
+  Only `OSError` is caught. `handle_command` can raise other exceptions (e.g. a malformed future command, or any bug in a handler) which propagate out of this daemon thread and kill it with no log message. The gRPC server keeps running, but the FIFO control path (`pause`, `clear`, `status`) becomes permanently unresponsive for the rest of the process's life, with nothing in the logs explaining why — a harness that is supposed to make pause/resume testing reliable instead fails silently and requires a restart with no diagnostic.
+**Fix:**
+  ```python
+  for line in fifo:
+      try:
+          if not handle_command(server, line):
+              stop.set()
+              return
+      except Exception:
+          logging.exception("DRYRUN control: error handling line %r", line)
+  ```
 
 ## Info
 
-### IN-01: `_run_record`'s initial state is seeded as `"running"` although no run is in flight
+### IN-01: Crash-recovery `Resume()` never attributes a concurrent, non-stale operator Abort
 
-**File:** `tools/fast/server.py:417-419`
+**File:** `tools/fast/server.py:921-927, 946`
+**Issue:** The crash-recovery wait's `_result_reply(result)` call passes no `operator_abort` flag, with the stated rationale that "a flag left by an earlier Abort could be stale." However, if an operator issues `Abort` *during* this same wait (Abort never takes `_motion_lock`, so it can reach the instrument while Resume's wait is in progress), the flag set by that Abort is not stale — it is for the exact run being waited on — yet the wording still falls back to the plain instrument phrasing ("run aborted at X%: ...") instead of "run aborted by operator at X%". This is a known, documented trade-off (the docstring calls it a "planner choice, D-09 scope"), not a regression, but it is a real behavior gap worth tracking if operator wording accuracy during crash-recovery resume becomes a priority.
+**Fix:** If desired, read `operator_abort` under `_run_state_lock` immediately before building the reply (mirroring Transfer/RunProtocol), since by that point the wait has already completed and any flag set during it is necessarily current rather than stale.
 
-**Issue:** `FastServer.__init__` seeds `self._run_record = {"state": "running", "percent": None, "pause": None}` before any run has started. Today this has no observable effect — `_build_run_state()` derives `"state"` from `_active_runs`/`pause` directly in simulated mode and only reads `_run_record["state"]` when `_active_runs > 0` in real mode, so the bogus initial value is never surfaced before the first `_run_in_flight()` call overwrites it. It is, however, a misleading placeholder that an incautious future change (e.g. a refactor that reads `_run_record["state"]` unconditionally) could turn into a real bug.
+### IN-02: Redundant `.gitignore` entry
 
-**Fix:** Seed it as idle for clarity: `{"state": "idle", "percent": None, "pause": None}`.
+**File:** `.gitignore:26-27`
+**Issue:** `Procfile.tools` (line 27) is already matched by the `Procfile.*` glob on the line above (line 26); the explicit second entry is dead weight.
+**Fix:** Remove line 27.
 
-### IN-02: `tool_base.proto` has no trailing newline
+### IN-03: `COMMAND_TO_SERVICE_METHOD` is production-module state with no production consumer
 
-**File:** `interfaces/tools/grpc_interfaces/tool_base.proto:136`
-
-**Issue:** The file (including the newly added `run_state` field block touched by this diff) ends with `}` and no trailing newline, which `protoc`/most linters flag and which some diff/patch tools handle poorly.
-
-**Fix:** Add a trailing newline at EOF.
-
-### IN-03: `_run_percent`'s return type annotation doesn't match the int branch's actual return value
-
-**File:** `tools/fast/server.py:156-167`
-
-**Issue:** `_run_percent` is annotated `-> Optional[float]`, but for the `isinstance(value, int)` branch it `return value`s the original `int` unmodified rather than `float(value)`. This is harmless at runtime (protobuf's `Struct` and the tests both accept the int as-is, and Python's numeric tower makes this acceptable to most type checkers), but the annotation implies a normalized `float` output when the function can, by design, hand back either an `int` or a `float`.
-
-**Fix:** Either widen the annotation to `Optional[t.Union[int, float]]` or explicitly document that ints are intentionally preserved verbatim (the latter matches the existing docstring's "the adapter never rounds, clamps or converts" intent better than silently converting to float).
+**File:** `tools/fast/server.py:90-101`
+**Issue:** This mapping is defined in the adapter module but is read only by `tools/tests/fast_test.py` (`TestOneToOneSurface`), never by `server.py` itself or any other runtime code path. This is a reasonable pattern for keeping a single source of truth that tests can verify against the real oneof surface, but it's worth a one-line comment at the definition site noting it exists for test introspection, so a future reader doesn't go looking for its runtime call site.
+**Fix:** Add a short comment, e.g. `# Read only by tools/tests/fast_test.py::TestOneToOneSurface; no production caller.`
 
 ---
 
-_Reviewed: 2026-10-12T22:44:20Z_
+_Reviewed: 2026-10-15_
 _Reviewer: Claude (gsd-code-reviewer)_
 _Depth: standard_
