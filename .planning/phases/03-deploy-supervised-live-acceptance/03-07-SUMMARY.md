@@ -151,3 +151,12 @@ None - no external service configuration required.
 ---
 *Phase: 03-deploy-supervised-live-acceptance*
 *Completed: 2026-10-15*
+
+## Self-Check: PASSED
+
+- FOUND: commit `2eec866` (attempt 1 FAIL record)
+- FOUND: commit `7250bf4` (LIVE-07 rerun PASS + LIVE-06b follow-up + D-14 redeploy record)
+- FOUND: commit `5bc4968` (this SUMMARY)
+- FOUND: `.planning/phases/03-deploy-supervised-live-acceptance/03-ACCEPTANCE.md`
+- FOUND: `.planning/phases/03-deploy-supervised-live-acceptance/03-DEPLOY.md`
+- FOUND: `.planning/phases/03-deploy-supervised-live-acceptance/03-07-SUMMARY.md`

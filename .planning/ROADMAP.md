@@ -114,7 +114,7 @@ present.
   3. Pause → Resume ends SUCCESS; Pause → Abort ends "aborted by operator" with the queue FAILED.
   4. After restarting `galago-web` mid-run, the operator recovers through the tool page.
 
-**Plans**: 6/8 plans executed (sequential waves 1-8; plans 03-01 to 03-07 have blocking-human checkpoints; the
+**Plans**: 7/8 plans executed (sequential waves 1-8; plans 03-01 to 03-07 have blocking-human checkpoints; the
 instrument and services are shared, so nothing runs in parallel)
 
 Plans:
@@ -137,7 +137,7 @@ Plans:
 - [x] 03-06-PLAN.md — live LIVE-06b: Pause -> Abort -> "run aborted by operator at <p>%", queue FAILED, no later step (LIVE-06)
 
 **Wave 7** *(blocked on Wave 6 completion)*
-- [ ] 03-07-PLAN.md — live LIVE-07: pause, restart `galago-web` on the operator's go-restart, recover from the tool page (LIVE-07)
+- [x] 03-07-PLAN.md — live LIVE-07: pause, restart `galago-web` on the operator's go-restart, recover from the tool page (LIVE-07)
 
 **Wave 8** *(blocked on Wave 7 completion)*
 - [ ] 03-08-PLAN.md — LIVE-07 record, safety-invariant audit of every control command since the deploy, post-acceptance gate, D-13 completeness (LIVE-04..07)

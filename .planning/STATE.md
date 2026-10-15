@@ -4,18 +4,18 @@ milestone: v1
 milestone_name: F.A.S.T. Live Run Control (adapter & rollout)
 current_phase: 3
 current_phase_name: Deploy & Supervised Live Acceptance
-current_plan: 7
+current_plan: 8
 status: executing
-stopped_at: Completed 03-06-PLAN.md (LIVE-06b PASS after D-14 fix)
-last_updated: "2026-10-15T04:55:46.807Z"
+stopped_at: Completed 03-07-PLAN.md (LIVE-07 PASS after D-14 queue-fix redeploy)
+last_updated: "2026-10-15T07:40:12.909Z"
 last_activity: 2026-10-14
 last_activity_desc: Phase 02 complete, transitioned to Phase 3
-state_head: c652b1a31e51f36e0af96661a444fbcb790705e3
+state_head: 5bc49684a5cfba9f884a323a67ef4a64db5d3771
 progress:
   total_phases: 3
   completed_phases: 1
   total_plans: 17
-  completed_plans: 15
+  completed_plans: 16
   percent: 33
 ---
 
@@ -32,7 +32,7 @@ is doing and recover it themselves; no adapter code path pauses, resumes or abor
 ## Current Position
 
 Phase: 3 (Deploy & Supervised Live Acceptance) — EXECUTING
-Current Plan: 7
+Current Plan: 8
 Total Plans in Phase: 8
 Status: Plan 01 complete
 Last activity: 2026-10-14 — Plan 03-01 complete (entry gate, pre-deploy record, go-ahead, deploy steps 1-2)
@@ -77,6 +77,7 @@ Progress: [███░░░░░░░] 33%
 | Phase 03 P04 | 15min | 3 tasks | 2 files |
 | Phase 03 P05 | ~25min | 3 tasks | 2 files |
 | Phase 03 P06 | ~35min (Task 3) | 3 tasks | 7 files |
+| Phase 03 P07 | ~40min | 3 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -123,6 +124,9 @@ Recent decisions affecting current work:
 - [Phase 03]: LIVE-06b scored PASS on the third attempt after fixing a NoError(0)-suffix abort-wording bug found live on real hardware (7d77e23, 201d987); two non-scored attempts kept as history in the same 03-ACCEPTANCE.md section
 - [Phase 03]: Corrected the plan-06 commit ledger base from 201d987 to cc721c7 so actuals.commits honestly includes the D-14 fix commits made earlier in this plan's execution
 - [Phase 03]: Did not mark LIVE-07 complete; only LIVE-06 (both halves now PASS) was marked complete in REQUIREMENTS.md
+- [Phase 03]: LIVE-07 scored PASS on rerun after galago-core queue-fix redeploy (261015-h0q); attempt 1 (FAIL, queue re-run defect) kept as history in 03-ACCEPTANCE.md
+- [Phase 03]: LIVE-06b follow-up check PASS confirms the galago-core fix dequeues an aborted step; FINDING (a) and FINDING (b) (two residual galago-core queue defects) routed to plan 03-08's phase close-out decision, not treated as LIVE-06b/LIVE-07 failures
+- [Phase 03]: Did not touch Safety invariant audit or phase-wide Summary closeout lines in 03-ACCEPTANCE.md -- that is plan 03-08's scope
 
 ### Pending Todos
 
@@ -147,6 +151,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-15T04:55:46.761Z
-Stopped at: Completed 03-06-PLAN.md (LIVE-06b PASS after D-14 fix)
+Last session: 2026-10-15T07:40:12.860Z
+Stopped at: Completed 03-07-PLAN.md (LIVE-07 PASS after D-14 queue-fix redeploy)
 Resume file: None
