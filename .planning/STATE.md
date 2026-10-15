@@ -6,16 +6,16 @@ current_phase: 3
 current_phase_name: Deploy & Supervised Live Acceptance
 current_plan: 8
 status: executing
-stopped_at: Completed 03-07-PLAN.md (LIVE-07 PASS after D-14 queue-fix redeploy)
-last_updated: "2026-10-15T07:40:12.909Z"
+stopped_at: "Completed 03-08-PLAN.md (Phase 3 closed from evidence: Safety invariant audit PASS, 261015-o44 live-verified, D-13 complete)"
+last_updated: "2026-10-15T12:00:21.197Z"
 last_activity: 2026-10-14
 last_activity_desc: Phase 02 complete, transitioned to Phase 3
-state_head: 5bc49684a5cfba9f884a323a67ef4a64db5d3771
+state_head: 698961a6a749fc38b5f8221d941fa069446c2b90
 progress:
   total_phases: 3
   completed_phases: 1
   total_plans: 17
-  completed_plans: 16
+  completed_plans: 17
   percent: 33
 ---
 
@@ -78,6 +78,7 @@ Progress: [███░░░░░░░] 33%
 | Phase 03 P05 | ~25min | 3 tasks | 2 files |
 | Phase 03 P06 | ~35min (Task 3) | 3 tasks | 7 files |
 | Phase 03 P07 | ~40min | 3 tasks | 2 files |
+| Phase 03 P08 | ~25min | 2 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -127,6 +128,10 @@ Recent decisions affecting current work:
 - [Phase 03]: LIVE-07 scored PASS on rerun after galago-core queue-fix redeploy (261015-h0q); attempt 1 (FAIL, queue re-run defect) kept as history in 03-ACCEPTANCE.md
 - [Phase 03]: LIVE-06b follow-up check PASS confirms the galago-core fix dequeues an aborted step; FINDING (a) and FINDING (b) (two residual galago-core queue defects) routed to plan 03-08's phase close-out decision, not treated as LIVE-06b/LIVE-07 failures
 - [Phase 03]: Did not touch Safety invariant audit or phase-wide Summary closeout lines in 03-ACCEPTANCE.md -- that is plan 03-08's scope
+- [Phase 03]: LIVE-07's twelve-bullet record needed no changes; Task 1 verified completeness against plan 03-08's own regexes rather than rewriting it
+- [Phase 03]: Compared code-unchanged-since-deploy against the LAST deployed SHA (201d987, the D-14 LIVE-06b adapter fix), not the original LIVE-04 deploy SHA (d9acdcf0)
+- [Phase 03]: FINDING (a) and FINDING (b) (galago-core queue defects flagged by plans 03-06/03-07) marked RESOLVED after live-verifying galago-core 261015-o44 (662bb12, 38b5d17, 7627bf6) read-only against the F.A.S.T.log and a copy of queue.db
+- [Phase 03]: Named two Safety invariant audit gaps precisely (2026-10-14 ~17:47->10:16:36 WIB; 2026-10-15 ~11:47->12:02:49 WIB) rather than overstate log coverage; all 20 surviving control-command lines mapped to a recorded operator action, 0 unmapped
 
 ### Pending Todos
 
@@ -151,6 +156,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-15T07:40:12.860Z
-Stopped at: Completed 03-07-PLAN.md (LIVE-07 PASS after D-14 queue-fix redeploy)
+Last session: 2026-10-15T12:00:21.150Z
+Stopped at: Completed 03-08-PLAN.md (Phase 3 closed from evidence: Safety invariant audit PASS, 261015-o44 live-verified, D-13 complete)
 Resume file: None
