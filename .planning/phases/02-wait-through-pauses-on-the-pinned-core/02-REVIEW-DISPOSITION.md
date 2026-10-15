@@ -3,14 +3,14 @@ phase: 02
 review: 02-REVIEW.md
 titles: json
 findings:
+  - id: WR-02
+    severity: warning
+    disposition: open
+    title: "`_is_no_error()` repeats the same loose-comparison pattern `_accepted()` was meant to retire (carried forward, still open)"
   - id: CR-01
     severity: critical
     disposition: open
     title: "Resume()'s crash-recovery acceptance check still has the WR-01 bug the phase's own fix claims to have eliminated"
-  - id: WR-02
-    severity: warning
-    disposition: open
-    title: "`_is_no_error()` repeats the same loose-comparison pattern WR-01 was meant to retire"
   - id: WR-03
     severity: warning
     disposition: open
@@ -25,17 +25,17 @@ findings:
     title: "`errorCode == 0` boolean/int ambiguity now gates operator-abort attribution, not just the reply code"
 open: 4
 total: 5
-recorded: 2026-10-15T13:22:21.891Z
+recorded: 2026-10-15T14:17:22.612Z
 ---
 
 # Phase 02: Code Review Disposition
 
 | Finding | Severity | Disposition | Source |
 |---------|----------|-------------|--------|
-| CR-01 | critical | open | - |
 | WR-02 | warning | open | - |
-| WR-03 | warning | open | - |
-| IN-01 | info | open | - |
+| CR-01 | critical | open | - (not in the current review) |
+| WR-03 | warning | open | - (not in the current review) |
+| IN-01 | info | open | - (not in the current review) |
 | WR-01 | warning | fixed | 02-REVIEW-FIX.md (not in the current review) |
 
 Dispositions: `open` (recorded, not yet triaged), `fixed`, `skipped`, `deferred`.
