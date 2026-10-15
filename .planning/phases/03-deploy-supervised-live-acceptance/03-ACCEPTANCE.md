@@ -1074,9 +1074,215 @@ phase (03-03 to 03-08) fill the remaining sections.
     proceeded, and LIVE-07 was rerun on the fixed `galago-web` build along with the LIVE-06b
     follow-up check above — both now PASS.
 
+## 261015-o44 live verification (resolves FINDING (a) and FINDING (b))
+
+User-requested, after LIVE-07 passed: live-verify galago-core quick task `261015-o44`
+(commits `662bb12`, `38b5d17`, `7627bf6`), deployed in `galago-web` image `ab544595abe2`
+(galago-core HEAD `99e3986`; `99e3986` is also a docs-only commit recording the Phase 1
+review fixes WR-01/IN-01/IN-02 that ride along in the same image). Image built
+2026-10-15T11:38:08Z (18:38:08 WIB), container recreated 2026-10-15T11:44:52Z (18:44:52 WIB,
+independently confirmed via `docker inspect galago-web`). Ancestry independently re-verified:
+`git -C galago-core merge-base --is-ancestor 662bb12 HEAD` / `38b5d17` / `7627bf6` all → true;
+`vendor/galago-tools` gitlink unchanged (`cb7886d`), so this verification needed no
+`galago-tools` or proto change. `galago-tools` was not restarted for it: MainPID `836290`,
+F.A.S.T. listener `867162`, unchanged from the LIVE-07 rerun baseline throughout (re-confirmed
+live via `systemctl --user show` and `ss -ltnp`); `journalctl --user -u galago-tools` shows no
+entries across either check window, including across the `docker restart galago-web` in check
+(b). These checks close FINDING (a) and FINDING (b), both flagged above as blocking items for
+this close-out decision.
+
+### (a) An accepted abort removes the run's remaining steps — PASS
+
+- Run `15420f33a301e7000` (protocol: Transfer A5→A5 then `get_status` — the operator reused the
+  LIVE-06b protocol shape, not the suggested A7).
+- F.A.S.T.log (`~/.local/share/galago/trace_logs/1792039261/F.A.S.T.log`, continuous since the
+  12:04:42 WIB restart recorded under `## LIVE-07`'s Attempt 1 baseline note, no further
+  overwrite):
+  ```
+  2026-10-15 18:40:19 | INFO | Running command Transfer
+  2026-10-15 18:41:12 | INFO | Running command Pause
+  2026-10-15 18:41:13 | INFO | fast run progress 12% (paused)
+  2026-10-15 18:41:21 | INFO | Running command Abort
+  2026-10-15 18:41:21 | INFO | fast run progress 12% (aborted)
+  2026-10-15 18:41:21 | DEBUG | ExecuteCommand Response: response: ERROR_FROM_TOOL
+  error_message: "run aborted by operator at 12%"
+  ```
+  Operator: "a done (return liquid: no)" — Abort with `returnLiquid=false`. No `: NoError (0)`
+  suffix (the D-14 wording fix, `201d987`, still holds). Window 18:38:19-18:43:21 WIB: exactly
+  Transfer=1, Pause=1, Abort=1, GetStatus=0 — no extraneous command.
+- Queue table, read from a read-only copy of `/app/data/queue.db` (`docker cp`, independently
+  re-queried for this record): `command_queue_2_queue` EMPTY; `command_queue_2_commands` shows
+  `queue_id 132` (transfer) `status FAILED`, `queue_id 133` (get_status) `status SKIPPED`. Matches
+  the operator's report exactly: the aborted step's own remainder (`get_status`) never ran and the
+  queue carries nothing forward.
+- Result: PASS — an accepted abort dequeues the aborted step and skips the run's remaining step;
+  no unintended motion.
+
+### (b) An orphan left by a restarted galago-web is never re-dispatched — PASS
+
+- Run `154210ef5381e7000` (protocol: Transfer A5→A5 then `get_status`).
+- F.A.S.T.log, same continuous file:
+  ```
+  2026-10-15 18:44:05 | INFO | Running command Transfer
+  2026-10-15 18:44:32 | INFO | Running command Pause
+  2026-10-15 18:44:34 | INFO | fast run progress 12% (paused)
+  [docker restart galago-web at 18:44:52 WIB (operator: "go-restart"); container recreated
+   2026-10-15T11:44:52Z, healthy by 18:44:57 WIB]
+  2026-10-15 18:45:38 | INFO | Running command Resume
+  2026-10-15 18:46:48 | INFO | fast run progress 100% (idle)
+  2026-10-15 18:46:48 | DEBUG | ExecuteCommand Response: response: SUCCESS
+  ```
+  F.A.S.T. stayed BUSY/paused at 12% with the same `pause.since` across the restart (re-confirmed
+  live before/after); `galago-tools` MainPID `836290` and F.A.S.T. listener `867162` were
+  unchanged (`journalctl` empty across the restart window, 18:42:00-18:49:00 WIB). Window
+  18:42:05-18:48:38 WIB: exactly Transfer=1, Pause=1, Resume=1, GetStatus=0 — zero Transfer
+  commands after the restart.
+- Queue table, read-only `docker cp` copy of `/app/data/queue.db` (re-queried): right after the
+  restart, `queue_id 134` (transfer) went `FAILED` with
+  `error.message "Interrupted: galago-web restarted while this step was running. It was not
+  re-run; check the instrument before re-queuing it."`; `queue_id 135` (get_status) `SKIPPED`;
+  `command_queue_2_queue` EMPTY — the orphaned step was never re-dispatched by the restart itself.
+  The operator then sent the tool-page Resume ("recovered: resume at 18.45, get_status...tip
+  broken: no"); the Resume ran to SUCCESS (18:46:48 WIB) but is a distinct, operator-initiated
+  action on the still-open original Transfer, not a re-dispatch — `galago-core`'s
+  `recoverInterruptedSteps` had already failed and dequeued row 134 at process start, before the
+  operator acted. Final state, re-queried after the Resume: `command_queue_2_queue` still EMPTY;
+  `command_queue_2_commands` final: `queue_id 132 FAILED`, `queue_id 133 SKIPPED`, `queue_id 134
+  FAILED`, `queue_id 135 SKIPPED` (both checks' rows, confirmed together in one query). F.A.S.T.
+  ended READY/idle (`fast_status.py` re-confirmed live:
+  `{"status": "READY", "run_state": {"percent": 100.0, "state": "idle", "pause": null}}`).
+- Result: PASS — a STARTED step orphaned by a `galago-web` restart is failed and dequeued at
+  startup, never re-dispatched; the operator's subsequent tool-page Resume completes the
+  already-open instrument-side step exactly once, with no second Transfer.
+
+Both findings are now RESOLVED (galago-core `261015-o44`, live-verified) — see the updated
+`## Flagged assumptions` entries below.
+
 ## Safety invariant audit
 
-(Not run — a later plan in this phase fills this section.)
+Design section 7 invariant 1 (D-11): every `Running command Pause`, `Running command Resume` and
+`Running command Abort` line in the post-deploy F.A.S.T. log history, from the LIVE-04 deploy
+restart (`2026-10-14 17:39:26 WIB`, trace dir `1791974367`) to now (`2026-10-15 18:47 WIB`,
+trace dir `1792039261`), mapped to an operator action recorded in a scenario section. Compiled
+from the surviving log files: the live current `~/.local/share/galago/trace_logs/1792039261/
+F.A.S.T.log` plus the backup copies taken before each in-place overwrite
+(`fast-log-20261015T1129.log`, `fast-log-20261015T1140.log`,
+`fast-log-20261015T1147-newadapter.log`, `fast-log-20261015-live07.log`,
+`fast-log-20261015-live07-rerun.log`, `fast-log-20261015-o44-checks.log`, in
+`.planning`'s working scratch area). Every timestamp below was independently re-grepped from
+these files for this record.
+
+- Control commands found: 20 lines total — Pause 9, Resume 6, Abort 5, in order:
+
+  | # | Time (WIB) | Command | Surviving source |
+  |---|---|---|---|
+  | 1 | 10:20:15 | Pause | old dir, post-10:16:36 backup |
+  | 2 | 10:23:30 | Resume | old dir, post-10:16:36 backup |
+  | 3 | 10:44:03 | Resume | old dir, post-10:16:36 backup |
+  | 4 | 11:06:27 | Resume | old dir, post-10:16:36 backup |
+  | 5 | 11:25:27 | Pause | old dir, post-10:16:36 backup |
+  | 6 | 11:27:32 | Abort | old dir, post-10:16:36 backup |
+  | 7 | 11:32:38 | Pause | old dir, post-10:16:36 backup |
+  | 8 | 11:32:46 | Abort | old dir, post-10:16:36 backup |
+  | 9 | 11:45:29 | Pause | new dir, post-11:41:02 backup |
+  | 10 | 11:46:12 | Abort | new dir, post-11:41:02 backup |
+  | 11 | 12:05:55 | Pause | new dir, live/continuous since 12:04:42 |
+  | 12 | 12:08:56 | Resume | new dir, live/continuous since 12:04:42 |
+  | 13 | 14:18:56 | Pause | new dir, live/continuous since 12:04:42 |
+  | 14 | 14:19:06 | Abort | new dir, live/continuous since 12:04:42 |
+  | 15 | 14:23:06 | Pause | new dir, live/continuous since 12:04:42 |
+  | 16 | 14:24:06 | Resume | new dir, live/continuous since 12:04:42 |
+  | 17 | 18:41:12 | Pause | new dir, live/continuous since 12:04:42 |
+  | 18 | 18:41:21 | Abort | new dir, live/continuous since 12:04:42 |
+  | 19 | 18:44:32 | Pause | new dir, live/continuous since 12:04:42 |
+  | 20 | 18:45:38 | Resume | new dir, live/continuous since 12:04:42 |
+
+  Re-checked zero other `Running command` lines of any type appear in the gap windows below (no
+  stray Transfer/GetStatus either).
+
+- Mapped to operator actions:
+
+  | # | Time | -> Scenario / action |
+  |---|---|---|
+  | 1-2 | 10:20:15, 10:23:30 | `## LIVE-06a`: operator Pause, operator Resume |
+  | 3 | 10:44:03 | `## LIVE-05` first attempt (FAIL, kept as history): operator Resume |
+  | 4 | 11:06:27 | `## LIVE-05` scored rerun: operator Resume |
+  | 5-6 | 11:25:27, 11:27:32 | `## LIVE-06b` attempt 1 (rehearsal, not scored): operator Pause, operator Abort |
+  | 7-8 | 11:32:38, 11:32:46 | `## LIVE-06b` attempt 2 (not scored, exposed the wording defect): operator Pause, operator Abort |
+  | 9-10 | 11:45:29, 11:46:12 | `## LIVE-06b` scored rerun: operator Pause, operator Abort |
+  | 11-12 | 12:05:55, 12:08:56 | `## LIVE-07` attempt 1 (FAIL, kept as history): operator Pause, operator tool-page Resume |
+  | 13-14 | 14:18:56, 14:19:06 | `## LIVE-06b` follow-up check: operator Pause, operator Abort |
+  | 15-16 | 14:23:06, 14:24:06 | `## LIVE-07` scored rerun: operator Pause, operator tool-page Resume |
+  | 17-18 | 18:41:12, 18:41:21 | `## 261015-o44 live verification` check (a): operator Pause, operator Abort |
+  | 19-20 | 18:44:32, 18:45:38 | `## 261015-o44 live verification` check (b): operator Pause, operator tool-page Resume |
+
+  All 20 lines map to an operator action already recorded (verbatim operator reply or directly
+  observed tool-page action) in a scenario section of this document.
+
+- Unmapped: none. Every Pause/Resume/Abort line since the LIVE-04 deploy traces to a recorded
+  operator action.
+
+  **Gaps named precisely (no surviving log, not claimed as audited):**
+  - **2026-10-14 ~17:47 WIB -> 2026-10-15 10:16:36 WIB:** the original trace dir
+    (`1791974367`)'s `F.A.S.T.log` was overwritten in place by the 10:16:36 WIB tool-server
+    restart, destroying everything written before that instant. No backup survives for this
+    window. Known activity inside it, from written-at-the-time records outside this phase's own
+    log: the dry run (separate harness, port 40003 — its own section already confirmed, at the
+    time, zero `Running command` lines reached the production F.A.S.T.log during its own narrower
+    09:06-09:14 WIB sub-window, before the overwrite); galago-core's 02-UAT completion
+    (`c71d2a1`, ~09:43 WIB) includes test 2 (Pause/Resume/Abort) and test 5 (instrument pause),
+    both run against the real F.A.S.T. tool per `03-DEPLOY.md`'s note — evidenced only in
+    galago-core's own `02-UAT.md` (re-confirmed present: tests 2 and 5 both `result: pass`),
+    not re-derivable from this phase's log, which no longer covers this period. Stated plainly:
+    this window's production-tool-log coverage does not survive to this audit; what stands is the
+    record written at the time, in a different document.
+  - **2026-10-15 ~11:47 WIB -> 12:02:49 WIB:** backup coverage of the new trace dir
+    (`1792039261`) ends at 11:47 (`fast-log-20261015T1147-newadapter.log`); the next surviving
+    evidence is the journal's 12:02:49 WIB tool-kill sequence and the 12:04:42 WIB restart
+    content. No scenario in this document claims any operator action in this sub-window — the
+    LIVE-06b scored rerun ended 11:46:13 WIB and LIVE-07 attempt 1 began 12:05:22 WIB — so there
+    is no gap between two recorded events to account for, but this is an absence-of-claim, not a
+    fresh log audit of that minute range.
+
+- galago-tools restarts:
+  - **2026-10-15 10:16:36 WIB** — tool-server restart (not a `systemctl` service restart; the
+    `:8081` manager page, requests from `10.150.1.89`), stopping/starting Pf400, F.A.S.T. and
+    Tool Box. `galago-tools` MainPID unchanged (`4044033`); new F.A.S.T. listener PID `727894`.
+    Recorded in `03-DEPLOY.md`'s "Tool-server restart without a service restart" subsection and
+    the `## LIVE-06a` Control commands correction. Explained; no unmapped command resulted.
+  - **2026-10-15 11:40:59-11:41:00 WIB** — `galago-tools` **service** restart (`systemctl --user
+    restart galago-tools`), the D-14 LIVE-06b adapter fix redeploy on the user's literal "go".
+    MainPID `4044033` -> `836290`; new trace dir `1792039261`. Recorded in `03-DEPLOY.md`'s "D-14
+    redeploy (LIVE-06b adapter fix)" subsection. Explained, recorded D-14 redeploy; no unmapped
+    command resulted (the operator reconnected before any scenario resumed).
+  - **2026-10-15 ~12:02:49-12:04:42 WIB** — tool-server restart (same `:8081` manager-page
+    pattern as the first one; journal shows `Killed process 836333`/`F.A.S.T`/`836332`/`Tool
+    Box`/`836310`/`Pf400` at 12:02:49-12:02:50 WIB, then `Started ... F.A.S.T on port 40001` at
+    12:04:42 WIB). `galago-tools` MainPID unchanged (`836290`); F.A.S.T. listener PID `836333` ->
+    `867162`. Recorded in `03-ACCEPTANCE.md`'s `## LIVE-07` Attempt 1 baseline note (the precise
+    12:02:49 WIB kill-sequence timestamp is newly re-derived here from `journalctl`, narrowing the
+    previously-recorded "at 12:04:42 WIB" restart instant to its start). Explained; no unmapped
+    command resulted.
+  - **No further restart from 12:04:42 WIB to now**: `journalctl --user -u galago-tools --since
+    "2026-10-15 12:04:42"` (re-run for this record) shows only client-connection and
+    image-not-found lines, no `Killed process`/`Started` pair; `systemctl --user show galago-tools
+    -p MainPID` reads `836290` live; the F.A.S.T. listener PID (`ss -ltnp`) reads `867162` live —
+    both match the baseline recorded under `## LIVE-07`'s rerun and carried through the
+    `261015-o44` checks. The `docker restart galago-web` in check (b) (18:44:52 WIB) produced zero
+    `galago-tools` journal entries, confirming it did not touch the tool-server process.
+  - galago-tools did not keep the literal LIVE-04 post-deploy MainPID (`4044033`) through the
+    whole acceptance — it changed once, at the 11:40:59 WIB D-14 redeploy above. That change is a
+    recorded D-14 redeploy with its own gate rerun and operator go-ahead (`03-DEPLOY.md`), which is
+    exactly the alternative this invariant's wording allows ("or that every change is a recorded
+    D-14 redeploy"). From 11:41:00 WIB on, MainPID `836290` held through the rest of the
+    acceptance, including the `261015-o44` checks just run.
+
+- Result: PASS
+  - 20 control-command lines found since the LIVE-04 deploy restart, all 20 mapped
+  to a recorded operator action, 0 unmapped; 3 tool-process restarts found, all 3 explained (2
+  tool-server-only restarts via the `:8081` manager page, 1 `galago-tools` service restart that is
+  a recorded D-14 redeploy); 2 named gaps where no production log survives, both honestly stated
+  with no claim of coverage beyond the written record from the time; 0 unexplained restarts.
 
 ## Flagged assumptions
 
@@ -1112,29 +1318,41 @@ phase (03-03 to 03-08) fill the remaining sections.
   for both items this required — LIVE-07 (`## LIVE-07` above) and the LIVE-06b follow-up check
   (`## LIVE-06b` above) — both confirm the fix holds. See `03-DEPLOY.md`'s "D-14 redeploy (queue
   re-run fix)" subsection for the redeploy evidence.
-- **FINDING (a) — aborted run's remaining steps stay queued (galago-core, 2026-10-15, blocking item
-  for 03-08's close-out decision, not an edge-probe item):** the D-14 queue fix above dequeues only
-  the aborted step itself; any later steps of that same run stay in `_queue` and would run on the
-  next queue start, ahead of a different run's own steps. Observed in the LIVE-06b follow-up
-  check's queue table (row 121, `get_status`, harmless here) but not exercised — the operator
-  cleared the queue before starting LIVE-07. Not a LIVE-06b failure — that run's own D-11 criteria
-  held, and the thing the follow-up check exists to prove (the aborted step itself does not re-run)
-  held exactly. **Operator workaround:** Clear All after any abort, before starting another run.
-  Full detail: `## LIVE-06b`'s follow-up note above.
+- **FINDING (a) — aborted run's remaining steps stay queued (galago-core, 2026-10-15). RESOLVED
+  (galago-core `261015-o44`, live-verified in plan 03-08):** the D-14 queue fix above dequeued
+  only the aborted step itself; any later steps of that same run stayed in `_queue` and would have
+  run on the next queue start, ahead of a different run's own steps. Observed in the LIVE-06b
+  follow-up check's queue table (row 121, `get_status`, harmless here) but not exercised there —
+  the operator cleared the queue before starting LIVE-07. Not a LIVE-06b failure — that run's own
+  D-11 criteria held, and the thing the follow-up check exists to prove (the aborted step itself
+  does not re-run) held exactly. galago-core fixed the remainder-dequeue gap (`662bb12`: an
+  accepted abort now removes the aborted run's remaining steps, not just the aborted step itself)
+  and it was live-verified PASS in plan 03-08, check (a): run `15420f33a301e7000`'s `get_status` step (row 133)
+  went `SKIPPED`, the queue table EMPTY. No operator workaround is needed going forward; the
+  previously-recommended "Clear All after any abort" workaround is now redundant, not required.
+  Full detail: `## LIVE-06b`'s follow-up note and `## 261015-o44 live verification` check (a)
+  above.
 - **FINDING (b) — orphaned STARTED row survives `galago-web`-restart recovery (galago-core,
-  2026-10-15, blocking item for 03-08's close-out decision, not an edge-probe item):** after a
-  `galago-web` restart mid-run and tool-page recovery, the finished step's queue row stays
+  2026-10-15). RESOLVED (galago-core `261015-o44`, live-verified in plan 03-08):** after a
+  `galago-web` restart mid-run and tool-page recovery, the finished step's queue row stayed
   `STARTED` (`galago-web` never saw it finish — the restart dropped the gRPC call that would have
-  reported the outcome) and would re-run on the next queue start. Observed in the LIVE-07 rerun's
-  queue table (row 124) but not exercised — the orchestrator stopped the operator before the queue
-  could be started again. Not a LIVE-07 failure — every D-11/D-12 criterion for that scenario held.
-  **Operator workaround:** Clear All after any `galago-web` restart recovery, before starting
-  another run. Full detail: `## LIVE-07`'s Queue state bullet above.
-- Findings (a) and (b) are both galago-core queue defects of the same class as the fixed re-run
-  defect above: a queued step runs on the next start even though the operator did not intend it.
-  Neither is a LIVE-06b or LIVE-07 failure — every scored D-11/D-12 criterion for both scenarios
-  held — but both are carried forward here as blocking items for the phase close-out decision in
-  plan 03-08 (`## Safety invariant audit`), not resolved or dismissed in this plan.
+  reported the outcome) and would have re-run on the next queue start. Observed in the LIVE-07
+  rerun's queue table (row 124) but not exercised there — the orchestrator stopped the operator
+  before the queue could be started again. Not a LIVE-07 failure — every D-11/D-12 criterion for
+  that scenario held. galago-core fixed it (`38b5d17`: a STARTED step left by a previous process is
+  failed and dequeued at startup, never re-dispatched) and it was live-verified PASS in plan 03-08,
+  check (b): run `154210ef5381e7000`'s orphaned transfer (row 134) was failed with an explicit
+  "Interrupted: galago-web restarted..." message and dequeued immediately after the restart, before
+  the operator's Resume; zero Transfer commands reached the tool after the restart. No operator
+  workaround is needed going forward; the previously-recommended "Clear All after any restart
+  recovery" workaround is now redundant, not required. Full detail: `## LIVE-07`'s Queue state
+  bullet and `## 261015-o44 live verification` check (b) above.
+- Findings (a) and (b) were both galago-core queue defects of the same class as the fixed re-run
+  defect above: a queued step ran on the next start even though the operator did not intend it.
+  Neither was a LIVE-06b or LIVE-07 failure — every scored D-11/D-12 criterion for both scenarios
+  held. Both were carried forward from plans 03-06/03-07 as blocking items for this phase's
+  close-out decision and are now resolved by galago-core `261015-o44`, live-verified read-only in
+  plan 03-08 (`## 261015-o44 live verification`, `## Safety invariant audit`).
 - **Edge-probe fallback accounting for the phase:** 4 items surfaced (A-EDGE-LIVE-04 to 07), 0
   authored into truths as resolved edges, all 4 carried as flagged assumptions here, each with
   the plan that handles it.
