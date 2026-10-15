@@ -408,6 +408,27 @@ also later than the step 2 check and does not break the order).
 - `fast_status.py --port 40000` (Pf400) also reads `NOT_CONFIGURED` post-restart — expected, every tool server loses its configuration on restart; Pf400 is out of scope for this plan's reconnect (plan 03-02 covers F.A.S.T. only).
 - `galago-web` was not touched; Claude sent no `Configure`, `ExecuteCommand` or any other command to any tool in this task.
 
+### Post-deploy galago-web rebuild (outside this runbook, 2026-10-15)
+
+- `galago-web` was rebuilt again outside this runbook, from `galago-core` HEAD
+  `d4726ff` ("fix(02): apply UI review fixes to the control bar"). The image is
+  `sha256:10e7493591f10a9d5092807ed344a590784c61e4a0926140ddcc07a779d8f089`, created
+  2026-10-15 09:00:58 WIB, and the container was recreated at 2026-10-15T02:01:02Z. It replaces
+  the `26917ca7...` image that Step 3 recorded.
+- Changes between `d95c2e1` and `d4726ff` are galago-core Phase 2 code-review fixes
+  (WR-01..WR-07) and UI-review fixes to the control bar, all in `controller/`. The
+  `vendor/galago-tools` gitlink is still `cb7886d`, so the protos match this repo, and the
+  D-01.3 condition still holds.
+- `galago-tools` did not restart (MainPID `4044033`), and the service core is still `b30b38d`.
+- The safe order still holds: this rebuild comes after the step 2 `run_state` check.
+- Everything after it was exercised on this image:
+  - the dry run (D-07, run started 09:06:06 WIB)
+  - galago-core's 02-UAT completion (`c71d2a1`, 09:43 WIB, 8/8 pass, including test 2
+    Pause/Resume/Abort and test 5 instrument pause on the real F.A.S.T.)
+  - the live scenarios from 03-04 on
+- Rollback (D-06): `rollback-pre-live04` (`9ad9c64`, from `d95c2e1`) is still the recorded
+  anchor. Rolling back to it would also undo the WR fixes.
+
 ## Logs to watch (D-08)
 
 - Manager/journal lines (does NOT carry tool command lines — verified 2026-10-14):

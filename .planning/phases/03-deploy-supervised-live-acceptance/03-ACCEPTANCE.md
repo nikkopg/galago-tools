@@ -74,6 +74,11 @@ phase (03-03 to 03-08) fill the remaining sections.
 - **Result: PASS** — every Step 1/2/2b/3 check PASSed (Step 3 PASSed on the no-cache rebuild
   after the cached attempt's documented, non-blocking finding was resolved by explicit user
   decision); the safe order holds; rollback anchors are recorded for every layer.
+- **Post-deploy note (2026-10-15):** `galago-web` was later rebuilt outside the runbook from
+  `galago-core` `d4726ff` (Phase 2 code-review and UI-review fixes; the gitlink `cb7886d` and
+  protos are unchanged). The image is `sha256:10e7493591f1...`, built 09:00:58 WIB. The dry run,
+  galago-core's 02-UAT completion and the live scenarios all ran on this image. Details are in
+  `03-DEPLOY.md` under "Post-deploy galago-web rebuild". LIVE-04's result is unaffected.
 
 ## Dry run (D-07)
 
