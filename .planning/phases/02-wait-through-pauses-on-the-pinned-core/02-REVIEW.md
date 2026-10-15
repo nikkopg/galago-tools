@@ -1,108 +1,184 @@
 ---
 phase: 02-wait-through-pauses-on-the-pinned-core
-reviewed: 2026-10-13T00:00:00Z
+reviewed: 2026-10-15T00:00:00Z
 depth: standard
-files_reviewed: 3
+files_reviewed: 4
 files_reviewed_list:
-  - tools/fast/requirements.txt
+  - scripts/fast_dryrun.py
+  - scripts/fast_status.py
   - tools/fast/server.py
   - tools/tests/fast_test.py
 findings:
-  critical: 0
-  warning: 1
+  critical: 1
+  warning: 2
   info: 1
-  total: 2
+  total: 4
 status: issues_found
 ---
 
-# Phase 2: Code Review Report
+# Phase 02: Code Review Report
 
-**Reviewed:** 2026-10-13T00:00:00Z
+**Reviewed:** 2026-10-15T00:00:00Z
 **Depth:** standard
-**Files Reviewed:** 3
+**Files Reviewed:** 4
 **Status:** issues_found
 
 ## Summary
 
-Reviewed the Phase 2 diff against `e385c86` for `tools/fast/requirements.txt`, `tools/fast/server.py`
-and `tools/tests/fast_test.py`: the fast-mcp re-pin to `b30b38d`, the `through_pauses=True` /
-`on_pause=self._record_pause` wiring in `Transfer`/`RunProtocol`, the new `operator_abort` bookkeeping
-in `Abort()`/`_message_for`/`_run_in_flight`, and the ~840 new lines of real-core tests (`_Stepper`,
-`_RealCoreGrpcTestCase`, `TestPauseThroughRealCore`, `TestOperatorAbortRealCore`,
-`TestPausedTimeExcludedFromTimeout`, the installed-core gate tests).
+Reviewed `scripts/fast_dryrun.py`, `scripts/fast_status.py`, `tools/fast/server.py`,
+and `tools/tests/fast_test.py` for everything changed since `d89f837` (the
+previous phase-02 review commit), which spans commit `d9acdcf` ("fix(02): WR-01
+fail closed on non-int errorCode for operator-abort and recovery replies"),
+the phase-03 dry-run harness work, and the `201d987` `_is_no_error` wording fix.
 
-The implementation matches the locked decisions in `02-CONTEXT.md` (D-01 through D-17) closely: the
-operator-abort flag is adapter-only bookkeeping set under `_run_state_lock` (never an instrument-state
-check), is reset on the `_run_in_flight` 0→1 transition so it never carries into a new run, and never
-leaks into the public `run_state` keys (`state`/`percent`/`pause`). The crash-recovery `Resume` path's
-known gap (an operator abort landing during the lock-held, non-`_run_in_flight`-bracketed wait is not
-attributed to the operator) is explicitly called out in the code's own docstring as an accepted,
-documented scope boundary (D-09) and is not re-flagged here as a defect. `through_pauses`/`on_pause`
-are wired identically in `Transfer` and `RunProtocol`, with the crash-recovery `Resume` wait correctly
-omitting both (D-07), matched by `test_resume_wait_uses_a_fresh_handle_and_transfer_options`.
+The adapter code is generally careful: `_accepted()` centralizes the "did the
+instrument really accept this" rule for `Abort()` and `_recovery_reply()`, the
+motion-lock/control-command split is well tested, and `_run_in_flight()`'s
+counter-based nesting is exercised against overlapping runs. However, the
+headline finding is that the WR-01 fix in this same phase (`d9acdcf`) did not
+actually reach every "safety-sensitive call site" its own docstring claims to
+cover: `Resume()`'s crash-recovery branch still uses the old, loosely-typed
+`!= 0` comparison instead of `_accepted()`, so the exact bug the commit set out
+to eliminate still exists on one path, untested.
 
-One genuine robustness gap was found in the new operator-abort bookkeeping (see WR-01 below): the
-success check reused from the pre-existing `_recovery_reply` pattern (`errorCode == 0`) is now also
-used to decide whether to *attribute an abort to the operator*, which is exactly the safety-sensitive
-distinction this module's header docstring says must never be gotten wrong ("never attribute a
-non-operator abort to the operator"). Python's `False == 0` means a malformed/boolean `errorCode`
-would silently satisfy this check.
+## Critical Issues
 
-No critical/blocker issues were found. No hardcoded secrets, no dangerous functions, no SQL/command
-injection surfaces, and no empty catch blocks were introduced by this diff.
+### CR-01: Resume()'s crash-recovery acceptance check still has the WR-01 bug the phase's own fix claims to have eliminated
+
+**File:** `tools/fast/server.py:938-941`
+**Issue:**
+
+```python
+accepted = service.resume(is_tip_broken=is_tip_broken)
+if isinstance(accepted, Refused) or accepted.get("errorCode") != 0:
+    return _recovery_reply("resume", accepted)
+result = service.wait(
+    RunHandle(plates=None, stale_done=False),
+    on_progress=self._log_progress, timeout_s=self._timeout(None))
+```
+
+Commit `d9acdcf` (in this same review scope) introduced `_accepted()` precisely
+because `errorCode == 0` is true for a bool `False` in Python (`False == 0`),
+letting a malformed/falsy instrument reply be credited as "accepted" when it
+is not an actual `int` `0`. That commit fixed `Abort()`'s operator-abort flag
+and `_recovery_reply()`'s SUCCESS mapping, and `_accepted()`'s own docstring
+states it exists "so the stricter definition can never diverge between the two
+safety-sensitive call sites." It does diverge: `Resume()`'s crash-recovery
+branch (reached when no motion command is in flight — the lock-acquired path)
+never calls `_accepted()`. It inlines `accepted.get("errorCode") != 0`, which
+is exactly the old, disproven pattern: if the instrument's `resume()` reply
+carries `{"errorCode": False}` (the identical adversarial shape the phase
+added a regression test for on `Abort()` — `test_abort_bool_false_error_code_is_not_success`),
+`False != 0` evaluates to `False`, so the code treats resume as accepted and
+proceeds straight into `service.wait(...)`, waiting on a run that was never
+actually resumed, instead of immediately returning the rejection to the
+operator via `_recovery_reply`. (The second `Resume()` path — lock not
+acquired, a motion command already in flight — correctly calls
+`_recovery_reply()` which uses `_accepted()`; only the crash-recovery wait
+branch is affected.)
+
+This is unexercised by the test suite: `test_crash_recovery_resume_waits_and_holds_the_lock`
+and `TestRecoveryCommands` only use `errorCode: 0` (a real int) for the
+crash-recovery path; no test drives `{"errorCode": False}` or a missing
+`errorCode` key through this specific branch the way `test_abort_bool_false_error_code_is_not_success`
+does for `Abort()`.
+
+**Fix:**
+```python
+accepted = service.resume(is_tip_broken=is_tip_broken)
+if not _accepted(accepted):
+    return _recovery_reply("resume", accepted)
+result = service.wait(
+    RunHandle(plates=None, stale_done=False),
+    on_progress=self._log_progress, timeout_s=self._timeout(None))
+```
+(`_accepted()` already handles the `Refused` case via its `isinstance(result, dict)`
+guard, so the separate `isinstance(accepted, Refused)` check can be folded in or
+kept — either way, replace the raw `!= 0` comparison.) Add a regression test
+mirroring `test_abort_bool_false_error_code_is_not_success` for this exact
+crash-recovery branch.
 
 ## Warnings
 
-### WR-01: `errorCode == 0` boolean/int ambiguity now gates operator-abort attribution, not just the reply code
+### WR-02: `_is_no_error()` repeats the same loose-comparison pattern WR-01 was meant to retire
 
-**File:** `tools/fast/server.py:872-874`
-**Issue:** The new operator-abort bookkeeping is:
+**File:** `tools/fast/server.py:310-318`
+**Issue:**
 ```python
-if isinstance(result, dict) and result.get("errorCode") == 0:
-    with self._run_state_lock:
-        self._run_record["operator_abort"] = True
+def _is_no_error(outcome: object) -> bool:
+    error_name = getattr(outcome, "error_name", None)
+    error_code = getattr(outcome, "error_code", None)
+    message = getattr(outcome, "message", None)
+    return (error_code in (None, 0) and error_name in (None, "NoError")
+            and not message)
 ```
-In Python, `False == 0` evaluates to `True`. If `result["errorCode"]` is ever a JSON boolean (`false`)
-rather than the integer `0` — a malformed/non-conforming instrument or stub-transport response, or a
-future response-shape change elsewhere in the stack — this check passes and the adapter will record
-`operator_abort=True` for a command that was not actually confirmed accepted with `errorCode: 0`.
-Because `_message_for`'s `Aborted` branch uses this very flag to decide between "run aborted by
-operator at &lt;p&gt;%" and the plain instrument wording, a false positive here directly violates the
-module's own stated safety invariant ("never attribute a non-operator abort to the operator",
-reiterated in `02-CONTEXT.md` D-09 as reversibility-costly because galago-core shows this text
-verbatim). The identical `errorCode == 0` pattern already exists in `_recovery_reply`
-(`tools/fast/server.py:389`), but there it only selects the ExecuteCommandReply's response code
-(SUCCESS vs ERROR_FROM_TOOL) — a much lower-stakes use than operator attribution. No test in this
-diff exercises `errorCode: False`/`errorCode: True` for either path (`TestOperatorAbortWording.
-test_only_an_accepted_abort_sets_the_flag` only covers `0`, `-1`, `{}` and `Refused`), so this gap is
-currently unverified in either direction.
-**Fix:** Guard against bool explicitly before comparing, e.g.:
+`error_code in (None, 0)` is true for `error_code = False` as well (`False == 0`),
+the same class of bug `_accepted()` was written to close elsewhere in this
+file. `error_code` here comes from `RunOutcome` (a `fast_mcp` dataclass) rather
+than a raw instrument dict, so the practical exposure is smaller than CR-01,
+but it is the same anti-pattern this phase otherwise tries to eliminate, and if
+`fast_mcp` ever passes through a non-int `error_code` (e.g. from imprecise JSON
+deserialization upstream), an operator-abort with a real (falsy-but-not-zero)
+error could be reported as "no error", silently dropping the error detail from
+the operator-facing message.
+**Fix:** Use the same strict check as `_accepted()`:
 ```python
-error_code = result.get("errorCode")
-if isinstance(result, dict) and error_code == 0 and not isinstance(error_code, bool):
-    with self._run_state_lock:
-        self._run_record["operator_abort"] = True
+return (type(error_code) in (type(None), int) and error_code in (None, 0)
+        and error_name in (None, "NoError") and not message)
 ```
-or centralize the "accepted" check (e.g. a small `_accepted(result) -> bool` helper used by both
-`Abort()` and `_recovery_reply`) so the stricter definition is enforced in exactly one place, and add
-a regression test with `errorCode: False`.
+or factor a shared `_is_real_int_zero_or_none(value)` helper used by both
+`_accepted()` and `_is_no_error()`.
+
+### WR-03: gRPC channel is never closed in `fast_status.py`
+
+**File:** `scripts/fast_status.py:34-51`
+**Issue:** `channel = grpc.insecure_channel(...)` is created in `main()` but
+never closed on either the success or `grpc.RpcError` return paths. For a
+one-shot CLI invocation the OS reclaims the socket on process exit, so this is
+not a functional bug today, but the script's own docstring stresses it "must
+be safe to run against a live instrument at any time," implying frequent/
+scripted invocation (e.g. polling loops, health-check wrappers) where an
+unclosed channel per invocation is needless and inconsistent with the
+cleanup discipline shown elsewhere in this phase (e.g. `fast_dryrun.py`'s
+`channel.close()` in its self-test, `tearDown`/`addCleanup(channel.close)`
+patterns throughout `fast_test.py`).
+**Fix:**
+```python
+with grpc.insecure_channel(f"{args.host}:{args.port}") as channel:
+    stub = tool_driver_pb2_grpc.ToolDriverStub(channel)
+    ...
+```
 
 ## Info
 
-### IN-01: `_message_for`'s `Aborted` branch complexity grew with the new operator-abort wording
+### IN-01: `fast_dryrun.py`'s `handle_command()` reaches into `FastServer`/`DryRunFastServer` private state from a free function
 
-**File:** `tools/fast/server.py:347-354`
-**Issue:** The `Aborted` branch now nests an `if operator_abort` / inner `if outcome_text != _NO_ERROR_TEXT`
-inside the already-large `_message_for` if/elif chain (ten result kinds). Not a defect — the new tests
-(`TestOperatorAbortWording`) cover all four combinations of `operator_abort` × error-present — but the
-function is becoming a reasonable candidate for a small per-kind dispatch table if more wording
-variants are added in a future phase, to keep this function's cyclomatic complexity from climbing
-further.
-**Fix:** No action required now; consider extracting an `_aborted_text(result, operator_abort)` helper
-if a future phase adds another conditional to this branch.
+**File:** `scripts/fast_dryrun.py:174-181`
+**Issue:**
+```python
+if cmd == "clear":
+    with server._auto_pause_lock:
+        server._suppress_rearm = True
+        server._episodes_left = 0
+    server.simulate_pause(None)
+    with server._auto_pause_lock:
+        server._suppress_rearm = False
+    return True
+```
+`handle_command` directly manipulates `server._auto_pause_lock`,
+`server._suppress_rearm`, and `server._episodes_left` — private (`_`-prefixed)
+attributes of `DryRunFastServer` — from a module-level function rather than
+through a method on the class. This is harness-only code (not shipped to
+production), so the risk is low, but it couples the control-FIFO protocol
+tightly to the class's internal locking scheme and will be easy to break
+silently if `DryRunFastServer`'s internals are refactored without also
+updating this free function.
+**Fix:** Move the "clear" handling into a `DryRunFastServer.clear_pause_and_suppress_rearm()`
+method that owns its own locking, and have `handle_command` call that method
+instead of reaching into the instance's private state directly.
 
 ---
 
-_Reviewed: 2026-10-13T00:00:00Z_
+_Reviewed: 2026-10-15T00:00:00Z_
 _Reviewer: Claude (gsd-code-reviewer)_
 _Depth: standard_
