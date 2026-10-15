@@ -13,7 +13,7 @@ phase (03-03 to 03-08) fill the remaining sections.
 | LIVE-06 | LIVE-06a: Pause → Resume → SUCCESS | PASS | `## LIVE-06a: Pause -> Resume -> SUCCESS` below |
 | LIVE-05 | LIVE-05: Deck 3 empty → prompt → fix deck → Resume → SUCCESS | PASS | `## LIVE-05` below — rerun after the D-14 fix (galago-core `ad87ea5`, galago-web `b0e183e`); first attempt (FAIL, "found -1") kept as history in the same section |
 | LIVE-06 | LIVE-06b: Pause → Abort → aborted by operator, queue FAILED | PASS | `## LIVE-06b` below — scored rerun after the D-14 fix (`7d77e23`, `201d987`); two earlier attempts (rehearsal, then the wording-defect attempt) kept as history in the same section |
-| LIVE-07 | LIVE-07: galago-web restart mid-run → tool-page recovery | not run | — |
+| LIVE-07 | LIVE-07: galago-web restart mid-run → tool-page recovery | FAIL | `## LIVE-07` below — attempt 1 FAILed: the queue re-ran a previously operator-aborted LIVE-06b step instead of LIVE-07's own transfer (galago-core queue defect, D-14); D-12's restart/recovery mechanics themselves held |
 
 ## LIVE-04 Deploy
 
@@ -705,10 +705,181 @@ phase (03-03 to 03-08) fill the remaining sections.
     the operator's report are the evidence), and the operator did not re-state "unselected" for
     this specific run (attempt 2's confirmation on the identical build/dialog is cited instead).
     LIVE-06a (03-04, PASS) and LIVE-06b (this record, PASS) together satisfy requirement LIVE-06.
+  - **Note added after LIVE-07 attempt 1 (2026-10-15 ~12:11 WIB, D-14):** this record's
+    as-specified D-11 criteria held at the time they were written and this Result (PASS) is not
+    retracted — it still reflects what D-11 asked LIVE-06b to prove. LIVE-07 attempt 1
+    (`## LIVE-07` below) then showed, via `galago-web`'s queue (`controller/server/utils/
+    SqliteQueue.ts` `fail()`/`startNext()`), that this run's aborted transfer (`queueId 115`)
+    re-runs the next time the queue is started instead of staying FAILED and out of the way. After
+    the galago-core fix lands, a LIVE-06b follow-up check is required: after an abort, starting a
+    new run must not re-run the aborted step.
 
 ## LIVE-07: galago-web restart mid-run -> tool-page recovery
 
-(Not run — plan 03-07 fills this section.)
+- Date/time: attempt 1 (FAIL, D-14). Baseline note: at 12:04:42 WIB (2026-10-15) the F.A.S.T. tool
+  server itself restarted again with no `galago-tools` service restart (MainPID stayed `836290`;
+  the F.A.S.T. listener PID went `836333` -> `867162`), overwriting `F.A.S.T.log` in place (line 2
+  now reads the 12:04:42 restart) — most likely another `:8081` manager-page action, the same
+  pattern as the restarts noted earlier in this document. F.A.S.T. was reconnected at 12:04:50 WIB.
+  Both happened before this scenario started, so the no-restart baseline for this attempt is
+  listener `867162` (not the `836333` baseline recorded in `03-DEPLOY.md`'s LIVE-06b redeploy
+  note). Scenario proper: `galago-web` run `15415a78d881e7000`, protocol `LIVE-07`, created
+  `2026-10-15T05:05:22Z` (12:05:22 WIB); within it, the F.A.S.T Transfer started 12:05:34 WIB,
+  operator Pause sent 12:05:55 WIB (paused at 5% per the log at 12:05:56 WIB — the operator's own
+  reply reported 2%, a discrepancy flagged plainly rather than reconciled), `docker restart
+  galago-web` at 12:07:27 WIB (2026-10-15T05:07:27Z) on the operator's go-restart, `galago-web`
+  running again and `/api/health` answering at 12:07:32 WIB (2026-10-15T05:07:32Z), tool-page
+  Resume sent 12:08:56 WIB, instrument idle/SUCCESS at 12:10:11 WIB, tool-page `get_status` sent
+  12:10:33 WIB.
+- Operator: the user, at the instrument with the e-stop within reach, created protocol LIVE-07,
+  started the run, paused it, and authorized the restart. Replies, verbatim, in order: (1) "paused
+  at 2%, start 12.05.30 paused 12.05.56, parameters as used, checklist confirmed"; (2)
+  "go-restart"; (3) "done,check logs"; (4) "1. not sure which col it transfered to 2. run page
+  shows no control after the restart, i was in the run recovery page when after the restart tho";
+  (5) "galago-core fix is on theway, tip broken was unselected". Claude sent no motion or control
+  command to any tool; the only command Claude ran that changed anything was `docker restart
+  galago-web`, after the operator's literal go-restart. Claude read `fast_status.py`, the
+  F.A.S.T.log and `galago-web`'s queue record (read-only) throughout.
+- Transfer parameters: as used — one F.A.S.T Transfer, source_deck 1, dest_deck 3,
+  source_plate_id 1, dest_plate_id 1, A4 to A4 (column 4), num_rows 8, num_cols 1, volume 50 µL,
+  tip_reuse fresh, expected_tray_id 0 (blank, Config value applies) — matching the plan's D-10
+  proposal exactly. **This is the protocol's recorded parameters, not necessarily what the
+  instrument physically did** — see Final step result and Queue state below.
+- Restart (D-12): `docker restart galago-web` run at 12:07:27 WIB (2026-10-15T05:07:27Z),
+  authorized by the operator's literal "go-restart" reply, while `fast_status.py --port 40001`
+  reported `BUSY`/`run_state.state paused` at 5%. `galago-web` reported running and `curl -sf
+  http://localhost:3010/api/health` succeeded at 12:07:32 WIB (2026-10-15T05:07:32Z); the running
+  image was unchanged (`b0e183e...`, the same image LIVE-06b ran against). Checks after the
+  restart, all read-only:
+  - `fast_status.py --port 40001` still read `BUSY`/`paused`, same 5% and the same `pause.since`
+    — met (the orphaned Transfer still waited).
+  - `systemctl --user show galago-tools -p MainPID` still read `836290` — met (no tool process
+    was restarted by this command).
+  - The F.A.S.T. listener stayed `867162` — met (same PID as the pre-scenario baseline above).
+  - F.A.S.T.log: the Transfer opened at 12:05:34 WIB had no `ExecuteCommand Response` yet; no new
+    "Running command Transfer" line appears between the restart and the Resume; no Pause, Resume
+    or Abort line appears between the operator's 12:05:55 WIB Pause and the 12:08:56 WIB Resume —
+    met.
+  - All Restart (D-12) checks passed; the mechanics this scenario exists to prove (an orphaned
+    Transfer survives a `galago-web` restart and still holds the motion lock) held exactly as
+    designed.
+- Decisions chosen: Resume (not the Abort fallback) from the F.A.S.T tool page's Run Recovery
+  card; Tip broken? **no**, confirmed by the operator as started unselected ("tip broken was
+  unselected").
+- Log excerpt: production F.A.S.T.log, `~/.local/share/galago/trace_logs/1792039261/F.A.S.T.log`
+  (a copy taken for this record, `fast-log-20261015-live07.log`), local time, spanning before and
+  after the restart:
+  ```
+  2026-10-15 12:04:42 | INFO | fast server started, listening on 40001
+  2026-10-15 12:04:50 | INFO | Received configuration: toolId: "F.A.S.T" ...
+  ...
+  2026-10-15 12:05:34 | INFO | Running command Transfer
+  2026-10-15 12:05:34 | INFO | fast run progress 0% (running)
+  ...
+  2026-10-15 12:05:55 | INFO | Running command Pause
+  2026-10-15 12:05:56 | INFO | fast run progress 5% (paused)
+  [docker restart galago-web at 12:07:27 WIB; running + /api/health OK at 12:07:32 WIB]
+  2026-10-15 12:08:56 | INFO | Running command Resume
+  2026-10-15 12:08:57 | INFO | fast run progress 5% (running)
+  ...
+  2026-10-15 12:10:11 | INFO | fast run progress 100% (idle)
+  2026-10-15 12:10:11 | DEBUG | ExecuteCommand Response: response: SUCCESS
+  2026-10-15 12:10:33 | INFO | Running command GetStatus
+  2026-10-15 12:10:33 | DEBUG | ExecuteCommand Response: response: SUCCESS
+  ```
+  Exactly one "Running command Transfer" line appears in the whole window (12:05:34 WIB, before
+  the restart); no second or later Transfer line appears anywhere, including after the restart.
+- Final step result: the Transfer opened at 12:05:34 WIB ended `ExecuteCommand Response: response:
+  SUCCESS` at 12:10:11 WIB, its wait having survived the 12:07:27 WIB restart and ended after the
+  tool-page Resume — the D-12 mechanic (an orphaned Transfer's wait ends and the motion lock
+  clears after tool-page recovery) held. **However, per the Queue state below, this was not
+  LIVE-07's own Transfer step**: `galago-web`'s queue shows the command that actually ran
+  (`queueId 115`) belonged to the earlier LIVE-06b run and carried that run's column-3 (A3)
+  parameters, not LIVE-07's column-4 (A4) parameters, even though the protocol record above is
+  LIVE-07's. The operator could not confirm which column was physically dosed ("not sure which col
+  it transfered to"); the queue record indicates column 3 (A3), not column 4 (A4) — unverified
+  physically.
+- Queue state: `galago-web` `commandQueue.getAll` (read-only tRPC query), read by the orchestrator
+  at ~12:11 WIB, before the operator cleared the queue:
+
+  | queueId | runId | status | command | source_start_col | startedAt |
+  |---|---|---|---|---|---|
+  | 115 | `154151287281e7000` (LIVE-06b) | STARTED | transfer | 3 (A3→A3) | `2026-10-15T05:05:34.196Z` — identical instant to the log's only "Running command Transfer" line; `error` field still held the 11:46 WIB operator-abort message from LIVE-06b |
+  | 116 | `154151287281e7000` (LIVE-06b) | CREATED | get_status | — | never started |
+  | 117 | `15415a78d881e7000` (LIVE-07) | CREATED | transfer | 4 (A4→A4) | never started |
+
+  Queue state after: OFFLINE (the operator cleared the queue afterward).
+
+  **Root cause (galago-core, read-only observation, not fixed here):**
+  `controller/server/utils/SqliteQueue.ts`. `fail()` (line 493) marks a queue item FAILED but
+  leaves it in the `_queue` table; `startNext()` (lines 112-145) selects the first `_queue` entry
+  by position, regardless of status, and sets it STARTED. When the operator started LIVE-07,
+  `startNext()` picked `queueId 115` — the LIVE-06b transfer the operator had aborted at 11:46 WIB
+  in plan 03-06 — ahead of LIVE-07's own `queueId 117`, and re-ran it. LIVE-07's transfer never
+  ran. The operator believed the A4 transfer was running; the queue record shows A3 ran instead.
+
+  **Consequence:** after an operator abort, the next queue start silently re-runs the aborted step
+  instead of the newly queued one. This is real, unrequested motion that the operator did not
+  intend and had no way to see on the run page (the run page showed no control bar for the
+  interrupted step by design, per D-12, so there was nothing on screen distinguishing "running
+  LIVE-07" from "re-running LIVE-06b's aborted step"). This conflicts directly with the project's
+  core value: "an operator running a F.A.S.T. step from Galago can always see what the instrument
+  is doing." The galago-core fix is reported in progress by the operator ("galago-core fix is on
+  theway").
+- Control commands in window: window 12:03:22-12:12:33 WIB (2 min before the run's creation to 2
+  min after the `get_status` reply). Counts: Transfer=1, Pause=1, Resume=1, Abort=0, GetStatus=1 —
+  every command line was triggered by an operator action (start, Pause, tool-page Resume, tool-page
+  get_status), so no command appears that the operator did not initiate in that narrow sense; but,
+  per Queue state above, the Transfer line's **content** (which queue item it executed) was not
+  the one the operator selected — the operator's "start the run" action for LIVE-07 triggered the
+  queue's `startNext()`, which silently substituted a different, previously-aborted step.
+  `journalctl --user -u galago-tools --since "2026-10-15 12:03:22" --until "2026-10-15 12:12:33"`
+  shows no service-level tool restart in this narrower window (the 12:04:42 tool-server restart
+  predates it, per Date/time above); `systemctl --user show galago-tools -p MainPID` stayed
+  `836290` throughout.
+- Screenshots: none provided.
+- D-11 criteria: observed per D-12's pass conditions (one restart scenario):
+  - No control bar on the run page after the restart: **met** — operator: "run page shows no
+    control after the restart, i was in the run recovery page".
+  - Run Recovery enabled on the F.A.S.T tool page: **met** — the operator used it to send Resume.
+  - The tool-page Resume answered SUCCESS on acceptance: **met** — "Running command Resume" at
+    12:08:56 WIB, followed immediately by the run continuing ("fast run progress 5% (running)" at
+    12:08:57 WIB); no separate `ExecuteCommand Response` text line for Resume itself (consistent
+    with the production adapter's logging behavior for control commands recorded elsewhere in this
+    file).
+  - The instrument run completed: **met** — `fast run progress 100% (idle)` and `ExecuteCommand
+    Response: response: SUCCESS` at 12:10:11 WIB.
+  - The original Transfer's response appeared after the restart (its wait ended, the motion lock
+    cleared): **met, but for the wrong step** — a Transfer's wait did end and the motion lock did
+    clear exactly as D-12 predicts; the Transfer that ended was `queueId 115` (LIVE-06b's aborted
+    step), not LIVE-07's `queueId 117`.
+  - The tool was READY and a following `get_status` ran SUCCESS: **met** — `Running command
+    GetStatus` and `ExecuteCommand Response: response: SUCCESS` at 12:10:33 WIB; `fast_status.py`
+    read READY/idle.
+  - No Transfer was dispatched after the restart: **met literally** — only one "Running command
+    Transfer" line exists in the whole window, and it is before the 12:07:27 WIB restart; no
+    second Transfer line appears anywhere afterward. This is the exact check A-EDGE-LIVE-07 called
+    for, and it passes — but it does not catch this failure mode, because the wrong step was
+    dispatched **before** the restart, when the run was started, not after it.
+  - No control command the operator did not send: **not met as intended** — every log line traces
+    to an operator-initiated action, but the Transfer that executed was not the one the operator
+    selected to run; the queue silently substituted a different run's previously-aborted step for
+    the one the operator started. The letter of this criterion (no extraneous log line) holds; its
+    purpose (the operator controls what the instrument does) does not.
+- Result: FAIL
+  - D-12's restart-and-recovery mechanics themselves held completely: the orphaned Transfer
+    survived the `docker restart galago-web`, the run page correctly showed no control bar, the
+    F.A.S.T tool page's Run Recovery card worked, Resume was accepted and the instrument finished,
+    and a following `get_status` ran SUCCESS with the tool READY. The scenario FAILs because the
+    queue executed an unintended, previously operator-aborted step (galago-core queue re-run
+    defect, `controller/server/utils/SqliteQueue.ts` `fail()`/`startNext()`, detailed under Queue
+    state above) instead of LIVE-07's own transfer — real motion the operator did not intend and
+    could not see coming, which the physical evidence (deck 3's plate: water in column 3 vs
+    column 4) has not yet confirmed or refuted. Per D-14 this attempt stops here; the operator
+    makes the instrument safe (already done — queue cleared, OFFLINE), the galago-core fix
+    proceeds, and LIVE-07 is rerun on the fixed `galago-web` build along with a LIVE-06b follow-up
+    check (see the note added under `## LIVE-06b`'s Result below). LIVE-07 is not complete;
+    requirement LIVE-07 stays open.
 
 ## Safety invariant audit
 
@@ -737,6 +908,14 @@ phase (03-03 to 03-08) fill the remaining sections.
   section 8, not re-verified by probe); plan 03-07 checks for any new `Transfer` command after
   the restart and stops if one appears. Plan 03-03's dry run also exercises these UI paths
   without hardware.
+- **Queue re-run defect found by LIVE-07 attempt 1 (2026-10-15, D-14, not an edge-probe item):**
+  `galago-web`'s `startNext()` (`controller/server/utils/SqliteQueue.ts`, lines 112-145) dispatches
+  the first `_queue` row by position regardless of status, and `fail()` (line 493) never removes a
+  FAILED row from that table, so an operator-aborted row re-runs the next time the queue starts
+  instead of the newly queued step. Found live during LIVE-07 attempt 1 — see `## LIVE-07`'s Queue
+  state bullet for the root cause and the note added under `## LIVE-06b`'s Result. Fix: galago-core
+  (in progress, operator-reported); rerun required once the fix lands: LIVE-07, plus a LIVE-06b
+  follow-up check (after an abort, starting a new run must not re-run the aborted step).
 - **Edge-probe fallback accounting for the phase:** 4 items surfaced (A-EDGE-LIVE-04 to 07), 0
   authored into truths as resolved edges, all 4 carried as flagged assumptions here, each with
   the plan that handles it.

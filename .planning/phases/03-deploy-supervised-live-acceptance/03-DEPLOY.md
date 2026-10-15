@@ -530,6 +530,30 @@ also later than the step 2 check and does not break the order).
   `2026-10-15 11:41:02 ... fast server started`). From 03-07 on, compare against these values
   (not the earlier `4044033`/`727894`/`1791974367` baseline) to detect an unexpected restart.
 
+### LIVE-07 attempt 1: tool-server restart and queue-defect redeploy note (2026-10-15)
+
+- At 12:04:42 WIB the F.A.S.T. tool server restarted again with no `galago-tools` service restart
+  (MainPID stayed `836290`); the F.A.S.T. listener PID went `836333` -> `867162`, most likely
+  another `:8081` manager-page action (same pattern as the 2026-10-15 09:59:58-10:16:36 WIB
+  restart noted above). This overwrote `F.A.S.T.log` in place; the operator reconnected F.A.S.T.
+  at 12:04:50 WIB. Both happened before LIVE-07 attempt 1 started.
+- **New no-restart baseline for the LIVE-07 rerun**: `galago-tools` MainPID `836290` (unchanged),
+  F.A.S.T. listener PID `867162`, trace-log folder `1792039261` still current (the folder is
+  unchanged; only the log file inside it was overwritten). Re-check this listener PID (not
+  `836333`) at the start of the rerun to detect any further unexpected tool-server restart.
+- LIVE-07 attempt 1 (`03-ACCEPTANCE.md` `## LIVE-07`) FAILed: D-12's restart/recovery mechanics
+  held completely, but `galago-web`'s queue (`controller/server/utils/SqliteQueue.ts`
+  `startNext()`) re-ran a previously operator-aborted LIVE-06b step instead of dispatching
+  LIVE-07's own transfer. This is a galago-core queue defect, not an adapter or deploy-order
+  fault; no change to this repo's deployed code is implicated.
+- **D-14 route**: once galago-core lands the queue fix (`startNext()` must skip or remove FAILED
+  rows instead of re-running them), `galago-web` needs a rebuild following this runbook's safe
+  order (D-05) — core and `galago-tools` are unaffected, so only the `galago-web` rebuild step
+  applies, the same shape as the LIVE-05 and LIVE-06b D-14 redeploys above. After the rebuild:
+  rerun LIVE-07, and also rerun the LIVE-06b follow-up check (after an abort, starting a new run
+  must not re-run the aborted step) per the note added under `03-ACCEPTANCE.md`'s `## LIVE-06b`
+  Result.
+
 ## Logs to watch (D-08)
 
 - Manager/journal lines (does NOT carry tool command lines — verified 2026-10-14):
