@@ -19,7 +19,7 @@ Companion milestone: galago-core "Live Run Control: queue & run page".
 - [x] **Phase 2: Wait Through Pauses on the Pinned Core** - Re-pin to the wait-through-pauses core (completed 2026-10-13)
   and keep `Transfer`/`RunProtocol` steps open through pauses, with paused time excluded from the
   timeout.
-- [ ] **Phase 3: Deploy & Supervised Live Acceptance** - Deploy in the safe order once galago-core's
+- [x] **Phase 3: Deploy & Supervised Live Acceptance** - Deploy in the safe order once galago-core's (completed 2026-10-15)
   milestone is done, then prove the deck-3, pause/resume, pause/abort and restart-mid-run scenarios
   on the instrument.
 
@@ -114,7 +114,7 @@ present.
   3. Pause → Resume ends SUCCESS; Pause → Abort ends "aborted by operator" with the queue FAILED.
   4. After restarting `galago-web` mid-run, the operator recovers through the tool page.
 
-**Plans**: 8/8 plans executed (sequential waves 1-8; plans 03-01 to 03-07 have blocking-human checkpoints; the
+**Plans**: 8/8 plans complete (sequential waves 1-8; plans 03-01 to 03-07 have blocking-human checkpoints; the
 instrument and services are shared, so nothing runs in parallel)
 
 Plans:
