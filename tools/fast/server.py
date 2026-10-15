@@ -307,6 +307,17 @@ def _outcome_text(outcome: object) -> str:
     return _NO_ERROR_TEXT
 
 
+def _is_no_error(outcome: object) -> bool:
+    """True when the outcome carries no real error: every field empty, or the
+    instrument's own NoError / errorCode 0 report with no message (how the
+    live instrument reports an operator abort)."""
+    error_name = getattr(outcome, "error_name", None)
+    error_code = getattr(outcome, "error_code", None)
+    message = getattr(outcome, "message", None)
+    return (error_code in (None, 0) and error_name in (None, "NoError")
+            and not message)
+
+
 def _message_for(
         result: RunResult, expected_tray_id: Optional[int],
         operator_abort: bool = False) -> str:
@@ -348,7 +359,7 @@ def _message_for(
         outcome_text = _outcome_text(result.outcome)
         if operator_abort:
             text = f"run aborted by operator at {result.percent}%"
-            if outcome_text != _NO_ERROR_TEXT:
+            if not _is_no_error(result.outcome):
                 text += f": {outcome_text}"
         else:
             text = f"run aborted at {result.percent}%: {outcome_text}"
