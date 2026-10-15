@@ -30,7 +30,7 @@ requirement below names the original ID(s) it carries.
 - [x] **LIVE-03**: Time spent paused doesn't count toward the run timeout — *PAUSE-04*
 - [x] **LIVE-04**: Deployed in the safe order: core into the service `.venv`, restart `galago-tools`, rebuild `galago-web` (galago-core milestone done) — *ROLL-02*
 - [x] **LIVE-05**: Supervised live: deck 3 empty → pause prompt shows "Deck 3: expected plate 1, found none" → fix the deck → Resume (tip intact) → the same step ends SUCCESS — *ROLL-03*
-- [ ] **LIVE-06**: Supervised live: Pause → Resume → SUCCESS; Pause → Abort (return liquid yes/no) → "aborted by operator", queue FAILED — *ROLL-04*
+- [x] **LIVE-06**: Supervised live: Pause → Resume → SUCCESS; Pause → Abort (return liquid yes/no) → "aborted by operator", queue FAILED — *ROLL-04*
 - [ ] **LIVE-07**: Supervised live: restart `galago-web` while a step runs, then recover through the tool page's Resume or Abort — *ROLL-05*
 
 ## Future Requirements
@@ -67,7 +67,7 @@ requirement below names the original ID(s) it carries.
 | LIVE-03 | Phase 2 | Complete |
 | LIVE-04 | Phase 3 | Complete |
 | LIVE-05 | Phase 3 | Complete |
-| LIVE-06 | Phase 3 | Pending |
+| LIVE-06 | Phase 3 | Complete |
 | LIVE-07 | Phase 3 | Pending |
 
 **Coverage:**
