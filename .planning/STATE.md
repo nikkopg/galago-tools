@@ -4,18 +4,18 @@ milestone: v1
 milestone_name: F.A.S.T. Live Run Control (adapter & rollout)
 current_phase: 3
 current_phase_name: Deploy & Supervised Live Acceptance
-current_plan: 3
+current_plan: 4
 status: executing
-stopped_at: Completed 03-02-PLAN.md
-last_updated: "2026-10-14T13:16:17.045Z"
+stopped_at: Completed 03-03-PLAN.md
+last_updated: "2026-10-15T02:23:13.365Z"
 last_activity: 2026-10-14
 last_activity_desc: Phase 02 complete, transitioned to Phase 3
-state_head: 05f8a4e8258cb03dc7fa33a4534a40553337bffb
+state_head: dec64bbde7fcbe7d5ea969f8f13610d16e8f31ef
 progress:
   total_phases: 3
   completed_phases: 1
   total_plans: 17
-  completed_plans: 11
+  completed_plans: 12
   percent: 33
 ---
 
@@ -32,7 +32,7 @@ is doing and recover it themselves; no adapter code path pauses, resumes or abor
 ## Current Position
 
 Phase: 3 (Deploy & Supervised Live Acceptance) — EXECUTING
-Current Plan: 3
+Current Plan: 4
 Total Plans in Phase: 8
 Status: Plan 01 complete
 Last activity: 2026-10-14 — Plan 03-01 complete (entry gate, pre-deploy record, go-ahead, deploy steps 1-2)
@@ -73,6 +73,7 @@ Progress: [███░░░░░░░] 33%
 | Phase 02-wait-through-pauses-on-the-pinned-core P04 | 15min | 2 tasks | 1 files |
 | Phase 03 P01 | 33min | 3 tasks | 2 files |
 | Phase 03 P02 | ~2h24min | 2 tasks | 2 files |
+| Phase 03 P03-03 | ~13h elapsed (active ~40min) | 3 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -109,6 +110,9 @@ Recent decisions affecting current work:
 - [Phase 03]: Recorded the Task 2 user go-ahead (D-03) directly in 03-DEPLOY.md's new Go-ahead section, keeping the full deploy audit trail in one runbook document
 - [Phase 03]: User decision: 'No cache rebuild' after the cached docker compose up -d --build produced a byte-identical galago-web image ID; forced docker compose build --no-cache galago-web + up -d to genuinely satisfy the new-image-ID must-have
 - [Phase 03]: rollback-pre-live04 left un-retagged per user instruction; caveat recorded in 03-DEPLOY.md that it shares content with the new deploy (same galago-core HEAD) and is not a true pre-milestone rollback anchor
+- [Phase 03]: Dry run (D-07) harness lives under scripts/ (not tools/), is committed and kept (not deleted) so the dry run can be repeated after a future fix
+- [Phase 03]: Two unexplained operator-initiated commands at 09:11 (extra pause + abort) recorded honestly as a note in 03-ACCEPTANCE.md rather than attributed to any scripted step
+- [Phase 03]: Dry run (D-07) Result: PASS recorded only after independently re-deriving the command sequence from the harness log and the production F.A.S.T.log window, not solely from the operator's summary
 
 ### Pending Todos
 
@@ -133,6 +137,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-14T13:16:17.000Z
-Stopped at: Completed 03-02-PLAN.md
+Last session: 2026-10-15T02:23:13.320Z
+Stopped at: Completed 03-03-PLAN.md
 Resume file: None
