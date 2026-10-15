@@ -2,150 +2,18 @@
 
 ## Milestones
 
-- 🚧 **v1 F.A.S.T. Live Run Control (adapter & rollout)** — Phases 1-3 (in progress)
+- ✅ **v1 Live Run Control** — Phases 1-3 (shipped 2026-10-16) — [archive](milestones/v1-ROADMAP.md)
 
 ## Phases
 
-### 🚧 v1 F.A.S.T. Live Run Control (In Progress)
+<details>
+<summary>✅ v1 Live Run Control (Phases 1-3) — SHIPPED 2026-10-16</summary>
 
-**Milestone Goal:** Pause, Resume and Abort reach a F.A.S.T. run while its Galago step is still in
-flight, the adapter reports live run state, a running step stays open through an instrument pause,
-and the stack is proven live. Governing design: `docs/specs/2026-10-12-galago-live-run-control-design.md`.
-Companion milestone: galago-core "Live Run Control: queue & run page".
+- [x] Phase 1: Adapter Control Path & Run State (5/5 plans) — completed 2026-10-13
+- [x] Phase 2: Wait Through Pauses on the Pinned Core (5/5 plans) — completed 2026-10-15
+- [x] Phase 3: Deploy & Supervised Live Acceptance (8/8 plans) — completed 2026-10-15
 
-- [x] **Phase 1: Adapter Control Path & Run State** - Control commands reach an in-flight run (completed 2026-10-13)
-  without touching the tool's status, `run_state` is reported, and the safety invariants and tests
-  are extended, all proven against a mocked `FastService`.
-- [x] **Phase 2: Wait Through Pauses on the Pinned Core** - Re-pin to the wait-through-pauses core (completed 2026-10-13)
-  and keep `Transfer`/`RunProtocol` steps open through pauses, with paused time excluded from the
-  timeout.
-- [x] **Phase 3: Deploy & Supervised Live Acceptance** - Deploy in the safe order once galago-core's (completed 2026-10-15)
-  milestone is done, then prove the deck-3, pause/resume, pause/abort and restart-mid-run scenarios
-  on the instrument.
-
-## Phase Details
-
-### Phase 1: Adapter Control Path & Run State
-
-**Goal**: An operator's Pause, Resume or Abort reaches the instrument while the step's Transfer is
-still running, the tool reports live run state for galago-core to poll, and tests prove no code path
-acts without the operator.
-**Depends on**: Nothing in this milestone (builds on the shipped adapter; uses a mocked `FastService`)
-**Requirements**: ADP-01, ADP-02, ADP-03, ADP-04, ADP-05, ADP-06, ADP-07, ADP-08, ADP-09, ADP-10
-**Success Criteria** (what must be TRUE):
-  1. A real-mode test sends Pause, Resume and Abort through `ExecuteCommand` while a `Transfer` is
-     blocked: each reaches the (mocked) service, and the tool's status is still BUSY afterwards;
-     `tools/base_server.py` is unchanged.
-  2. `GetStatus` returns `run_state` with state, percent and pause info for the F.A.S.T., and
-     other tool types return it unset; the proto change regenerates cleanly for Python.
-  3. Blank or unclear decisions are `INVALID_ARGUMENTS` on every path, Pause is always soft, and
-     Resume returns on acceptance with a run in flight but waits when there is none.
-  4. The extended no-auto-abort invariant fails on a planted violation, and no instrument-state
-     check exists in the adapter.
-  5. In simulated mode, control commands return SUCCESS after argument checks and a test hook drives
-     `run_state` to paused.
-**Plans**: 5/5 plans complete (sequential waves 1-5; every plan edits `tools/fast/server.py` or `tools/tests/fast_test.py`)
-
-Plans:
-**Wave 1**
-- [x] 01-01-PLAN.md — Pause tracer over gRPC, failing real-mode concurrency test (expected failure first), `ExecuteCommand` override, lock-free Pause/Abort, two-path Resume (ADP-01/02/03/08)
-
-**Wave 2** *(blocked on Wave 1 completion)*
-- [x] 01-02-PLAN.md — Resume's two paths, Pause mapping, fail-closed decisions, tool-type check, DRIVER_ERROR, no state checks on the control path (ADP-04/06/09)
-
-**Wave 3** *(blocked on Wave 2 completion)*
-- [x] 01-03-PLAN.md — `StatusReply.run_state = 4`, run record, pause recorder, fail-safe health `GetStatus` (ADP-05)
-
-**Wave 4** *(blocked on Wave 3 completion)*
-- [x] 01-04-PLAN.md — reusable AST invariant: scoped pause/resume/abort/wait, record-only callbacks, status-only reader, planted violations (ADP-07/09)
-
-**Wave 5** *(blocked on Wave 4 completion)*
-- [x] 01-05-PLAN.md — simulated control commands, simulated run_state, `simulate_pause` hook (ADP-10, ADP-06 simulated)
-
-**Research flags**: build the failing real-mode test before the `ExecuteCommand` override
-(research/SUMMARY.md, ARCHITECTURE.md); the override must keep the tool-type check and
-`_check_args` for control commands and leave every other command on the `base_server` path.
-
-### Phase 2: Wait Through Pauses on the Pinned Core
-
-**Goal**: A F.A.S.T. step stays open through any pause on the real core and ends with the run's real
-outcome.
-**Depends on**: Phase 1
-**Requirements**: LIVE-01, LIVE-02, LIVE-03
-**Success Criteria** (what must be TRUE):
-  1. `tools/fast/requirements.txt` pins fast-mcp `b30b38d` or later, and the gate's pin test passes
-     against that install.
-  2. With the real core (stub transport), a paused run keeps the `Transfer` step open, `run_state`
-     shows the pause, and the step ends SUCCESS after a resume.
-  3. An operator abort ends the step "run aborted by operator at <p>%"; a timeout still never aborts.
-  4. Paused time doesn't count toward the run timeout.
-
-**Plans**: 5/5 plans complete (sequential waves 1-4 plus gap-closure plan 02-05; every plan edits `tools/tests/fast_test.py`)
-
-Plans:
-**Wave 1**
-- [x] 02-01-PLAN.md — tracer: re-pin to b30b38d (gate venv from the local clone), a paused Transfer stays open on the real core and ends SUCCESS after Resume; RunProtocol wiring, operator and instrument pauses (LIVE-01/02)
-
-**Wave 2** *(blocked on Wave 1 completion)*
-- [x] 02-02-PLAN.md — the gate rejects a core without wait-through-pauses or state gates; PauseInfo docstrings (LIVE-01)
-
-**Wave 3** *(blocked on Wave 2 completion)*
-- [x] 02-03-PLAN.md — "run aborted by operator at <p>%" only for the adapter's own accepted Abort; real-core abort tests over gRPC (LIVE-02)
-
-**Wave 4** *(blocked on Wave 3 completion)*
-- [x] 02-04-PLAN.md — paused time excluded from the timeout on an injected clock; a timeout never aborts; threshold and granularity pinned (LIVE-03)
-
-**Gap closure** *(02-VERIFICATION.md CR-01; independent of later waves, all of which are complete)*
-- [x] 02-05-PLAN.md — crash-recovery Resume waits only after `_accepted()`; real-core regression tests for a `{"errorCode": False}` or errorCode-less resume reply and the int-0 acceptance boundary (LIVE-02)
-
-**Note**: a clean install of the new pin needs fast-mcp's `fix/run-recovery-gate` pushed to GitLab;
-until then install from the local clone at the pinned SHA.
-**Research flag**: pace real-core threaded tests through an injected `sleep` stepper, never an
-Event-gated `get_status` (it deadlocks against the core's `ResumeMarker` lock; 02-RESEARCH.md Pattern 3).
-
-### Phase 3: Deploy & Supervised Live Acceptance
-
-**Goal**: The live-control stack runs on forb01 and is proven on the instrument with an operator
-present.
-**Depends on**: Phase 2, and galago-core's "Live Run Control: queue & run page" milestone
-**Requirements**: LIVE-04, LIVE-05, LIVE-06, LIVE-07
-**Success Criteria** (what must be TRUE):
-  1. Deployment followed the safe order (core into `.venv` → restart `galago-tools` → rebuild
-     `galago-web`), with no window where the new UI ran against an ungated core.
-  2. Deck-3 scenario: the prompt names the deck and plate, the operator fixes the deck and resumes,
-     and the same step ends SUCCESS.
-  3. Pause → Resume ends SUCCESS; Pause → Abort ends "aborted by operator" with the queue FAILED.
-  4. After restarting `galago-web` mid-run, the operator recovers through the tool page.
-
-**Plans**: 8/8 plans complete (sequential waves 1-8; plans 03-01 to 03-07 have blocking-human checkpoints; the
-instrument and services are shared, so nothing runs in parallel)
-
-Plans:
-**Wave 1**
-- [x] 03-01-PLAN.md — D-01 entry gate re-checked at execution (NOT met on 2026-10-14), pre-deploy record, runbook with rollback (`03-DEPLOY.md`), `scripts/fast_status.py`, the user's deploy go-ahead, tracer: core b30b38d into the service `.venv`, then `galago-tools` restarted (LIVE-04)
-
-**Wave 2** *(blocked on Wave 1 completion)*
-- [x] 03-02-PLAN.md — operator reconnects the F.A.S.T. tool (run_state from the gated core), `galago-web` rebuilt with a rollback tag, `03-ACCEPTANCE.md` opened with LIVE-04 (LIVE-04)
-
-**Wave 3** *(blocked on Wave 2 completion)*
-- [x] 03-03-PLAN.md — simulated dry run (D-07): `scripts/fast_dryrun.py` harness on :40003 driving `simulate_pause`, operator walks the run page and tool page, teardown (LIVE-05/06/07)
-
-**Wave 4** *(blocked on Wave 3 completion)*
-- [x] 03-04-PLAN.md — live LIVE-06a: Pause -> Resume -> SUCCESS, operator-driven (LIVE-06)
-
-**Wave 5** *(blocked on Wave 4 completion)*
-- [x] 03-05-PLAN.md — live LIVE-05: deck 3 empty -> prompt names deck and plate -> fix -> Resume -> same step SUCCESS (LIVE-05)
-
-**Wave 6** *(blocked on Wave 5 completion)*
-- [x] 03-06-PLAN.md — live LIVE-06b: Pause -> Abort -> "run aborted by operator at <p>%", queue FAILED, no later step (LIVE-06)
-
-**Wave 7** *(blocked on Wave 6 completion)*
-- [x] 03-07-PLAN.md — live LIVE-07: pause, restart `galago-web` on the operator's go-restart, recover from the tool page (LIVE-07)
-
-**Wave 8** *(blocked on Wave 7 completion)*
-- [x] 03-08-PLAN.md — LIVE-07 record, safety-invariant audit of every control command since the deploy, post-acceptance gate, D-13 completeness (LIVE-04..07)
-
-**Safety**: every motion step needs the operator's explicit go-ahead, e-stop within reach.
+</details>
 
 ## Backlog
 

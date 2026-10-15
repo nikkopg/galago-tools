@@ -14,33 +14,33 @@ An operator running a F.A.S.T. step from Galago can always see what the instrume
 recover it themselves. No code path in the adapter pauses, resumes or aborts the instrument on its
 own, and the adapter never holds a copy of an instrument safety rule (the fast-mcp core owns them).
 
-## Current Milestone: v1 F.A.S.T. Live Run Control (adapter & rollout)
+## Current State
 
-**Goal:** Pause, Resume and Abort reach a F.A.S.T. run while its Galago step is still in flight, the
-adapter reports live run state to galago-core, a running step stays open through an instrument
-pause, and the whole stack is proven live on the instrument.
+**v1 Live Run Control shipped 2026-10-16** (3 phases, 18 plans; archive in
+`.planning/milestones/`). Operator Pause/Resume/Abort reach an in-flight F.A.S.T. step, the adapter
+reports live `run_state`, steps wait through pauses on the pinned core (`b30b38d`), and the stack
+is proven live on the instrument. forb01 runs `galago-tools` at HEAD (incl. the CR-01 fix), core
+`b30b38d` in the service `.venv`, and `galago-web` from galago-core's queue-fix build. Nothing is
+pushed yet.
 
-**Governing design:** `docs/specs/2026-10-12-galago-live-run-control-design.md` (decisions D1-D6 in
-§11; §5.1 carries the research correction about `base_server`'s BUSY gate).
+**Governing design:** `docs/specs/2026-10-12-galago-live-run-control-design.md`.
+**Companion:** galago-core `.planning/` — "Live Run Control: queue & run page".
 
-**Companion milestone:** galago-core `.planning/` — "Live Run Control: queue & run page". It
-consumes this repo's `run_state` proto (via its `vendor/galago-tools` submodule) and the control
-commands. This repo's final phase (live acceptance) needs both milestones done.
+## Next Milestone Goals
 
-**Target features:**
-- Soft-only `Pause`; `Pause`/`Resume`/`Abort` that bypass the motion lock and `base_server`'s
-  readiness gate through a `FastServer.ExecuteCommand` override, without touching `base_server.py`
-- `StatusReply.run_state` (additive `google.protobuf.Struct`) with state, percent and pause info
-- `Transfer`/`RunProtocol` waiting through pauses on the re-pinned core (paused time excluded from
-  the timeout)
-- Simulated-mode pause hook; extended no-auto-abort invariant; real-mode concurrency test
-- Safe-order deploy and supervised live acceptance
+Not yet defined — start with `/gsd-new-milestone`. Candidates carried out of v1:
+- Fix WR-02 (`_is_no_error`'s loose `in (None, 0)` check) with the strict `_accepted()`-style rule.
+- Code backstop: the adapter refuses `Configure` while a run is in flight (T-03-05/T-03-08 are
+  procedural today).
+- Hard pause once the F.A.S.T. team documents `hardPause` (D5).
+- Push fast-mcp `fix/run-recovery-gate` to GitLab and the `feat/fast-tool` branches to the
+  `nikkopg` forks (user's action).
 
 ## Requirements
 
 ### Validated
 
-<!-- Shipped on feat/fast-tool before this milestone. -->
+<!-- Pre-v1 items shipped on feat/fast-tool; v1 items tagged. -->
 
 - ✓ F.A.S.T. tool type registered (`fast.proto`, `controller.proto`, `tool_base.proto`); adapter
   obtains `FastService` only through `fast_mcp.composition.open_service` under the single-owner lock
@@ -56,23 +56,22 @@ commands. This repo's final phase (live acceptance) needs both milestones done.
 
 - ✓ ADP-01..ADP-10: adapter control path (soft-only Pause, lock-free/gate-bypassing `ExecuteCommand`
   override, two-path Resume, `StatusReply.run_state`, fail-closed decisions, extended no-auto-abort
-  invariant, real-mode concurrency test, simulated-mode control commands and pause hook) — Phase 1
+  invariant, real-mode concurrency test, simulated-mode control commands and pause hook) — v1
 - ✓ LIVE-01..LIVE-03: `Transfer`/`RunProtocol` wait through pauses on the re-pinned fast-mcp core
   (`b30b38d`), paused time excluded from the timeout — Phase 2 (re-verified after gap-closure
-  plan 02-05 fixed CR-01: crash-recovery `Resume` now gates its wait on `_accepted()`)
+  plan 02-05 fixed CR-01: crash-recovery `Resume` now gates its wait on `_accepted()`) — v1
 - ✓ LIVE-04: Deployed in the safe order (core → service `.venv` → `galago-tools` restart →
-  `galago-web` rebuild), no window with a new UI against an ungated core — Phase 3
+  `galago-web` rebuild), no window with a new UI against an ungated core — v1
 - ✓ LIVE-05: Supervised live deck-3-empty scenario — pause prompt names the deck/plate, operator
-  fixes the deck and resumes, the same step ends SUCCESS — Phase 3
+  fixes the deck and resumes, the same step ends SUCCESS — v1
 - ✓ LIVE-06: Supervised live Pause → Resume → SUCCESS, and Pause → Abort → "aborted by operator at
-  `<p>`%" with the queue FAILED — Phase 3
-- ✓ LIVE-07: Supervised live `galago-web` restart mid-run, operator recovers through the tool page —
-  Phase 3
+  `<p>`%" with the queue FAILED — v1
+- ✓ LIVE-07: Supervised live `galago-web` restart mid-run, operator recovers through the tool page — v1
 
 ### Active
 
-None — all v1 requirements (ADP-01..10, LIVE-01..07) are validated and proven live on the
-instrument. Full traceability: `.planning/REQUIREMENTS.md`.
+None yet — defined by the next milestone (see Next Milestone Goals). v1 traceability:
+`.planning/milestones/v1-REQUIREMENTS.md`.
 
 ### Out of Scope
 
@@ -88,6 +87,8 @@ instrument. Full traceability: `.planning/REQUIREMENTS.md`.
 
 ## Context
 
+- **Shipped v1** (2026-10-16): adapter + tests ~5,000 LOC Python across `tools/fast/server.py`,
+  `tools/tests/fast_test.py`, `scripts/fast_status.py`, `scripts/fast_dryrun.py`.
 - **Repos:** this fork (branch `feat/fast-tool`), galago-core (branch `feat/fast-tool`, its
   `vendor/galago-tools` submodule points at this fork), and fast-mcp (GitLab `nikkopg/fast-mcp`,
   the core; branch `fix/run-recovery-gate` holds `76f8c3f` and the quick task `b30b38d`, not yet
@@ -100,7 +101,7 @@ instrument. Full traceability: `.planning/REQUIREMENTS.md`.
   in its `finally` (`:254`). Control commands need a `FastServer.ExecuteCommand` override; the
   existing concurrency test only runs simulated, where `isReady()` is always true.
 - **Gate:** `bin/make proto test` on Python 3.10 (`~/data/nikko/.venvs/galago-py310`): ruff, mypy,
-  unittest, pytest. Last green: 70 tests (2026-10-09).
+  unittest, pytest. Last green: 147 tests (2026-10-16).
 - **Deployment rule:** install the core into `.venv` first, restart `galago-tools`, then rebuild
   `galago-web` — an older core has no state gate on abort/resume and the adapter adds none.
 - **Research:** `.planning/research/` (copied from the fast-mcp planning, 2026-10-12; cross-repo).
@@ -114,9 +115,10 @@ instrument. Full traceability: `.planning/REQUIREMENTS.md`.
   `F.A.S.T.log` in place, so any no-restart / log-coverage check must track the tool-server listener
   PID, not just the `galago-tools` service MainPID.
 - **Open debt carried forward (not milestone-blocking):**
-  - Code review disposition open: WR-01 (dry-run harness phantom-paused race, dev-only), WR-02
-    (`_is_no_error`'s `==` vs. the module's `type(code) is int` convention) plus 3 info items —
-    `.planning/phases/03-deploy-supervised-live-acceptance/03-REVIEW-DISPOSITION.md`.
+  - WR-02 (`_is_no_error`'s loose `in (None, 0)` check, medium, reporting only) — v2 debt; Phase 3
+    review WR-01 (dry-run harness race, dev-only) and info items stay open —
+    `.planning/milestones/v1-phases/03-deploy-supervised-live-acceptance/03-REVIEW-DISPOSITION.md`.
+  - Phase 1 review WR-02/WR-03 and info items (dev-only `scripts/fast_dryrun.py`) remain open.
   - galago-core observations (out of this repo's scope, not fixed here): run-page Gantt bar keeps
     drawing past an abort; "Connect all tools" sends empty configs to tools; "Item N not found" when
     the queue is cleared mid-abort; F.A.S.T. tool-page status can render stale after a reconnect.
@@ -146,6 +148,8 @@ instrument. Full traceability: `.planning/REQUIREMENTS.md`.
 | Deploy order: core → `galago-tools` → `galago-web` | An older core has no state gate on abort/resume and the adapter adds none; rebuilding the UI first risks a window where the new UI runs against an ungated core | Shipped — LIVE-04, Phase 3; four strictly increasing UTC timestamps recorded in `03-DEPLOY.md` |
 | D-14 FAIL→fix→rerun cycles handled by stop/fix/gate/redeploy/rerun, never silent pass | Live defects found on real hardware must be fixed and re-verified, not worked around in the evidence record | Found and fixed three real defects live: galago-core's `pausePrompt` rendered the no-plate sentinel as literal `"-1"`; this repo's adapter appended a spurious `": NoError (0)"` suffix to the operator-abort wording (fixed `201d987`); galago-core's queue re-ran operator-aborted or `galago-web`-restart-orphaned steps (fixed by galago-core quick tasks `261015-h0q` and `261015-o44`, each live-verified) |
 | galago-tools manager (`:8081`) can restart a tool server without a service restart | Operators may use the manager page directly, outside the deploy runbook | Overwrites `F.A.S.T.log` in place; any no-restart or log-coverage check must track the tool-server listener PID, not the `galago-tools` service MainPID (confirmed during Phase 3's Safety invariant audit) |
+| Re-verify stale phases before closing; redeploy CR-01 without a live rerun | Verification went stale after the 02-05 fix; logs showed LIVE-07 used the in-flight Resume path, which CR-01 did not touch | ✓ Good — forb01 at HEAD 2026-10-16, Phase 3 re-verified `passed` |
+| Claude may send `Configure` only on the user's explicit request with no run in flight | User asked Claude to reconnect after the 2026-10-16 redeploy; the operator-only rule had no code backstop | ⚠️ Revisit — logged exception (T-03-05/T-03-08); add an adapter-side mid-run `Configure` refusal |
 
 ## Evolution
 
@@ -165,4 +169,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-10-15 after Phase 2 gap closure (CR-01 fixed; milestone v1 complete — all 17 requirements validated)*
+*Last updated: 2026-10-16 after v1 milestone*
