@@ -9,7 +9,7 @@ findings:
     title: "`_is_no_error()` repeats the same loose-comparison pattern `_accepted()` was meant to retire (carried forward, still open)"
   - id: CR-01
     severity: critical
-    disposition: open
+    disposition: fixed
     title: "Resume()'s crash-recovery acceptance check still has the WR-01 bug the phase's own fix claims to have eliminated"
   - id: WR-03
     severity: warning
@@ -23,7 +23,7 @@ findings:
     severity: warning
     disposition: fixed
     title: "`errorCode == 0` boolean/int ambiguity now gates operator-abort attribution, not just the reply code"
-open: 4
+open: 3
 total: 5
 recorded: 2026-10-15T14:17:22.612Z
 ---
@@ -33,7 +33,7 @@ recorded: 2026-10-15T14:17:22.612Z
 | Finding | Severity | Disposition | Source |
 |---------|----------|-------------|--------|
 | WR-02 | warning | open | - |
-| CR-01 | critical | open | - (not in the current review) |
+| CR-01 | critical | fixed | plan 02-05 (134e097, 7c2e15a); confirmed fixed by 02-REVIEW.md re-review |
 | WR-03 | warning | open | - (not in the current review) |
 | IN-01 | info | open | - (not in the current review) |
 | WR-01 | warning | fixed | 02-REVIEW-FIX.md (not in the current review) |
