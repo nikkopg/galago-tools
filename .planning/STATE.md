@@ -3,20 +3,20 @@ gsd_state_version: "1.0"
 milestone: v1
 milestone_name: F.A.S.T. Live Run Control (adapter & rollout)
 current_phase: 02
-current_phase_name: wait-through-pauses-on-the-pinned-core
-current_plan: Not started
-status: completed
-stopped_at: Phase 03 complete — all phases complete
-last_updated: "2026-10-15T13:49:50.174Z"
+current_phase_name: Wait Through Pauses on the Pinned Core
+current_plan: 2
+status: executing
+stopped_at: Completed 02-05-PLAN.md (CR-01 gap-closure)
+last_updated: "2026-10-15T14:11:38.491Z"
 last_activity: 2026-10-15
-last_activity_desc: Phase 03 complete
-state_head: 5a908010aaefa85593ff7c533a6c9a4f1a0d8e36
+last_activity_desc: Phase 02 execution started
+state_head: 7c2e15a7e98cd614982b73ef93cbf8e0f22882bf
 progress:
   total_phases: 3
   completed_phases: 3
   total_plans: 18
-  completed_plans: 17
-  percent: 67
+  completed_plans: 18
+  percent: 100
 ---
 
 # Project State
@@ -27,18 +27,18 @@ See: .planning/PROJECT.md (updated 2026-10-15)
 
 **Core value:** An operator running a F.A.S.T. step from Galago can always see what the instrument
 is doing and recover it themselves; no adapter code path pauses, resumes or aborts on its own.
-**Current focus:** Milestone v1 complete — all 3 phases done; next is milestone close
+**Current focus:** Phase 02 — Wait Through Pauses on the Pinned Core
 (`/gsd-complete-milestone`)
 
 ## Current Position
 
-Phase: 02 (wait-through-pauses-on-the-pinned-core) — READY TO EXECUTE
-Current Plan: Not started
+Phase: 02 (Wait Through Pauses on the Pinned Core) — EXECUTING
+Current Plan: 2
 Total Plans in Phase: 5
-Status: All phases complete
-Last activity: 2026-10-15 — Phase 03 complete
+Status: Ready to execute
+Last activity: 2026-10-15 — Phase 02 execution started
 
-Progress: [████████████████████] 17/17 plans ([███████░░░] 67%)
+Progress: [████████████████████] 17/17 plans ([██████████] 100%)
 
 ## Performance Metrics
 
@@ -81,6 +81,7 @@ Progress: [████████████████████] 17/17 p
 | Phase 03 P06 | ~35min (Task 3) | 3 tasks | 7 files |
 | Phase 03 P07 | ~40min | 3 tasks | 2 files |
 | Phase 03 P08 | ~25min | 2 tasks | 1 files |
+| Phase 02 P05 | 25min | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -137,6 +138,8 @@ Recent decisions affecting current work:
 - [Phase 03 - Transition]: Milestone v1 complete — all 17 requirements (ADP-01..10, LIVE-01..07) moved to PROJECT.md's Validated section; "Active" requirements now empty.
 - [Phase 03 - Transition]: Logged the deploy-order, D-14 FAIL->fix->rerun defect cycle, and the `galago-tools` manager (`:8081`)-restart-overwrites-F.A.S.T.log caveat as new rows in PROJECT.md's Key Decisions table for future milestones/repos to reference.
 - [Phase 03 - Transition]: Open code-review disposition (WR-01, WR-02, 3 info items) and galago-core's queue/UI observations (Gantt bar past abort, "Connect all tools" empty configs, "Item N not found", tool-page staleness) carried forward as open debt in PROJECT.md's Context — not milestone-blocking.
+- [Phase 02]: CR-01 fixed: Resume's crash-recovery acceptance check routed through _accepted(); separate Refused check dropped per review's suggested fix
+- [Phase 02]: WR-02 (_is_no_error loose comparison) intentionally excluded from this gap-closure plan; remains tracked open in Phase 3's review disposition
 
 ### Pending Todos
 
@@ -166,7 +169,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-15
-Stopped at: Phase 03 complete, milestone v1 complete (3/3 phases, 17/17 plans) — ready for
+Last session: 2026-10-15T14:11:38.439Z
+Stopped at: Completed 02-05-PLAN.md (CR-01 gap-closure)
 `/gsd-complete-milestone`
 Resume file: None
