@@ -3060,6 +3060,34 @@ class TestRecoveryCommands(unittest.TestCase):
         reply, wait_spy = self._resume_with_reply({})
         self._assert_rejected_without_waiting(reply, wait_spy, None)
 
+    def test_crash_recovery_resume_waits_only_for_an_int_zero_error_code(self) -> None:
+        """The acceptance predicate on Resume's crash-recovery path is
+        exactly _accepted()'s, so only the literal int 0 starts the wait.
+        The cases are one step either side of int 0: a bool, a float, a
+        string, None, a missing key and a real nonzero code. The int-0
+        control proves the spy and the script are live, so the rejection
+        cases cannot pass vacuously."""
+        for body in (
+            {"errorCode": False},
+            {},
+            {"errorCode": 0.0},
+            {"errorCode": "0"},
+            {"errorCode": True},
+            {"errorCode": None},
+            {"errorCode": -2},
+        ):
+            with self.subTest(body=body):
+                reply, wait_spy = self._resume_with_reply(body)
+                self._assert_rejected_without_waiting(reply, wait_spy, body.get("errorCode"))
+
+        with self.subTest(body={"errorCode": 0}):
+            reply, wait_spy = self._resume_with_reply({"errorCode": 0})
+            self.assertEqual(reply.response, SUCCESS, reply.error_message)
+            self.assertEqual(MessageToDict(reply.meta_data)["kind"], "ran")
+            self.assertEqual(wait_spy.call_count, 1)
+            self.assertEqual(self.transport.get_status.call_count, 3)
+            self.assertFalse(self.server._motion_lock.locked())
+
     def test_missing_or_unclear_decision_is_invalid_arguments_in_real_mode(self) -> None:
         self.server.simulated = False
         cases = [
