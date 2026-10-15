@@ -80,7 +80,7 @@ outcome.
   3. An operator abort ends the step "run aborted by operator at <p>%"; a timeout still never aborts.
   4. Paused time doesn't count toward the run timeout.
 
-**Plans**: 5/5 plans executed (sequential waves 1-4 plus gap-closure plan 02-05; every plan edits `tools/tests/fast_test.py`)
+**Plans**: 5/5 plans complete (sequential waves 1-4 plus gap-closure plan 02-05; every plan edits `tools/tests/fast_test.py`)
 
 Plans:
 **Wave 1**
