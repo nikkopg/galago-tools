@@ -429,6 +429,22 @@ also later than the step 2 check and does not break the order).
 - Rollback (D-06): `rollback-pre-live04` (`9ad9c64`, from `d95c2e1`) is still the recorded
   anchor. Rolling back to it would also undo the WR fixes.
 
+### Tool-server restart without a service restart (2026-10-15)
+
+- The `galago-tools` manager stopped the tool servers at 09:59:58 WIB and started them again
+  at 10:16:36 WIB. The `:8081` manager page did this (requests from `10.150.1.89`), not
+  systemd. MainPID `4044033` did not change.
+  - New PIDs: F.A.S.T. `727894`, Pf400 `727872`.
+  - F.A.S.T. was reconnected at 10:16:52 WIB in real mode with the pre-deploy
+    host/port/tray.
+  - The servers run the same editable-install code and core `b30b38d`.
+- **The MainPID check cannot detect a tool-server restart.** From 03-05 on, every no-restart
+  check also compares the PID listening on `:40001` with `ss -ltnp` (baseline `727894`). It
+  also checks that line 2 of `F.A.S.T.log` (the `fast server started` line, currently
+  `2026-10-15 10:16:36`) has not changed.
+- A tool-server restart **overwrites `F.A.S.T.log` in place**. Read the production log evidence
+  for a scenario before anything restarts.
+
 ## Logs to watch (D-08)
 
 - Manager/journal lines (does NOT carry tool command lines — verified 2026-10-14):

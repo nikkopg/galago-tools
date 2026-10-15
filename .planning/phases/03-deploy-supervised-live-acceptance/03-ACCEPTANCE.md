@@ -247,6 +247,19 @@ phase (03-03 to 03-08) fill the remaining sections.
   --since "2026-10-15 10:17:40" --until "2026-10-15 10:26:33"` shows no entries (no tool restart).
   `systemctl --user show galago-tools -p MainPID` -> `4044033`, unchanged from the post-deploy
   value throughout.
+  - Correction (orchestrator, after the record was written): MainPID shows only the manager
+    process. The tool servers did restart shortly **before** this window, without a service
+    restart. The journal shows the manager stopping F.A.S.T. and Tool Box at 09:59:58 WIB
+    (requests from `10.150.1.89`, i.e. the `:8081` manager page) and starting Pf400, F.A.S.T. and
+    Tool Box again at 10:16:36 WIB. The new F.A.S.T. server PID is `727894` and the new Pf400
+    PID is `727872`, both children of `4044033`. The operator then reconnected F.A.S.T. at
+    10:16:52 WIB (`Received configuration` with host `10.150.1.170`, port 5003,
+    `expected_tray_id` 90, no `simulated`).
+  - That reconnect was 2 min 46 s before the run started (10:19:38). It ran the same deployed
+    code (editable install of this tree, core `b30b38d`), so this result stands.
+  - The restart also overwrote `F.A.S.T.log` in place. Production-log lines from before
+    10:16:36 (the dry-run window, the 02-UAT runs) now survive only in the records already
+    written.
 - Screenshots: none provided.
 - D-11 criteria:
   - PAUSED with a percent after Pause: `fast_status.py --port 40001` polled at 10:22:35 WIB during
