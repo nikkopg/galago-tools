@@ -10,7 +10,7 @@ phase (03-03 to 03-08) fill the remaining sections.
 |---|---|---|---|
 | LIVE-04 | LIVE-04 Deploy (core → galago-tools → galago-web, safe order) | PASS | `03-DEPLOY.md` Deploy evidence table (Steps 1, 2, 2b reconnect, Step 3 cached + no-cache); `## LIVE-04 Deploy` below |
 | — | Dry run (D-07) | PASS | `## Dry run (D-07)` below |
-| LIVE-06 | LIVE-06a: Pause → Resume → SUCCESS | not run | — |
+| LIVE-06 | LIVE-06a: Pause → Resume → SUCCESS | PASS | `## LIVE-06a: Pause -> Resume -> SUCCESS` below |
 | LIVE-05 | LIVE-05: Deck 3 empty → prompt → fix deck → Resume → SUCCESS | not run | — |
 | LIVE-06 | LIVE-06b: Pause → Abort → aborted by operator, queue FAILED | not run | — |
 | LIVE-07 | LIVE-07: galago-web restart mid-run → tool-page recovery | not run | — |
@@ -176,7 +176,111 @@ phase (03-03 to 03-08) fill the remaining sections.
 
 ## LIVE-06a: Pause -> Resume -> SUCCESS
 
-(Not run — plan 03-04 fills this section.)
+- Date/time: run window 2026-10-15T03:19:38Z-03:24:34Z UTC (2026-10-15 10:19:38-10:24:34 WIB).
+  Within it: F.A.S.T transfer started 03:19:40.785Z (10:19:40 WIB); operator Pause sent
+  03:20:15Z (10:20:15 WIB), state paused at 22% 03:20:17Z (10:20:17 WIB); operator Resume sent
+  03:23:30Z (10:23:30 WIB), state running again 03:23:32Z (10:23:32 WIB); Transfer ended SUCCESS
+  03:24:32.471Z (10:24:32 WIB).
+- Operator: the user, at the instrument with the e-stop within reach, created the run, started it,
+  pressed Pause once the head was moving, and Resumed with Tip broken? no. Operator replies:
+  Task 1 "paused at 22% (start 10.19.38, pause 10.20.17, parameters as used, checklist confirmed)";
+  Task 2 "done: resumed at 10.23.33 (tip broken started unselected: no)", later clarified: (1) the
+  Tip broken? choice was blank/unselected with Confirm disabled, no was chosen; (2) no success
+  popup appeared on the run page — the result showed as the step/queue status, not a popup; (3) a
+  `tool_paused` prompt appeared during the pause showing the paused time with Resume/Abort options.
+  Claude sent no command; Claude read `fast_status.py`, the F.A.S.T.log, the Pf400 log, the journal,
+  and `galago-web`'s run/queue records (read-only `GET`/tRPC query calls only, no write).
+- Transfer parameters: as used, F.A.S.T transfer source_deck 1, dest_deck 3, source_plate_id 1,
+  dest_plate_id 1, A1 to A1, num_rows 1, num_cols 1, volume 50, tip_reuse fresh, expected_tray_id
+  blank (0, Config value applies).
+  - **Deviation flagged for review:** the operator ran protocol **"test"**, not the planned
+    single-transfer "LIVE-06a" protocol, and used **num_rows 1** (plan proposed 8). Protocol
+    "test" wraps the F.A.S.T transfer in two simulated Pf400 moves (location 100 before, location
+    12 after) — Pf400 is the established simulated baseline, so these add no new motion risk. The
+    operator's reply "parameters as used" did not list these; they were reconstructed read-only
+    from `galago-web`'s run record (`run.id 154129ecbe01e7000`, `protocolName "test"`) rather than
+    read as a literal operator statement of parameters. The plan permits reported value changes
+    (D-10); this record flags the substitution so the user can object. The LIVE-06a claim still
+    holds on the evidence below: one F.A.S.T transfer step stays open through the operator's Pause
+    and the same step ends SUCCESS after Resume, independent of num_rows or the wrapping protocol.
+- Decisions chosen: Tip broken? started unselected (blank, Confirm disabled) — confirmed by the
+  operator; the operator chose **no** (tip intact).
+- Log excerpt: production F.A.S.T.log, `~/.local/share/galago/trace_logs/1791974367/F.A.S.T.log`
+  (local time):
+  ```
+  2026-10-15 10:19:40 | INFO | Running command Transfer
+  2026-10-15 10:19:41 | INFO | fast run progress 0% (running)
+  ...
+  2026-10-15 10:20:15 | INFO | fast run progress 20% (running)
+  2026-10-15 10:20:15 | INFO | Running command Pause
+  2026-10-15 10:20:15 | INFO | HTTP Request: PUT http://10.150.1.170:5003/protocol/pause?hardPause=false "HTTP/1.1 200 OK"
+  2026-10-15 10:20:17 | INFO | fast run progress 22% (paused)
+  2026-10-15 10:23:30 | INFO | Running command Resume
+  2026-10-15 10:23:30 | INFO | HTTP Request: PUT http://10.150.1.170:5003/protocol/resume?isTipBroken=false "HTTP/1.1 200 OK"
+  2026-10-15 10:23:32 | INFO | fast run progress 25% (running)
+  ...
+  2026-10-15 10:24:32 | INFO | fast run progress 100% (idle)
+  2026-10-15 10:24:32 | DEBUG | ExecuteCommand Response: response: SUCCESS
+  ```
+  Note: the production adapter logs no separate `ExecuteCommand Response` text line for the Pause
+  or Resume control commands themselves; their success is the instrument's HTTP 200 OK plus the
+  observed state change (paused at 22%, running again at 25%) — this applies symmetrically to both
+  control commands, not just Resume, and matches 03-DEPLOY.md's documented adapter behavior.
+- Final step result: the Transfer's own response line, `ExecuteCommand Response: response: SUCCESS`
+  at 10:24:32 WIB (03:24:32.471Z), for the same Transfer opened at 10:19:40 WIB — no second
+  Transfer or retry in the window. The run page showed no success popup (operator-confirmed); the
+  result was reflected in the step/queue status returning to completed, matching `galago-web`'s
+  queue record for this command (`queueId 104`, `status COMPLETED`, `completedAt 03:24:32.471Z`,
+  the same instant as the log's SUCCESS line).
+- Queue state: `galago-web` run `154129ecbe01e7000` (protocol "test"), `commandQueue.getAll`
+  (read-only tRPC query) shows all 3 steps COMPLETED: Pf400 move (`queueId 103`)
+  `startedAt 03:19:38.258Z` -> `completedAt 03:19:39.270Z`; F.A.S.T transfer (`queueId 104`)
+  `startedAt 03:19:40.785Z` -> `completedAt 03:24:32.471Z`; Pf400 move (`queueId 105`)
+  `startedAt 03:24:33.973Z` -> `completedAt 03:24:34.985Z`. The Pf400 log independently confirms
+  `Running command Move` / `ExecuteCommand Response: response: SUCCESS` at 10:19:38-10:19:39 WIB
+  and 10:24:33-10:24:34 WIB — the queue advanced past the F.A.S.T. step immediately after its
+  SUCCESS, meaning the step stayed open through the entire pause and ended with the run's real
+  outcome, not an early/false completion.
+- Control commands in window: window 10:17:40-10:26:33 WIB (2 min before the reported start to
+  2 min after the reported end). Counts: Transfer=1, Pause=1, Resume=1, Abort=0 — matches the
+  operator's reported actions exactly, all operator-sent: yes. `journalctl --user -u galago-tools
+  --since "2026-10-15 10:17:40" --until "2026-10-15 10:26:33"` shows no entries (no tool restart).
+  `systemctl --user show galago-tools -p MainPID` -> `4044033`, unchanged from the post-deploy
+  value throughout.
+- Screenshots: none provided.
+- D-11 criteria:
+  - PAUSED with a percent after Pause: `fast_status.py --port 40001` polled at 10:22:35 WIB during
+    the pause returned `status BUSY`, `run_state.state paused`, `percent 22.0`,
+    `pause.since 2026-10-15T03:20:17Z`, `errorName NoError`, `isHardPause false`; the F.A.S.T.log
+    shows the matching `fast run progress 22% (paused)` line; the operator confirmed a
+    `tool_paused` prompt appeared showing the paused time with Resume/Abort options. Observed: met.
+  - The step stayed open while paused: no `ExecuteCommand Response` line for the Transfer between
+    `Running command Transfer` (10:19:40 WIB) and the SUCCESS response (10:24:32 WIB); exactly one
+    `Running command Transfer` in the window; `commandQueue.getAll` shows the F.A.S.T. transfer
+    (`queueId 104`) was the only step not yet `COMPLETED` while `queueId 103` (the preceding Pf400
+    move) had already completed at 10:19:39 WIB. Observed: met.
+  - State returned to running after Resume: `Running command Resume` at 10:23:30 WIB (HTTP PUT
+    `.../protocol/resume?isTipBroken=false` -> 200 OK) followed by `fast run progress 25%
+    (running)` at 10:23:32 WIB, while the Transfer was still open (no response yet). Observed: met.
+  - The same step ended SUCCESS: the same Transfer (one `Running command Transfer` in the whole
+    window) ends with `ExecuteCommand Response: response: SUCCESS` at 10:24:32 WIB;
+    `commandQueue.getAll` shows the same `queueId 104` COMPLETED at `03:24:32.471Z`, the identical
+    instant; no second Transfer or retry appears anywhere in the window. Observed: met.
+  - No control command the operator did not send: window counts Pause=1, Resume=1, Abort=0, exactly
+    matching the operator's reported actions; `journalctl` shows no tool restart in the window;
+    `systemctl` MainPID stayed `4044033` throughout (no restart, so no other command source is
+    possible). Observed: met.
+- Result: PASS
+  - All five D-11 criteria hold on read-only evidence from the production F.A.S.T.log, Pf400 log,
+    `fast_status.py`, the journal and `galago-web`'s queue record; the control-command window
+    matches the operator's reported actions exactly (Pause 1, Resume 1, Abort 0); `galago-tools`
+    did not restart (`journalctl` empty, MainPID unchanged at `4044033`). The one deviation
+    (protocol "test" with num_rows 1, instead of the planned single-transfer "LIVE-06a" protocol
+    with num_rows 8) is flagged above for the user's review but does not affect this result — the
+    F.A.S.T transfer step itself (the thing D-11 tests) stayed open through the operator's Pause
+    and ended SUCCESS after Resume, regardless of num_rows or the wrapping Pf400 moves. LIVE-06a
+    is half of requirement LIVE-06; LIVE-06b (Pause -> Abort) is a separate scenario in plan 03-06
+    and is not addressed by this record.
 
 ## LIVE-05: Deck 3 empty -> prompt -> fix deck -> Resume -> SUCCESS
 
