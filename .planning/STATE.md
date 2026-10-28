@@ -5,16 +5,16 @@ milestone_name: STACK Tool & STACK↔F.A.S.T. Handoff
 current_phase: 4
 current_phase_name: STACK Tool Registration, Reads & Estimate
 status: executing
-stopped_at: Phase 4 context gathered
-last_updated: "2026-10-28T13:52:43.669Z"
+stopped_at: Completed 04-01-PLAN.md
+last_updated: "2026-10-28T22:22:07.274Z"
 last_activity: 2026-10-28
-last_activity_desc: v2 roadmap created (4 phases, 22/22 requirements mapped)
-state_head: 59a285847e018baf8921b39f69b81357063d1fe5
+last_activity_desc: Phase 4 execution started
+state_head: bcbbf8e245877dc77dbdaaa1e5d18a768dffa8f8
 progress:
   total_phases: 4
   completed_phases: 0
   total_plans: 5
-  completed_plans: 0
+  completed_plans: 1
   percent: 0
 ---
 
@@ -31,10 +31,10 @@ acknowledges on its own. For the STACK: a step never sends a second transfer.
 
 ## Current Position
 
-Phase: 4 (STACK Tool Registration, Reads & Estimate) — READY TO EXECUTE
-Plan: — (not yet planned)
+Phase: 4 (STACK Tool Registration, Reads & Estimate) — EXECUTING
+Plan: 2 of 5
 Status: Ready to execute
-Last activity: 2026-10-28 — v2 roadmap created (4 phases, 22/22 requirements mapped)
+Last activity: 2026-10-28 — Phase 4 execution started
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -80,6 +80,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 03 P07 | ~40min | 3 tasks | 2 files |
 | Phase 03 P08 | ~25min | 2 tasks | 1 files |
 | Phase 02 P05 | 25min | 2 tasks | 2 files |
+| Phase 04 P01 | 2 min | 3 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -101,6 +102,8 @@ v2 roadmap-level decisions (2026-10-28, detail in PROJECT.md Key Decisions):
   forms, operator Ack control, F3/F5; stack-automation-layer = G1-G3 via one `/gsd-quick` (DEP-01).
 - v2 phase shape: 4 reads/estimate (no motion) → 5 F5-safe Transfer + Ack (gated on DEP-01) → 6 GAL-02
   workflow + simulated runs (gated on DEP-02) → 7 deploy + supervised live (DEP-03 recommended).
+- [Phase 04]: stack.proto v2 frozen exactly as D-01..D-05 (user: Freeze); Command 24, Config 43, ToolType 24
+- [Phase 04]: StackServer._configure is the thinnest D-07 path (open_service owner galago); Plan 02 adds validation and close-first lifecycle
 
 ### Pending Todos
 
@@ -133,9 +136,9 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-28T13:15:51.102Z
-Stopped at: Phase 4 context gathered
-Resume file: .planning/phases/04-stack-tool-registration-reads-estimate/04-CONTEXT.md
+Last session: 2026-10-28T22:22:07.252Z
+Stopped at: Completed 04-01-PLAN.md
+Resume file: None
 
 ## Operator Next Steps
 
