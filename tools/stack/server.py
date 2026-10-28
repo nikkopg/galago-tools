@@ -14,6 +14,7 @@ read, an unknown shape) is an ERROR_FROM_TOOL carrying a one-line message.
 """
 import argparse
 import logging
+import math
 from typing import Any, Optional
 
 from google.protobuf.struct_pb2 import Struct
@@ -31,6 +32,14 @@ from tools.grpc_interfaces.tool_base_pb2 import (
 )
 
 DEFAULT_PORT = 5005
+
+# D-09: logged once per fresh open. A restart of this tool server silently
+# drops the core's in-process failure latch and in-flight guard.
+_RESTART_WARNING = (
+    "stack: restarting this tool server clears the STACK core's failure latch "
+    "and in-flight guard (core gap G1); a STACK failure must be acknowledged "
+    "by the operator, not cleared by a restart"
+)
 
 # D-10: the explicit, case-sensitive allowlist of result kinds that are SUCCESS.
 # knowledgeRefreshed, validationReport, transferPlan, cancelRequested and a
@@ -119,12 +128,21 @@ class StackServer(ToolServer):
         super().__init__()
         self._owned: Optional[OwnedService] = None
         self.service: Optional[StackService] = None
+        self._transfer_timeout_s: float = 0.0
+        self._ledger_dir: str = ""
 
     def _configure(self, config: Config) -> None:
         host = config.host.strip()
         if not host:
             raise ValueError("stack: Config.host is required")
         port = config.port or DEFAULT_PORT
+        timeout = config.transfer_timeout_s
+        if not math.isfinite(timeout) or timeout < 0:
+            raise ValueError(
+                f"stack: Config.transfer_timeout_s must be finite and >= 0, got {timeout!r}")
+        self._transfer_timeout_s = timeout
+        # Recorded only: nothing touches this path here (Phase 5 owns the ledger).
+        self._ledger_dir = config.ledger_dir
         key = endpoint_key(host, port)
         if self._owned is not None and self._owned.endpoint == key:
             return
@@ -137,6 +155,7 @@ class StackServer(ToolServer):
             self.service = None
         self._owned = open_service(host, port, owner="galago")
         self.service = self._owned.service
+        logging.warning(_RESTART_WARNING)
 
     def _require_service(self) -> StackService:
         if self.service is None:
