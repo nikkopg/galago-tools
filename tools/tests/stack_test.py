@@ -387,5 +387,124 @@ class TestConfigureOwnership(_StackTestCase):
         self.assertIsNone(server._owned)
 
 
+class TestConfigureFails(_StackTestCase):
+    """D-04/D-08: every Configure failure is NOT_READY carrying the core's own
+    text, and no failure leaves an owner lock behind."""
+
+    def _assert_free(self, port: int) -> None:
+        acquire_owner_lock(
+            "127.0.0.1", port, owner="mcp", lock_dir=self.lock_dir).release()
+
+    def test_bad_transfer_timeout_fails_before_open(self) -> None:
+        for value in (float("nan"), float("inf"), float("-inf"), -1.0):
+            with self.subTest(value=value):
+                opener = MagicMock()
+                with patch("tools.stack.server.open_service", opener):
+                    stub = _serve_in_process(self, StackServer())
+                    reply = stub.Configure(
+                        _real_config("127.0.0.1", _free_tcp_port(), transfer_timeout_s=value))
+                self.assertEqual(reply.response, NOT_READY)
+                self.assertIn("transfer_timeout_s", reply.error_message)
+                opener.assert_not_called()
+
+    def test_blank_host_fails_before_open(self) -> None:
+        opener = MagicMock()
+        with patch("tools.stack.server.open_service", opener):
+            stub = _serve_in_process(self, StackServer())
+            reply = stub.Configure(_real_config("   ", _free_tcp_port()))
+        self.assertEqual(reply.response, NOT_READY)
+        self.assertIn("Config.host is required", reply.error_message)
+        opener.assert_not_called()
+
+    def test_closed_port_is_a_transport_error_and_releases_the_lock(self) -> None:
+        port = _free_tcp_port()
+        server = StackServer()
+        stub = _serve_in_process(self, server)
+        reply = stub.Configure(_real_config("127.0.0.1", port))
+        self.assertEqual(reply.response, NOT_READY)
+        self.assertIn("transport error", reply.error_message)
+        self.assertEqual(stub.GetStatus(empty_pb2.Empty()).status, FAILED)
+        self.assertIsNone(server.service)
+        self.assertIsNone(server._owned)
+        self._assert_free(port)
+
+    def test_missing_credentials_fail_with_the_core_text(self) -> None:
+        os.environ.pop("STACK_USER", None)
+        os.environ.pop("STACK_PASSWORD", None)
+        port = _free_tcp_port()
+        stub = _serve_in_process(self, StackServer())
+        reply = stub.Configure(_real_config("127.0.0.1", port))
+        self.assertEqual(reply.response, NOT_READY)
+        self.assertIn("STACK credentials missing", reply.error_message)
+        self._assert_free(port)
+
+    def test_password_never_appears_in_replies_or_logs(self) -> None:
+        sentinel = "s3ntinel-p4ssw0rd-do-not-leak"
+        os.environ["STACK_PASSWORD"] = sentinel
+        with self.assertLogs(level="DEBUG") as logs:
+            stub = _serve_in_process(self, StackServer())
+            closed = stub.Configure(_real_config("127.0.0.1", _free_tcp_port()))
+            with patch("tools.stack.server.open_service",
+                       _fake_open_service(_fake_transport())):
+                ok = stub.Configure(_real_config("127.0.0.1", _free_tcp_port()))
+        self.assertEqual(closed.response, NOT_READY)
+        self.assertEqual(ok.response, SUCCESS)
+        self.assertNotIn(sentinel, closed.error_message)
+        self.assertNotIn(sentinel, ok.error_message)
+        for record in logs.records:
+            self.assertNotIn(sentinel, record.getMessage())
+            self.assertNotIn(sentinel, str(record.args))
+
+
+class TestConfigureWarning(_StackTestCase):
+    """D-09: a fresh open warns once that a restart clears the core's latch."""
+
+    def test_fresh_open_warns_once_and_reuse_is_silent(self) -> None:
+        port = _free_tcp_port()
+        with patch("tools.stack.server.open_service",
+                   MagicMock(side_effect=_fake_open_service(_fake_transport()))):
+            stub = _serve_in_process(self, StackServer())
+            with self.assertLogs(level="WARNING") as logs:
+                self.assertEqual(stub.Configure(_real_config("127.0.0.1", port)).response, SUCCESS)
+            self.assertEqual(len(logs.records), 1)
+            text = logs.records[0].getMessage()
+            for fragment in ("restart", "failure latch", "acknowledge"):
+                self.assertIn(fragment, text)
+            with self.assertNoLogs(level="WARNING"):
+                self.assertEqual(stub.Configure(_real_config("127.0.0.1", port)).response, SUCCESS)
+
+
+class TestConfigureLedgerDir(_StackTestCase):
+    def test_ledger_dir_is_recorded_but_never_created(self) -> None:
+        ledger = os.path.join(self.lock_dir, "ledger-not-created")
+        server = StackServer()
+        with patch("tools.stack.server.open_service",
+                   MagicMock(side_effect=_fake_open_service(_fake_transport()))):
+            stub = _serve_in_process(self, server)
+            reply = stub.Configure(_real_config("127.0.0.1", _free_tcp_port(), ledger_dir=ledger))
+        self.assertEqual(reply.response, SUCCESS)
+        self.assertEqual(server._ledger_dir, ledger)
+        self.assertFalse(os.path.exists(ledger))
+
+    def test_port_zero_means_5005(self) -> None:
+        opener = MagicMock(side_effect=_fake_open_service(_fake_transport()))
+        with patch("tools.stack.server.open_service", opener):
+            stub = _serve_in_process(self, StackServer())
+            self.assertEqual(stub.Configure(_real_config("127.0.0.1", 0)).response, SUCCESS)
+        self.assertEqual(opener.call_args.args, ("127.0.0.1", 5005))
+
+    def test_transfer_timeout_is_recorded(self) -> None:
+        for value in (0.0, 600.0):
+            with self.subTest(value=value):
+                server = StackServer()
+                with patch("tools.stack.server.open_service",
+                           MagicMock(side_effect=_fake_open_service(_fake_transport()))):
+                    stub = _serve_in_process(self, server)
+                    reply = stub.Configure(
+                        _real_config("127.0.0.1", _free_tcp_port(), transfer_timeout_s=value))
+                self.assertEqual(reply.response, SUCCESS)
+                self.assertEqual(server._transfer_timeout_s, value)
+
+
 if __name__ == "__main__":
     unittest.main()
