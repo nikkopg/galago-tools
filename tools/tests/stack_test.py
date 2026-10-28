@@ -11,6 +11,7 @@ import json
 import os
 import socket
 import tempfile
+import threading
 import time
 import types
 import unittest
@@ -1617,3 +1618,98 @@ class TestSimulatedCommands(_SimulatedGrpcTestCase):
         self.assertEqual(reply.response, tool_base_pb2.INVALID_ARGUMENTS)
         self.assertEqual(self.sleeps, [])
         self._assert_core_free()
+
+
+_BUSY_READS = (
+    ("manager_state", "get_manager_state", stack_pb2.Command.GetManagerState),
+    ("robot_states", "get_robot_states", stack_pb2.Command.GetRobotStates),
+    ("devices", "list_devices", stack_pb2.Command.ListDevices),
+    ("labware_profiles", "list_labware_profiles", stack_pb2.Command.ListLabwareProfiles),
+    ("transfer_profiles", "list_transfer_profiles", stack_pb2.Command.ListTransferProfiles),
+    ("labware_presence", "get_labware_presence", stack_pb2.Command.GetLabwarePresence),
+    ("estimate_transfer", "get_transfer_estimate", stack_pb2.Command.GetTransferEstimate),
+)
+
+
+class TestBusyReads(_RealModeGrpcTestCase):
+    """STK-05 tracer (D-13..D-16): while a non-read command holds the tool BUSY,
+    every read answers with its own result and a second non-read is refused.
+    The real Transfer lands in Phase 5, so the slow command is an injected
+    Transfer handler."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.results = {
+            "manager_state": ManagerState(mode="Idle", recovery=None, api_version="3"),
+            "robot_states": RobotStates(robots=[]),
+            "devices": DeviceTree(devices=(), ambiguous=[], api_version="3"),
+            "labware_profiles": LabwareProfiles(profiles=[]),
+            "transfer_profiles": TransferProfiles(profiles=[]),
+            "labware_presence": LabwarePresence(robot_name="R1", has_labware=True),
+            "estimate_transfer": Estimated(
+                estimated_time="00:00:48", guid=None, advisories=[], seconds=48.0),
+        }
+        for method, result in self.results.items():
+            getattr(self.service, method).return_value = result
+
+    def _start_blocked_command(self) -> tuple[threading.Event, threading.Thread, dict[str, Any], MagicMock]:
+        """Blocks a Transfer sent over the gRPC stub inside its handler so
+        base_server's isReady/setStatus(BUSY) bracket is really exercised. The
+        step_key must be non-blank or the argument check answers
+        INVALID_ARGUMENTS instantly (Pitfall 5). An instance attribute wins
+        over the class handler because base _dispatchCommand resolves the
+        handler with getattr(self, name)."""
+        release = threading.Event()
+        entered = threading.Event()
+
+        def _blocking(*args: Any, **kwargs: Any) -> Any:
+            entered.set()
+            release.wait(timeout=10)
+            return tool_base_pb2.ExecuteCommandReply(response=SUCCESS, return_reply=True)
+
+        handler = MagicMock(side_effect=_blocking)
+        patcher = patch.object(self.server, "Transfer", handler)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+        result: dict[str, Any] = {}
+
+        def _send() -> None:
+            result["transfer"] = self.stub.ExecuteCommand(self._stack(
+                transfer=stack_pb2.Command.Transfer(step_key="busy-1")))
+
+        thread = threading.Thread(target=_send)
+        thread.start()
+        # Cleanups run LIFO: release before join, so a failing assertion never
+        # leaves the gRPC worker thread blocked forever.
+        self.addCleanup(thread.join, 10)
+        self.addCleanup(release.set)
+        self.assertTrue(entered.wait(timeout=5))
+        return release, thread, result, handler
+
+    def test_reads_answer_while_busy_and_a_second_transfer_is_refused(self) -> None:
+        release, thread, result, handler = self._start_blocked_command()
+        self.assertEqual(self._health().status, tool_base_pb2.BUSY)
+
+        for method, field, message in _BUSY_READS:
+            with self.subTest(field):
+                reply = self.stub.ExecuteCommand(self._stack(**{field: message()}))
+                self.assertEqual(reply.response, SUCCESS, reply.error_message)
+                self.assertEqual(reply.meta_data, _struct(self.results[method].to_dict()))
+                getattr(self.service, method).assert_called_once()
+        with self.subTest("get_failure_latch"):
+            reply = self.stub.ExecuteCommand(self._stack(
+                get_failure_latch=stack_pb2.Command.GetFailureLatch()))
+            self.assertEqual(reply.response, ERROR_FROM_TOOL)
+            self.assertEqual(reply.error_message, _REFUSALS["GetFailureLatch"])
+
+        self.assertEqual(self._health().status, tool_base_pb2.BUSY)
+        second = self.stub.ExecuteCommand(self._stack(
+            transfer=stack_pb2.Command.Transfer(step_key="busy-2")))
+        self.assertEqual(second.response, NOT_READY)
+        self.assertEqual(handler.call_count, 1)
+
+        release.set()
+        thread.join(10)
+        self.assertEqual(result["transfer"].response, SUCCESS)
+        self.assertEqual(self._health().status, READY)
