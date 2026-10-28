@@ -83,11 +83,21 @@ pinned by SHA, no cross-repo gate). Its `stack.proto` is the input to DEP-02.
 **Plans:** 5 plans (waves 1-5, sequential: every plan touches `tools/stack/server.py` and `tools/tests/stack_test.py`)
 
 Plans:
+**Wave 1**
 - [ ] 04-01-PLAN.md — Core install gate, proto-freeze decision, register `stack` and read manager state end to end (STK-01)
+
+**Wave 2** *(blocked on Wave 1 completion)*
 - [ ] 04-02-PLAN.md — Configure ownership lifecycle, failure surfaces, restart warning, SHA pin and AST no-motion/no-MCP invariant (STK-02, SC 5)
+
+**Wave 3** *(blocked on Wave 2 completion)*
 - [ ] 04-03-PLAN.md — Transfer estimate, the remaining reads, 1:1 surface and exhaustive result mapping (STK-03, STK-04, STK-07)
+
+**Wave 4** *(blocked on Wave 3 completion)*
 - [ ] 04-04-PLAN.md — Simulated mode, adapter-argument checks, real-mode refusals and constant estimate hooks (STK-06, STK-04, SC 5)
+
+**Wave 5** *(blocked on Wave 4 completion)*
 - [ ] 04-05-PLAN.md — Reads answer while BUSY via the ExecuteCommand override, test-first (STK-05)
+
 **Notes**: Proto freeze made binding by the user at roadmap approval (2026-10-28). Message names must avoid `GetStatus`,
 `EstimateDuration`, `Configure`, `ExecuteCommand` and any `Estimate*` prefix. Research flag: none
 (fast precedent). DEP-02 can start as soon as this phase's proto is on the branch.
@@ -175,6 +185,7 @@ recommended before live runs for the full operator experience but is not a hard 
   2. A supervised, runbook-gated live STACK `Transfer` reaches `ran` on `stack2-6` (manager
      `10.150.1.125:5005`) with the user present and the operator's explicit go-ahead.
   3. A supervised live GAL-02 handoff runs STACK -> F.A.S.T. -> STACK to SUCCESS on the hardware.
+
 **Plans**: TBD
 **Notes**: Runbook authoring, not research. This is the only phase that may send live STACK motion or
 target `10.150.1.125` / `stack-server`. Back up logs before any restart; the manager page can restart a
