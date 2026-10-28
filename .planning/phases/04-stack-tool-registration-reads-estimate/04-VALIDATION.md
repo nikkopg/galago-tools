@@ -40,17 +40,18 @@ created: "2026-10-28"
 
 Task IDs are filled in by the planner/executor. The requirement → test map from `04-RESEARCH.md` § Validation Architecture:
 
-| Requirement | Secure Behavior | Test Type | Automated Command (`-k` on the quick command) | File Exists | Status |
-|-------------|-----------------|-----------|-----------------------------------------------|-------------|--------|
-| STK-01 | Registration numbers 24/43/24; frozen proto field list; no `lock_dir` | unit | `-k "Registration or ProtoFreeze"` + `bin/make proto test` | ❌ W0 | ⬜ pending |
-| STK-02 | `galago` owner lock; same-endpoint reuse; `mcp` holder → NOT_READY naming holder, no network; closed port / missing creds fail; no `.mcp` import; SHA pin | integration + AST | `-k "Configure or Reconfigure or StackOwned or ConfigureFails or AdapterInvariant or RequirementsPin"` | ❌ W0 | ⬜ pending |
-| STK-03 | Each read calls exactly one core method; SUCCESS, empty message, meta == `to_dict()` | unit | `-k "ReadCommands or OneToOne"` | ❌ W0 | ⬜ pending |
-| STK-04 | `GetTransferEstimate` → `estimate_transfer` once; `Estimate<Cmd>` constants, no I/O | unit | `-k Estimate` | ❌ W0 | ⬜ pending |
-| STK-05 | Reads answer while BUSY (red first); motion serialised; not-configured → NOT_READY | integration | `-k "BusyReads or NotConfigured"` | ❌ W0 | ⬜ pending |
-| STK-06 | Simulated: no core, no lock, adapter-arg checks; real mode refuses Phase-5 commands | unit + integration | `-k "Simulated or CheckArgs or RealModeRefusals"` | ❌ W0 | ⬜ pending |
-| STK-07 | SUCCESS allowlist; every other kind → ERROR_FROM_TOOL one-line with kind/reason/guid | unit | `-k ResultMapping` | ❌ W0 | ⬜ pending |
-| SC 5 (safety) | No forbidden core motion/ack call in `tools/stack/`; planted violations caught | AST | `-k AdapterInvariant` | ❌ W0 | ⬜ pending |
-| D-09 | One WARNING on successful real Configure about restart/latch | unit | `-k ConfigureWarning` | ❌ W0 | ⬜ pending |
+| Requirement | Plan / Task | Secure Behavior | Test Type | Automated Command (`-k` on the quick command) | File Exists | Status |
+|-------------|-------------|-----------------|-----------|-----------------------------------------------|-------------|--------|
+| STK-01 | 04-01 T1-T3 | Core installed at pinned SHA; registration numbers 24/43/24; frozen proto field list; no `lock_dir`; server starts as `stack` | unit + smoke | `-k "Registration or ProtoFreeze or Tracer"` + server smoke + `bin/make proto test` | ❌ W0 | ⬜ pending |
+| STK-02 | 04-01 T3, 04-02 T1-T3 | `galago` owner lock; same-endpoint reuse; close-first; `mcp` holder → NOT_READY naming holder, no network; closed port / missing creds fail; no credential leak; no `.mcp` import; SHA pin | integration + AST | `-k "StackOwned or ConfigureOwnership or ConfigureFails or ConfigureWarning or ConfigureLedgerDir or AdapterInvariant or RequirementsPin"` | ❌ W0 | ⬜ pending |
+| STK-03 | 04-01 T3, 04-03 T2 | Each read calls exactly one core method; SUCCESS, empty message, meta == `to_dict()`; order and duplicates preserved | unit | `-k "Tracer or ReadCommands or OneToOne"` | ❌ W0 | ⬜ pending |
+| STK-04 | 04-03 T1, 04-04 T3 | `GetTransferEstimate` → `estimate_transfer` once; `Estimate<Cmd>` constants, no I/O | unit | `-k "TransferEstimate or Estimates"` | ❌ W0 | ⬜ pending |
+| STK-05 | 04-02 T3, 04-04 T2, 04-05 T1-T2 | Reads answer while BUSY (red first); motion serialised; not-configured → NOT_READY; real mode refuses Transfer/Ack | integration + AST | `-k "BusyReads or ReadCommandSet or NotConfigured or ReadBypassEdges or RealModeRefusals or AdapterInvariant"` | ❌ W0 | ⬜ pending |
+| STK-06 | 04-04 T1-T3 | Simulated: no core, no lock, no ledger, adapter-arg checks in both modes | unit + integration | `-k "Simulated or CheckArgs"` | ❌ W0 | ⬜ pending |
+| STK-07 | 04-01 T3, 04-03 T1, T3 | SUCCESS allowlist; every other kind → ERROR_FROM_TOOL one-line with kind/reason/guid (+ bounded hint) | unit | `-k "ResultMapping or TransferEstimate"` | ❌ W0 | ⬜ pending |
+| SC 5 (safety) | 04-02 T3 | No forbidden core motion/ack call in `tools/stack/`; planted violations caught | AST | `-k AdapterInvariant` | ❌ W0 | ⬜ pending |
+| D-09 | 04-02 T2 | One WARNING on a fresh real Configure about restart/latch | unit | `-k ConfigureWarning` | ❌ W0 | ⬜ pending |
+| D-16 order | 04-05 T1 | `test(04-05)` commit precedes `feat(04-05)` | git | the git-log ordering command in 04-05 Task 1 | n/a | ⬜ pending |
 
 *Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
 
