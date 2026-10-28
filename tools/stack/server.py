@@ -141,10 +141,41 @@ def _find_guid(d: dict) -> Optional[str]:
     return None
 
 
+def _hint(d: dict[str, Any]) -> Optional[str]:
+    """One bounded structured hint for the operator line (D-11, Open Question
+    2): needsInput's missing fields, the first rejected finding's name, or the
+    readFailed error name (with its HTTP status when an int). Never any
+    free-text explanation, message or detail from the core."""
+    kind = d.get("kind")
+    if kind == "needsInput":
+        missing = d.get("missing")
+        if isinstance(missing, list):
+            names = [m for m in missing if isinstance(m, str) and m]
+            if names:
+                return "missing: " + ", ".join(names)
+    elif kind == "rejected":
+        findings = d.get("findings")
+        if isinstance(findings, list) and findings and isinstance(findings[0], dict):
+            name = findings[0].get("name")
+            if isinstance(name, str) and name:
+                return f"finding: {name}"
+    elif kind == "readFailed":
+        error = d.get("error")
+        if isinstance(error, dict):
+            name = error.get("name")
+            if isinstance(name, str) and name:
+                status = error.get("status")
+                if isinstance(status, int) and not isinstance(status, bool):
+                    return f"error: {name} (HTTP {status})"
+                return f"error: {name}"
+    return None
+
+
 def _error_line(d: dict) -> str:
     """One-line operator message from a non-success result dict (D-11): the
-    kind, the reason when present, the guid when present. Never the
-    explanation, message, detail text or error.detail."""
+    kind, the reason when present, the guid when present, then at most one
+    bounded structured hint. Never the explanation, message, detail text or
+    error.detail."""
     kind = d.get("kind")
     if not isinstance(kind, str) or not kind:
         return "stack: unrecognised result"
@@ -155,6 +186,9 @@ def _error_line(d: dict) -> str:
     guid = _find_guid(d)
     if guid:
         line += f", guid {guid}"
+    hint = _hint(d)
+    if hint:
+        line += f"; {hint}"
     return _one_line(line, 300)
 
 
