@@ -112,9 +112,47 @@ milestone; stack-automation-layer core gaps are fixed there via `/gsd-quick`. Re
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
+| STK-01 | Phase 4 | Pending |
+| STK-02 | Phase 4 | Pending |
+| STK-03 | Phase 4 | Pending |
+| STK-04 | Phase 4 | Pending |
+| STK-05 | Phase 4 | Pending |
+| STK-06 | Phase 4 | Pending |
+| STK-07 | Phase 4 | Pending |
+| XFR-01 | Phase 5 | Pending |
+| XFR-02 | Phase 5 | Pending |
+| XFR-03 | Phase 5 | Pending |
+| XFR-04 | Phase 5 | Pending |
+| XFR-05 | Phase 5 | Pending |
+| XFR-06 | Phase 5 | Pending |
+| ACK-01 | Phase 5 | Pending |
+| ACK-02 | Phase 5 | Pending |
+| FLOW-01 | Phase 6 | Pending |
+| FLOW-02 | Phase 6 | Pending |
+| FLOW-03 | Phase 6 | Pending |
+| FLOW-04 | Phase 6 | Pending |
+| LIVE-08 | Phase 7 | Pending |
+| LIVE-09 | Phase 7 | Pending |
+| LIVE-10 | Phase 7 | Pending |
 
-**Coverage:** filled by the roadmapper.
+**External gates (not requirements, not mapped to a phase):**
+
+| Gate | Gates phase(s) | Strength |
+|------|----------------|----------|
+| DEP-01 | Phase 5 (XFR-*, ACK-*) | Hard; Phase 5 also re-pins the core to DEP-01's SHA |
+| DEP-02 | Phase 6 (FLOW-02..04), Phase 7 (LIVE-*) | Hard; consumes Phase 4's `stack.proto` |
+| DEP-03 | Phase 7 | Recommended, not a hard adapter gate |
+
+**Coverage:**
+- v2 requirements: 22 total (STK 7, XFR 6, ACK 2, FLOW 4, LIVE 3)
+- Mapped to phases: 22/22
+- Unmapped: 0
+- Mapped to more than one phase: 0
+
+Note: STK-05 (reads answer while another command holds the tool BUSY) is mapped to Phase 4, where the
+`ExecuteCommand` override lands and is proven with an injected slow command. Phase 5 re-proves it on the
+real `Transfer` path as a carry-over check, not a second mapping.
 
 ---
 *Requirements defined: 2026-10-28*
-*Last updated: 2026-10-28 after initial definition*
+*Last updated: 2026-10-28 after roadmap creation (traceability filled)*
