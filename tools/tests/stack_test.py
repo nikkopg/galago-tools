@@ -36,21 +36,34 @@ try:
     from stack_automation_layer.knowledge import LabwareProfile, TransferProfile
     from stack_automation_layer.model import Location, TransferRequest
     from stack_automation_layer.results import (
+        Aborted,
+        Cancelled,
+        CancelRequested,
         DeviceTree,
         Estimated,
+        Failed,
+        FailureAcknowledged,
+        KnowledgeRefreshed,
         LabwarePresence,
         LabwareProfiles,
+        Lost,
         ManagerState,
         NeedsInput,
+        Ran,
         ReadFailed,
+        Refused,
         Rejected,
         RobotStates,
+        TaskHandle,
+        TaskSnapshot,
+        TimedOut,
         TransferProfiles,
+        ValidationReport,
     )
     from stack_automation_layer.service import StackService
 
     from tools.stack import server as stack_server
-    from tools.stack.server import StackServer
+    from tools.stack.server import StackServer, _result_reply
 except ModuleNotFoundError as exc:
     if exc.name and exc.name.split(".")[0] in ("stack_automation_layer", "httpx"):
         raise unittest.SkipTest(
@@ -1060,6 +1073,217 @@ class TestOneToOneSurface(_StackTestCase):
                 reply = getattr(server, command)(messages[command])
                 self.assertEqual(reply.response, SUCCESS)
                 self.assertEqual([c[0] for c in service.mock_calls], [method])
+
+
+_SENTINEL = "AGENT-WORDS-SENTINEL"
+
+
+def _snapshot(guid: str = "g-task") -> TaskSnapshot:
+    return TaskSnapshot(guid=guid, state="failed", raw_state="failed", error_code=1,
+                        error_name="boom", description=_SENTINEL, elapsed="00:00:01")
+
+
+class _DictResult:
+    """A stub result whose to_dict returns whatever it was given."""
+
+    def __init__(self, payload: Any) -> None:
+        self._payload = payload
+
+    def to_dict(self) -> Any:
+        return self._payload
+
+
+class TestResultMapping(_StackTestCase):
+    """STK-07: one explicit table. The allowlist is SUCCESS with an empty
+    message; every other kind is one structured ERROR_FROM_TOOL line."""
+
+    SUCCESS_RESULTS = (
+        ManagerState(mode="Idle", recovery=None, api_version="3"),
+        DeviceTree(devices=(), ambiguous=[], api_version="3"),
+        RobotStates(robots=[{"robotName": "R1", "state": "Idle"}]),
+        LabwareProfiles(profiles=[LabwareProfile(name="plate96")]),
+        TransferProfiles(profiles=[TransferProfile(name="slow")]),
+        LabwarePresence(robot_name="R1", has_labware=False),
+        Estimated(estimated_time="00:00:48", guid=None, advisories=[], seconds=48.0),
+        FailureAcknowledged(guid="g1", result_kind="failed", explanation=_SENTINEL),
+        Ran(task=_snapshot()),
+    )
+
+    def _failure_results(self) -> list[Any]:
+        handle = TaskHandle(guid="g-handle")
+        return [
+            ReadFailed(error={"status": 500, "name": "boom"}, message=_SENTINEL),
+            Refused(reason="failureLatched", state="x", detail={"guid": "g-latched"}),
+            Rejected(stage="local", findings=[{"name": "stackArmNotFound"}]),
+            NeedsInput(missing=["robot"], detail=_SENTINEL),
+            Lost(reason="taskNotFound", handle=handle, explanation=_SENTINEL),
+            Lost(reason="submitOutcomeUnknown", handle=None),
+            Failed(task=_snapshot(), explanation=_SENTINEL),
+            Aborted(task=_snapshot()),
+            Cancelled(handle=handle),
+            TimedOut(handle=handle),
+            KnowledgeRefreshed(),
+            ValidationReport(),
+            CancelRequested(guid="g-cancel", confirmed=False),
+            TaskHandle(guid="g-handle", kind="transfer"),
+        ]
+
+    def test_allowlisted_kinds_are_success_with_empty_message_and_core_meta(self) -> None:
+        self.assertEqual(len(self.SUCCESS_RESULTS), 9)
+        for result in self.SUCCESS_RESULTS:
+            with self.subTest(kind=result.to_dict()["kind"]):
+                reply = _result_reply(result)
+                self.assertEqual(reply.response, SUCCESS)
+                self.assertEqual(reply.error_message, "")
+                self.assertEqual(reply.meta_data, _struct(result.to_dict()))
+                self.assertTrue(reply.return_reply)
+
+    def test_every_other_core_kind_is_error_from_tool_with_core_meta(self) -> None:
+        for result in self._failure_results():
+            kind = result.to_dict()["kind"]
+            with self.subTest(kind=kind):
+                reply = _result_reply(result)
+                self.assertEqual(reply.response, ERROR_FROM_TOOL)
+                self.assertTrue(reply.error_message.startswith(f"stack: {kind}"),
+                                reply.error_message)
+                self.assertEqual(reply.meta_data, _struct(result.to_dict()))
+
+    def test_unknown_and_case_variant_kinds_are_never_success(self) -> None:
+        for kind in ("brandNewKind", "ManagerState", "managerstate", " managerState",
+                     "managerState ", "RAN"):
+            with self.subTest(kind=kind):
+                reply = _result_reply(_DictResult({"kind": kind}))
+                self.assertEqual(reply.response, ERROR_FROM_TOOL)
+                self.assertTrue(reply.error_message.startswith("stack:"))
+                self.assertNotEqual(reply.error_message, "")
+        for payload in ({"kind": 7}, {}, {"kind": ""}, {"kind": None}):
+            with self.subTest(payload=payload):
+                reply = _result_reply(_DictResult(payload))
+                self.assertEqual(reply.response, ERROR_FROM_TOOL)
+                self.assertEqual(reply.error_message, "stack: unrecognised result")
+
+    def test_non_result_objects_are_unrecognised_with_empty_meta(self) -> None:
+        for label, obj in (("list", _DictResult(["kind", "ran"])), ("object", object()),
+                           ("magicmock", MagicMock()), ("none", None), ("str", "ran")):
+            with self.subTest(label):
+                reply = _result_reply(obj)
+                self.assertEqual(reply.response, ERROR_FROM_TOOL)
+                self.assertEqual(reply.error_message, "stack: unrecognised result")
+                self.assertEqual(len(reply.meta_data), 0)
+
+    def test_message_shape_is_one_bounded_line_with_kind_reason_guid_in_order(self) -> None:
+        reply = _result_reply(Refused(reason="failureLatched", detail={"guid": "g-latched"}))
+        self.assertEqual(reply.error_message, "stack: refused (failureLatched), guid g-latched")
+        reply = _result_reply(Lost(reason="taskNotFound", handle=TaskHandle(guid="g-handle")))
+        message = reply.error_message
+        self.assertLess(message.index("stack: lost"), message.index("(taskNotFound)"))
+        self.assertLess(message.index("(taskNotFound)"), message.index("guid g-handle"))
+        for result in self._failure_results():
+            with self.subTest(kind=result.to_dict()["kind"]):
+                message = _result_reply(result).error_message
+                self.assertNotEqual(message, "")
+                self.assertNotIn("\n", message)
+                self.assertNotIn("\r", message)
+                self.assertLessEqual(len(message), 300)
+
+    def test_absent_reason_and_guid_are_omitted_not_rendered_as_none(self) -> None:
+        reply = _result_reply(Lost(reason="submitOutcomeUnknown", handle=None))
+        self.assertEqual(reply.error_message, "stack: lost (submitOutcomeUnknown)")
+        for result in (NeedsInput(missing=[]), Rejected(stage="local"),
+                       ReadFailed(error={"status": None, "name": None}),
+                       KnowledgeRefreshed(), TaskHandle(guid="")):
+            with self.subTest(kind=result.to_dict()["kind"]):
+                message = _result_reply(result).error_message
+                self.assertNotIn("None", message)
+                self.assertNotIn("null", message)
+                self.assertNotIn("guid", message)
+                self.assertNotEqual(message, "")
+
+    def test_agent_worded_text_never_reaches_the_message(self) -> None:
+        stuffed = [
+            ReadFailed(error={"status": 500, "name": "boom", "detail": _SENTINEL},
+                       message=_SENTINEL),
+            Refused(reason="failureLatched", state=_SENTINEL,
+                    detail={"guid": "g", "message": _SENTINEL, "explanation": _SENTINEL}),
+            Rejected(stage=_SENTINEL, findings=[{"name": "f", "message": _SENTINEL,
+                                                  "detail": _SENTINEL}],
+                     advisories=[{"message": _SENTINEL}]),
+            NeedsInput(missing=["robot"], detail=_SENTINEL),
+            Lost(reason="taskNotFound", explanation=_SENTINEL, detail={"d": _SENTINEL}),
+            Failed(task=_snapshot(), explanation=_SENTINEL, context={"c": _SENTINEL}),
+            Aborted(task=_snapshot()),
+            _DictResult({"kind": "failed", "explanation": _SENTINEL, "message": _SENTINEL,
+                         "detail": _SENTINEL}),
+        ]
+        for result in stuffed:
+            with self.subTest(kind=result.to_dict()["kind"]):
+                self.assertNotIn(_SENTINEL, _result_reply(result).error_message)
+
+    def test_hints_follow_the_guid_part(self) -> None:
+        self.assertEqual(_result_reply(NeedsInput(missing=["robot", "source"])).error_message,
+                         "stack: needsInput; missing: robot, source")
+        self.assertEqual(
+            _result_reply(Rejected(stage="local", findings=[
+                {"name": "stackArmNotFound"}, {"name": "second"}])).error_message,
+            "stack: rejected; finding: stackArmNotFound")
+        self.assertEqual(
+            _result_reply(ReadFailed(error={"status": None, "name": "ConnectError"})
+                          ).error_message,
+            "stack: readFailed; error: ConnectError")
+        self.assertEqual(
+            _result_reply(ReadFailed(error={"status": 503, "name": "Busy"})).error_message,
+            "stack: readFailed; error: Busy (HTTP 503)")
+        # The hint sits after kind, reason and guid when those are present.
+        message = _result_reply(_DictResult({
+            "kind": "needsInput", "reason": "why", "guid": "g9", "missing": ["robot"],
+        })).error_message
+        self.assertEqual(message, "stack: needsInput (why), guid g9; missing: robot")
+
+    def test_hint_edge_cases(self) -> None:
+        for payload, expected in (
+            ({"kind": "needsInput", "missing": []}, "stack: needsInput"),
+            ({"kind": "needsInput", "missing": ["", 3, None, "a"]}, "stack: needsInput; missing: a"),
+            ({"kind": "needsInput", "missing": "robot"}, "stack: needsInput"),
+            ({"kind": "rejected", "findings": []}, "stack: rejected"),
+            ({"kind": "rejected", "findings": ["x"]}, "stack: rejected"),
+            ({"kind": "rejected", "findings": [{"name": 5}]}, "stack: rejected"),
+            ({"kind": "readFailed", "error": "oops"}, "stack: readFailed"),
+            ({"kind": "readFailed", "error": {"name": "E", "status": True}},
+             "stack: readFailed; error: E"),
+            ({"kind": "readFailed", "error": {"status": 404}}, "stack: readFailed"),
+        ):
+            with self.subTest(payload=payload):
+                self.assertEqual(_result_reply(_DictResult(payload)).error_message, expected)
+
+    def test_control_characters_collapse_and_long_hints_are_capped(self) -> None:
+        reply = _result_reply(Refused(reason="a\nb\r\nc\rd", detail={"guid": "g\n1"}))
+        self.assertNotIn("\n", reply.error_message)
+        self.assertNotIn("\r", reply.error_message)
+        reply = _result_reply(NeedsInput(missing=["x" * 400]))
+        self.assertLessEqual(len(reply.error_message), 300)
+        self.assertTrue(reply.error_message.endswith("..."))
+        self.assertTrue(reply.error_message.startswith("stack: needsInput; missing: xxx"))
+
+    def test_success_empty_message_survives_the_wire(self) -> None:
+        server = StackServer()
+        service = MagicMock(spec=StackService)
+        server.service = service
+        server.config = stack_pb2.Config(host="127.0.0.1")
+        server.status = READY
+        stub = _serve_in_process(self, server)
+        command = tool_base_pb2.Command(stack=stack_pb2.Command(
+            get_manager_state=stack_pb2.Command.GetManagerState()))
+        for result in (ManagerState(mode="Idle", recovery=None, api_version="3"),
+                       ReadFailed(error={"status": None, "name": "X"})):
+            service.manager_state.return_value = result
+            reply = stub.ExecuteCommand(command)
+            if result.kind == "managerState":
+                self.assertEqual(reply.response, SUCCESS)
+                self.assertEqual(reply.error_message, "")
+                self.assertEqual(reply.meta_data, _struct(result.to_dict()))
+            else:
+                self.assertEqual(reply.response, ERROR_FROM_TOOL)
+                self.assertEqual(reply.error_message, "stack: readFailed; error: X")
 
 
 if __name__ == "__main__":
