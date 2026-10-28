@@ -4,12 +4,17 @@ Hermetic by construction: every _StackTestCase uses a temp owner-lock
 directory, explicit fake credentials, no proxy environment, and a guard that
 fails any socket connect to a non-loopback address.
 """
+import ast
+import copy
+import importlib.metadata
+import json
 import os
 import socket
 import tempfile
 import unittest
 from concurrent import futures
-from typing import Any, Callable
+from pathlib import Path
+from typing import Any, Callable, Optional
 from unittest.mock import MagicMock, patch
 
 import grpc
@@ -44,6 +49,8 @@ from tools.grpc_interfaces.tool_driver_pb2_grpc import (
     ToolDriverStub,
     add_ToolDriverServicer_to_server,
 )
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 
 _LOOPBACK_HOSTS = ("127.0.0.1", "::1", "localhost")
 
@@ -504,6 +511,245 @@ class TestConfigureLedgerDir(_StackTestCase):
                         _real_config("127.0.0.1", _free_tcp_port(), transfer_timeout_s=value))
                 self.assertEqual(reply.response, SUCCESS)
                 self.assertEqual(server._transfer_timeout_s, value)
+
+
+_PINNED_CORE_SHA = "ed8ce478d8881a517eb93ed233707f81aea01238"
+
+
+class TestRequirementsPin(unittest.TestCase):
+    """D-22: one direct git reference at a 40-hex SHA, no [mcp] extra, and the
+    installed core is exactly that commit."""
+
+    def test_requirements_txt_pins_exactly_one_credential_free_sha(self) -> None:
+        req_path = _REPO_ROOT / "tools" / "stack" / "requirements.txt"
+        lines = [
+            line.strip() for line in req_path.read_text().splitlines()
+            if line.strip() and not line.strip().startswith("#")
+        ]
+        self.assertEqual(len(lines), 1)
+        # The anchored pattern also rules out an [mcp] extra.
+        self.assertRegex(
+            lines[0],
+            r"^stack-automation-layer @ git\+https://gitlab\.formulatrix\.com/"
+            r"nikkopg/stack-automation-layer\.git@[0-9a-f]{40}$")
+        self.assertEqual(lines[0].rsplit("@", 1)[1], _PINNED_CORE_SHA)
+
+    def test_installed_core_is_the_pinned_commit(self) -> None:
+        direct_url = json.loads(
+            importlib.metadata.distribution("stack_automation_layer").read_text(
+                "direct_url.json") or "{}")
+        self.assertEqual(direct_url["vcs_info"]["commit_id"], _PINNED_CORE_SHA)
+
+
+_STACK_SOURCES = sorted((_REPO_ROOT / "tools" / "stack").glob("*.py"))
+
+# D-20: no adapter code may reach any core motion, cancel, safe-position,
+# validate or acknowledge method (any receiver).
+_FORBIDDEN_SERVICE_CALLS = frozenset({
+    "plan_transfer", "execute_transfer", "start_transfer", "wait",
+    "wait_transfer", "cancel_transfer", "go_to_safe_position",
+    "wait_safe_position", "acknowledge_failure", "validate_transfer",
+})
+# The core is reached only through open_service (never built by hand here).
+_FORBIDDEN_CONSTRUCTORS = frozenset({
+    "StackService", "RestStackClient", "StackJwtAuth", "Credentials",
+    "acquire_owner_lock",
+})
+_MCP_MODULE = "stack_automation_layer.mcp"
+# The core MCP subpackage, the hardware STACK manager address and the
+# stack-server host must never appear in adapter code (hard constraints).
+_FORBIDDEN_LITERALS = (_MCP_MODULE, "10.150.1.125", "stack-server")
+_REQUIRED_FUNCTIONS = ("_configure", "_result_reply", "GetManagerState")
+
+
+def _name_of(func: ast.expr) -> Optional[str]:
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    return None
+
+
+def _stack_adapter_violations(trees: dict[str, ast.Module]) -> list[str]:
+    """Pure, assertion-free no-motion / no-MCP / open_service-shape checks
+    (D-20, D-21) over every tools/stack module. Returns "<file>:<line>:
+    <reason>" strings, or [] when clean. Never raises, so planted copies can
+    be checked without failing the test that plants them."""
+    violations: list[str] = []
+    open_service_calls = 0
+    defined: set[str] = set()
+
+    for fname, tree in sorted(trees.items()):
+        for node in ast.walk(tree):
+            at = f"{fname}:{getattr(node, 'lineno', 0)}"
+            if isinstance(node, ast.FunctionDef):
+                defined.add(node.name)
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name == _MCP_MODULE or alias.name.startswith(_MCP_MODULE + "."):
+                        violations.append(f"{at}: import of the core MCP subpackage {alias.name}")
+            if isinstance(node, ast.ImportFrom):
+                module = node.module or ""
+                if module == _MCP_MODULE or module.startswith(_MCP_MODULE + "."):
+                    violations.append(f"{at}: import from the core MCP subpackage {module}")
+                if module == "stack_automation_layer" and any(
+                        alias.name == "mcp" for alias in node.names):
+                    violations.append(f"{at}: import of the core MCP subpackage (from-import mcp)")
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                for literal in _FORBIDDEN_LITERALS:
+                    if literal in node.value:
+                        violations.append(f"{at}: string constant contains {literal!r}")
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = _name_of(func)
+            if isinstance(func, ast.Attribute) and func.attr in _FORBIDDEN_SERVICE_CALLS:
+                violations.append(f"{at}: forbidden core call .{func.attr}()")
+            if name in _FORBIDDEN_CONSTRUCTORS or (
+                    isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name)
+                    and func.value.id in _FORBIDDEN_CONSTRUCTORS):
+                violations.append(f"{at}: direct use of core constructor/helper {ast.unparse(func)}")
+            if name == "open_service":
+                open_service_calls += 1
+                owner = next((k for k in node.keywords if k.arg == "owner"), None)
+                if not (owner is not None and isinstance(owner.value, ast.Constant)
+                        and owner.value.value == "galago"):
+                    violations.append(f'{at}: open_service must pass owner="galago"')
+                for keyword in node.keywords:
+                    if keyword.arg is None:
+                        violations.append(f"{at}: open_service must not take ** keywords")
+                    elif keyword.arg in ("lock_dir", "transport"):
+                        violations.append(f"{at}: open_service must not pass {keyword.arg}=")
+
+    if open_service_calls == 0:
+        violations.append("tools/stack: open_service is never called")
+    for required in _REQUIRED_FUNCTIONS:
+        if required not in defined:
+            violations.append(f"tools/stack: {required}() is missing from the sources")
+    return violations
+
+
+def _plant(tree: ast.Module, function: Optional[str], statement: str) -> ast.Module:
+    """Deep copy of `tree` with `statement` inserted at module top (function
+    is None) or as the first statement of the FunctionDef `function` (after
+    its docstring). Proves each rule depends on the code it checks."""
+    planted = copy.deepcopy(tree)
+    new_statements = ast.parse(statement).body
+    if function is None:
+        planted.body = new_statements + planted.body
+    else:
+        target: Optional[ast.FunctionDef] = None
+        for node in ast.walk(planted):
+            if isinstance(node, ast.FunctionDef) and node.name == function:
+                target = node
+                break
+        if target is None:
+            raise ValueError(f"no such function: {function}")
+        insert_at = 0
+        if (target.body and isinstance(target.body[0], ast.Expr)
+                and isinstance(target.body[0].value, ast.Constant)
+                and isinstance(target.body[0].value.value, str)):
+            insert_at = 1
+        target.body[insert_at:insert_at] = new_statements
+    ast.fix_missing_locations(planted)
+    return planted
+
+
+class TestAdapterInvariant(unittest.TestCase):
+    """STK-05 safety half: nothing under tools/stack/ can move the arm, clear
+    a latch, import the MCP surface or open the core other than as galago."""
+
+    def setUp(self) -> None:
+        self.trees = {path.name: ast.parse(path.read_text()) for path in _STACK_SOURCES}
+        self.server = self.trees["server.py"]
+
+    def _with(self, tree: ast.Module) -> dict[str, ast.Module]:
+        trees = dict(self.trees)
+        trees["server.py"] = tree
+        return trees
+
+    def _assert_reported(self, tree: ast.Module, fragment: str) -> None:
+        violations = _stack_adapter_violations(self._with(tree))
+        self.assertTrue(violations, "expected a violation")
+        self.assertTrue(any(fragment in v for v in violations), f"{fragment!r} not in {violations}")
+
+    def test_real_sources_are_clean(self) -> None:
+        self.assertIn("server.py", self.trees)
+        self.assertEqual(_stack_adapter_violations(self.trees), [])
+
+    def test_every_forbidden_service_call_is_reported(self) -> None:
+        self.assertEqual(len(_FORBIDDEN_SERVICE_CALLS), 10)
+        for name in sorted(_FORBIDDEN_SERVICE_CALLS):
+            with self.subTest(name=name):
+                self._assert_reported(
+                    _plant(self.server, "GetManagerState", f"self.service.{name}()"), f".{name}()")
+
+    def test_module_level_forbidden_call_is_reported(self) -> None:
+        self._assert_reported(_plant(self.server, None, "service.wait(None)"), ".wait()")
+
+    def test_mcp_imports_are_reported(self) -> None:
+        for statement in (
+            "from stack_automation_layer.mcp import server",
+            "import stack_automation_layer.mcp.server",
+            "from stack_automation_layer import mcp",
+        ):
+            with self.subTest(statement=statement):
+                self._assert_reported(_plant(self.server, None, statement), "MCP subpackage")
+
+    def test_open_service_shape_is_enforced(self) -> None:
+        for statement, fragment in (
+            ('open_service("h", 1, owner="galago", lock_dir="/x")', "lock_dir"),
+            ('open_service("h", 1, owner="galago", transport=None)', "transport"),
+            ('open_service("h", 1, owner="galago", **{})', "** keywords"),
+            ('open_service("h", 1, owner="mcp")', 'owner="galago"'),
+            ('open_service("h", 1)', 'owner="galago"'),
+        ):
+            with self.subTest(statement=statement):
+                self._assert_reported(_plant(self.server, "_configure", statement), fragment)
+
+    def test_open_service_must_be_called_somewhere(self) -> None:
+        tree = copy.deepcopy(self.server)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and _name_of(node.func) == "open_service":
+                node.func = ast.Name(id="something_else", ctx=ast.Load())
+        self._assert_reported(tree, "open_service is never called")
+
+    def test_core_constructors_are_reported(self) -> None:
+        for statement in (
+            "StackService(None)",
+            "Credentials.from_env()",
+            'acquire_owner_lock("h", 1, owner="galago")',
+            'RestStackClient("http://h")',
+            "StackJwtAuth(None)",
+        ):
+            with self.subTest(statement=statement):
+                self._assert_reported(
+                    _plant(self.server, "_configure", statement), "core constructor")
+
+    def test_forbidden_literals_are_reported(self) -> None:
+        for literal in _FORBIDDEN_LITERALS:
+            with self.subTest(literal=literal):
+                self._assert_reported(
+                    _plant(self.server, None, f"_X = {literal!r}"), repr(literal))
+
+    def test_renaming_a_required_function_is_reported(self) -> None:
+        for required in _REQUIRED_FUNCTIONS:
+            with self.subTest(required=required):
+                tree = copy.deepcopy(self.server)
+                for node in ast.walk(tree):
+                    if isinstance(node, ast.FunctionDef) and node.name == required:
+                        node.name = required + "_renamed"
+                self._assert_reported(tree, f"{required}() is missing")
+
+    def test_allowed_read_calls_are_not_reported(self) -> None:
+        for statement in (
+            "self.service.manager_state()",
+            "self.service.estimate_transfer(None)",
+            "self.service.labware_presence(None)",
+        ):
+            with self.subTest(statement=statement):
+                planted = _plant(self.server, "GetManagerState", statement)
+                self.assertEqual(_stack_adapter_violations(self._with(planted)), [])
 
 
 if __name__ == "__main__":
