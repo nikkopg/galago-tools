@@ -1038,6 +1038,17 @@ class TestOneToOneSurface(_StackTestCase):
         self.assertEqual(set(mapping) | {"Transfer", "AcknowledgeFailure", "GetFailureLatch"},
                          names)
 
+    def test_every_oneof_message_has_a_handler_and_the_sets_are_disjoint(self) -> None:
+        oneof = stack_pb2.Command.DESCRIPTOR.oneofs_by_name["command"].fields
+        names = {f.message_type.name for f in oneof}
+        self.assertEqual(len(names), 10)
+        server = StackServer()
+        for name in names:
+            self.assertTrue(callable(getattr(server, name, None)), name)
+        mapped = set(stack_server.COMMAND_TO_SERVICE_METHOD)
+        self.assertEqual(mapped & stack_server.UNAVAILABLE_COMMANDS, set())
+        self.assertEqual(mapped | stack_server.UNAVAILABLE_COMMANDS, names)
+
     def test_every_key_is_a_server_method_and_every_value_a_service_method(self) -> None:
         server = StackServer()
         for name, method in stack_server.COMMAND_TO_SERVICE_METHOD.items():
@@ -1365,3 +1376,135 @@ class TestSimulatedTransferOverGrpc(_SimulatedGrpcTestCase):
         self.assertEqual(reply.response, tool_base_pb2.INVALID_ARGUMENTS)
         self.assertEqual(self.sleeps, [])
         self._assert_core_free()
+
+
+class TestCheckArgs(unittest.TestCase):
+    """D-17: the adapter checks only its own arguments, exactly."""
+
+    def _problems(self, name: str, **fields: Any) -> list[str]:
+        return stack_server._check_args(getattr(stack_pb2.Command, name)(**fields))
+
+    def test_transfer_step_key(self) -> None:
+        for label, fields in (("unset", {}), ("empty", {"step_key": ""}),
+                              ("blank", {"step_key": "   "})):
+            with self.subTest(label):
+                self.assertEqual(len(self._problems("Transfer", **fields)), 1)
+        self.assertEqual(self._problems("Transfer", step_key="k"), [])
+
+    def test_transfer_timeout(self) -> None:
+        for value in (float("nan"), float("inf"), float("-inf"), -0.5):
+            with self.subTest(value=value):
+                problems = self._problems("Transfer", step_key="k", timeout_s=value)
+                self.assertEqual(len(problems), 1)
+                self.assertIn("timeout_s", problems[0])
+        for value in (0.0, 30.0):
+            with self.subTest(value=value):
+                self.assertEqual(self._problems("Transfer", step_key="k", timeout_s=value), [])
+        self.assertEqual(self._problems("Transfer", step_key="k"), [])
+
+    def test_transfer_with_both_problems_reports_both(self) -> None:
+        self.assertEqual(len(self._problems("Transfer", timeout_s=-1.0)), 2)
+
+    def test_acknowledge_guid(self) -> None:
+        for label, fields in (("unset", {}), ("empty", {"guid": ""}), ("blank", {"guid": "  "})):
+            with self.subTest(label):
+                problems = self._problems("AcknowledgeFailure", arm_inspected="yes", **fields)
+                self.assertEqual(len(problems), 1)
+                self.assertIn("guid", problems[0])
+
+    def test_acknowledge_arm_inspected_is_exactly_yes_or_no(self) -> None:
+        for bad in ("", "Yes", "YES", " yes", "yes ", "y", "true", "no ", "No", "maybe"):
+            with self.subTest(bad=bad):
+                problems = self._problems("AcknowledgeFailure", guid="g", arm_inspected=bad)
+                self.assertEqual(len(problems), 1)
+                self.assertIn("arm_inspected", problems[0])
+        problems = self._problems("AcknowledgeFailure", guid="g")
+        self.assertEqual(len(problems), 1)
+        self.assertIn("unset", problems[0])
+        for good in ("yes", "no"):
+            with self.subTest(good=good):
+                self.assertEqual(
+                    self._problems("AcknowledgeFailure", guid="g", arm_inspected=good), [])
+
+    def test_reads_and_the_latch_and_blank_estimate_pass(self) -> None:
+        for name in ("GetManagerState", "GetRobotStates", "ListDevices", "ListLabwareProfiles",
+                     "ListTransferProfiles", "GetLabwarePresence", "GetTransferEstimate",
+                     "GetFailureLatch"):
+            with self.subTest(name):
+                self.assertEqual(self._problems(name), [])
+        self.assertEqual(self._problems("GetTransferEstimate", robot="", source_nest=" "), [])
+
+
+_REFUSALS = {
+    "Transfer": "stack: Transfer is not available in this build",
+    "AcknowledgeFailure": "stack: AcknowledgeFailure is not available in this build",
+    "GetFailureLatch": "stack: GetFailureLatch is not available in this build",
+}
+
+
+class TestRealModeRefusals(_RealModeGrpcTestCase):
+    """STK-05 / T-04-15: the three Phase 5 commands are refused in real mode
+    with no service call; adapter arguments are checked before the refusal."""
+
+    def test_valid_phase_5_commands_are_refused_without_a_service_call(self) -> None:
+        commands = {
+            "Transfer": self._stack(transfer=stack_pb2.Command.Transfer(step_key="k")),
+            "AcknowledgeFailure": self._stack(
+                acknowledge_failure=stack_pb2.Command.AcknowledgeFailure(
+                    guid="g", arm_inspected="yes")),
+            "GetFailureLatch": self._stack(
+                get_failure_latch=stack_pb2.Command.GetFailureLatch()),
+        }
+        for name, command in commands.items():
+            with self.subTest(name):
+                reply = self.stub.ExecuteCommand(command)
+                self.assertEqual(reply.response, ERROR_FROM_TOOL)
+                self.assertEqual(reply.error_message, _REFUSALS[name])
+        self.assertEqual(self.service.mock_calls, [])
+        self.assertEqual(self._health().status, READY)
+
+    def test_bad_arguments_win_over_the_refusal(self) -> None:
+        for label, command in (
+            ("transfer", self._stack(transfer=stack_pb2.Command.Transfer())),
+            ("ack", self._stack(acknowledge_failure=stack_pb2.Command.AcknowledgeFailure(
+                guid="g", arm_inspected="Yes"))),
+        ):
+            with self.subTest(label):
+                reply = self.stub.ExecuteCommand(command)
+                self.assertEqual(reply.response, tool_base_pb2.INVALID_ARGUMENTS)
+        self.assertEqual(self.service.mock_calls, [])
+
+
+class TestRealModeRefusalsOrdering(_StackTestCase):
+    """D-14: with no service the three refusals still win over not-configured."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.server = StackServer()
+        self.assertIsNone(self.server.service)
+        self.assertFalse(self.server.simulated)
+
+    def _dispatch(self, name: str, **fields: Any) -> Any:
+        return self.server._dispatchCommand(getattr(stack_pb2.Command, name)(**fields))
+
+    def test_the_latch_is_refused_not_unconfigured(self) -> None:
+        reply = self._dispatch("GetFailureLatch")
+        self.assertEqual(reply.response, ERROR_FROM_TOOL)
+        self.assertEqual(reply.error_message, _REFUSALS["GetFailureLatch"])
+
+    def test_transfer_and_ack_with_good_arguments_are_refused_not_unconfigured(self) -> None:
+        reply = self._dispatch("Transfer", step_key="k")
+        self.assertEqual(reply.error_message, _REFUSALS["Transfer"])
+        reply = self._dispatch("AcknowledgeFailure", guid="g", arm_inspected="no")
+        self.assertEqual(reply.error_message, _REFUSALS["AcknowledgeFailure"])
+
+    def test_reads_and_estimate_are_not_ready(self) -> None:
+        for name in ("GetManagerState", "GetRobotStates", "ListDevices", "ListLabwareProfiles",
+                     "ListTransferProfiles", "GetLabwarePresence", "GetTransferEstimate"):
+            with self.subTest(name):
+                reply = self._dispatch(name)
+                self.assertEqual(reply.response, NOT_READY)
+                self.assertEqual(reply.error_message, "stack: not configured")
+
+    def test_transfer_without_step_key_is_invalid_arguments(self) -> None:
+        self.assertEqual(self._dispatch("Transfer").response, tool_base_pb2.INVALID_ARGUMENTS)

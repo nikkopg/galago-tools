@@ -29,6 +29,7 @@ from tools.grpc_interfaces.stack_pb2 import Command, Config
 from tools.grpc_interfaces.tool_base_pb2 import (
     ERROR_FROM_TOOL,
     INVALID_ARGUMENTS,
+    NOT_READY,
     SUCCESS,
     ExecuteCommandReply,
     ResponseCode,
@@ -164,6 +165,13 @@ def _check_args(command: message.Message) -> list[str]:
             value = cmd.timeout_s
             if not math.isfinite(value) or value < 0:
                 problems.append(f"timeout_s must be a finite number >= 0 (got {value!r})")
+    elif type(command).__name__ == "AcknowledgeFailure":
+        if not (cmd.HasField("guid") and cmd.guid.strip()):
+            problems.append("guid is required")
+        # Exact match only: no strip, no case folding, no default (T-04-16).
+        if not (cmd.HasField("arm_inspected") and cmd.arm_inspected in ("yes", "no")):
+            got = repr(cmd.arm_inspected) if cmd.HasField("arm_inspected") else "unset"
+            problems.append(f"arm_inspected must be exactly 'yes' or 'no' (got {got})")
     return problems
 
 
@@ -288,6 +296,11 @@ class StackServer(ToolServer):
             return _reply(
                 INVALID_ARGUMENTS,
                 message=_one_line("invalid arguments: " + "; ".join(problems), 500))
+        # D-14: the three refusals need no service and their text is
+        # operator-visible, so they win over not-configured.
+        if (not self.simulated and self.service is None
+                and type(command).__name__ not in UNAVAILABLE_COMMANDS):
+            return _reply(NOT_READY, message=_NOT_CONFIGURED_MESSAGE)
         return super()._dispatchCommand(command)
 
     def _require_service(self) -> StackService:
@@ -324,6 +337,14 @@ class StackServer(ToolServer):
     def Transfer(self, params: "Command.Transfer") -> ExecuteCommandReply:
         # D-18: no real-mode motion path in this phase; never touches the service.
         return _unavailable_reply("Transfer")
+
+    def AcknowledgeFailure(self, params: "Command.AcknowledgeFailure") -> ExecuteCommandReply:
+        # D-18: refused in real mode; never touches the service.
+        return _unavailable_reply("AcknowledgeFailure")
+
+    def GetFailureLatch(self, params: "Command.GetFailureLatch") -> ExecuteCommandReply:
+        # D-18: refused in real mode; never touches the service.
+        return _unavailable_reply("GetFailureLatch")
 
     def EstimateTransfer(self, params: "Command.Transfer") -> int:
         return EST_TRANSFER_S
