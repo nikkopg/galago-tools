@@ -5,16 +5,16 @@ milestone_name: STACK Tool & STACK↔F.A.S.T. Handoff
 current_phase: 4
 current_phase_name: STACK Tool Registration, Reads & Estimate
 status: executing
-stopped_at: Completed 04-03-PLAN.md
-last_updated: "2026-10-28T22:30:48.400Z"
+stopped_at: Completed 04-04-PLAN.md
+last_updated: "2026-10-28T22:34:32.173Z"
 last_activity: 2026-10-28
 last_activity_desc: Phase 4 execution started
-state_head: 5b85b921128b190c7d4ab15844d05291d24f912e
+state_head: 4599009f670aca493b3ed76c52b62fca6f3689a1
 progress:
   total_phases: 4
   completed_phases: 0
   total_plans: 5
-  completed_plans: 3
+  completed_plans: 4
   percent: 0
 ---
 
@@ -32,7 +32,7 @@ acknowledges on its own. For the STACK: a step never sends a second transfer.
 ## Current Position
 
 Phase: 4 (STACK Tool Registration, Reads & Estimate) — EXECUTING
-Plan: 4 of 5
+Plan: 5 of 5
 Status: Ready to execute
 Last activity: 2026-10-28 — Phase 4 execution started
 
@@ -83,6 +83,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 04 P01 | 2 min | 3 tasks | 8 files |
 | Phase 04 P02 | 8 min | 3 tasks | 2 files |
 | Phase 04 P03 | 15 min | 3 tasks | 2 files |
+| Phase 04 P04 | 20 min | 3 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -110,6 +111,7 @@ v2 roadmap-level decisions (2026-10-28, detail in PROJECT.md Key Decisions):
 - [Phase 04]: transfer_timeout_s and ledger_dir are record-only in Configure; ledger path untouched until Phase 5
 - [Phase 04]: 04-03: blank/whitespace instrument fields reach the core as None; the adapter applies no instrument rule
 - [Phase 04]: 04-03: operator error line = kind, reason, guid, then one bounded structured hint; core explanation/detail text never read
+- [Phase 04]: 04-04: Phase 5 commands (Transfer, AcknowledgeFailure, GetFailureLatch) are refused in real mode before the not-configured check; arm_inspected matched byte-for-byte against yes/no
 
 ### Pending Todos
 
@@ -142,8 +144,8 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-28T22:30:48.377Z
-Stopped at: Completed 04-03-PLAN.md
+Last session: 2026-10-28T22:34:32.150Z
+Stopped at: Completed 04-04-PLAN.md
 Resume file: None
 
 ## Operator Next Steps
