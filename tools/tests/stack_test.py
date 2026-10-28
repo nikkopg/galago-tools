@@ -75,7 +75,7 @@ except ModuleNotFoundError as exc:
             "is the authoritative gate") from exc
     raise
 
-from tools.grpc_interfaces import controller_pb2, stack_pb2, tool_base_pb2
+from tools.grpc_interfaces import controller_pb2, fast_pb2, stack_pb2, tool_base_pb2
 from tools.grpc_interfaces.tool_base_pb2 import (
     ERROR_FROM_TOOL,
     FAILED,
@@ -1733,3 +1733,128 @@ class TestReadCommandSet(unittest.TestCase):
     def test_every_entry_is_a_field_of_the_stack_command_oneof(self) -> None:
         oneof = {f.name for f in stack_pb2.Command.DESCRIPTOR.oneofs_by_name["command"].fields}
         self.assertLessEqual(READ_COMMANDS, oneof)
+
+
+_ALL_READ_COMMANDS = (
+    ("manager_state", "get_manager_state", stack_pb2.Command.GetManagerState),
+    ("robot_states", "get_robot_states", stack_pb2.Command.GetRobotStates),
+    ("devices", "list_devices", stack_pb2.Command.ListDevices),
+    ("labware_profiles", "list_labware_profiles", stack_pb2.Command.ListLabwareProfiles),
+    ("transfer_profiles", "list_transfer_profiles", stack_pb2.Command.ListTransferProfiles),
+    ("labware_presence", "get_labware_presence", stack_pb2.Command.GetLabwarePresence),
+    ("estimate_transfer", "get_transfer_estimate", stack_pb2.Command.GetTransferEstimate),
+)
+
+
+class TestNotConfigured(_StackTestCase):
+    """D-14: a bypassed read never reaches a None service."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.open_service = MagicMock()
+        patcher = patch("tools.stack.server.open_service", self.open_service)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.server = StackServer()
+        self.stub = _serve_in_process(self, self.server)
+
+    def _stack(self, **command: Any) -> tool_base_pb2.Command:
+        return tool_base_pb2.Command(stack=stack_pb2.Command(**command))
+
+    def _health(self) -> tool_base_pb2.StatusReply:
+        return self.stub.GetStatus(empty_pb2.Empty())  # type: ignore[no-any-return]
+
+    def test_fresh_server_reads_are_not_ready_and_the_latch_is_refused(self) -> None:
+        self.assertEqual(self._health().status, tool_base_pb2.NOT_CONFIGURED)
+        for field, message in (("get_manager_state", stack_pb2.Command.GetManagerState),
+                               ("get_transfer_estimate", stack_pb2.Command.GetTransferEstimate)):
+            with self.subTest(field):
+                reply = self.stub.ExecuteCommand(self._stack(**{field: message()}))
+                self.assertEqual(reply.response, NOT_READY)
+                self.assertEqual(reply.error_message, "stack: not configured")
+        reply = self.stub.ExecuteCommand(self._stack(
+            get_failure_latch=stack_pb2.Command.GetFailureLatch()))
+        self.assertEqual(reply.response, ERROR_FROM_TOOL)
+        self.assertEqual(reply.error_message, _REFUSALS["GetFailureLatch"])
+        self.assertEqual(self._health().status, tool_base_pb2.NOT_CONFIGURED)
+        self.open_service.assert_not_called()
+
+    def test_simulated_to_real_switch_leaves_reads_not_configured(self) -> None:
+        sim = self.stub.Configure(tool_base_pb2.Config(
+            simulated=True, toolId="stack-sim", stack=stack_pb2.Config(host="127.0.0.1")))
+        self.assertEqual(sim.response, SUCCESS)
+        real = self.stub.Configure(tool_base_pb2.Config(
+            simulated=False, stack=stack_pb2.Config(host="127.0.0.1")))
+        self.assertEqual(real.response, SUCCESS)
+        self.assertIsNone(self.server.service)
+        reply = self.stub.ExecuteCommand(self._stack(
+            get_manager_state=stack_pb2.Command.GetManagerState()))
+        self.assertEqual(reply.response, NOT_READY)
+        self.assertEqual(reply.error_message, "stack: not configured")
+        self.open_service.assert_not_called()
+
+
+class TestReadBypassEdges(_RealModeGrpcTestCase):
+    """D-13: the bypass never touches status, never hides an exception, and
+    leaves every non-read request to base_server."""
+
+    def test_exception_becomes_driver_error_with_last_error_and_status_kept(self) -> None:
+        self.service.manager_state.side_effect = RuntimeError("boom")
+        reply = self.stub.ExecuteCommand(self._stack(
+            get_manager_state=stack_pb2.Command.GetManagerState()))
+        self.assertEqual(reply.response, tool_base_pb2.DRIVER_ERROR)
+        self.assertEqual(reply.error_message, "boom")
+        self.assertEqual(self.server.last_error, "boom")
+        self.assertEqual(self._health().status, READY)
+
+    def test_reads_never_call_set_status_but_a_transfer_brackets_busy_ready(self) -> None:
+        for method in ("manager_state", "robot_states", "devices", "labware_profiles",
+                       "transfer_profiles", "labware_presence", "estimate_transfer"):
+            getattr(self.service, method).return_value = ReadFailed(
+                error={"status": None, "name": "x"})
+        calls: list[Any] = []
+        real_set_status = self.server.setStatus
+
+        def _wrapped(status: Any) -> None:
+            calls.append(status)
+            real_set_status(status)
+
+        with patch.object(self.server, "setStatus", side_effect=_wrapped):
+            for _method, field, message in _ALL_READ_COMMANDS:
+                self.stub.ExecuteCommand(self._stack(**{field: message()}))
+            self.stub.ExecuteCommand(self._stack(
+                get_failure_latch=stack_pb2.Command.GetFailureLatch()))
+            self.assertEqual(calls, [])
+            self.assertEqual(self._health().status, READY)
+            self.stub.ExecuteCommand(self._stack(
+                transfer=stack_pb2.Command.Transfer(step_key="k")))
+            self.assertEqual(calls, [tool_base_pb2.BUSY, READY])
+
+    def test_empty_stack_command_and_other_tool_fall_through(self) -> None:
+        empty = self.stub.ExecuteCommand(tool_base_pb2.Command(stack=stack_pb2.Command()))
+        self.assertEqual(empty.response, tool_base_pb2.UNRECOGNIZED_COMMAND)
+        other = self.stub.ExecuteCommand(tool_base_pb2.Command(
+            fast=fast_pb2.Command(pause=fast_pb2.Command.Pause())))
+        self.assertEqual(other.response, tool_base_pb2.WRONG_TOOL)
+
+    def test_estimate_read_while_ready_calls_the_core_once_and_stays_ready(self) -> None:
+        self.service.estimate_transfer.return_value = Estimated(
+            estimated_time="00:00:48", guid=None, advisories=[], seconds=48.0)
+        reply = self.stub.ExecuteCommand(self._stack(
+            get_transfer_estimate=stack_pb2.Command.GetTransferEstimate(**_ESTIMATE_FIELDS)))
+        self.assertEqual(reply.response, SUCCESS)
+        self.service.estimate_transfer.assert_called_once()
+        self.assertEqual(len(self.service.mock_calls), 1)
+        self.assertEqual(self._health().status, READY)
+
+
+class TestSimulatedBypassRead(_SimulatedGrpcTestCase):
+    """A bypassed read in simulated mode still goes through _dispatchCommand:
+    the constant estimate is slept and the core is never contacted."""
+
+    def test_manager_state_sleeps_the_read_constant_core_free(self) -> None:
+        reply = self.stub.ExecuteCommand(self._stack(
+            get_manager_state=stack_pb2.Command.GetManagerState()))
+        self.assertEqual(reply.response, SUCCESS)
+        self.assertEqual(self.sleeps, [2.0])
+        self._assert_core_free()
