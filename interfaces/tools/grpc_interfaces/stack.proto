@@ -1,0 +1,97 @@
+syntax = 'proto3';
+
+package com.science.foundry.tools.grpc_interfaces.stack;
+
+// Frozen v2 command surface of the STACK tool (Phase 4 D-01..D-05). galago-core
+// generates its ts-proto types and commandFields.stack from this file once;
+// any change here re-opens that work and needs the user's sign-off.
+message Command {
+  oneof command {
+    Transfer transfer = 1;
+    GetManagerState get_manager_state = 2;
+    GetRobotStates get_robot_states = 3;
+    ListDevices list_devices = 4;
+    ListLabwareProfiles list_labware_profiles = 5;
+    ListTransferProfiles list_transfer_profiles = 6;
+    GetLabwarePresence get_labware_presence = 7;
+    GetTransferEstimate get_transfer_estimate = 8;
+    AcknowledgeFailure acknowledge_failure = 9;
+    GetFailureLatch get_failure_latch = 10;
+  }
+
+  // step_key must be unique per Galago run step (it keys the transfer ledger).
+  message Transfer {
+    optional string step_key = 1;
+    optional string robot = 2;
+    optional string labware_profile = 3;
+    optional string source_device = 4;
+    optional string source_deck = 5;
+    optional string source_nest = 6;
+    optional string source_transfer_profile = 7;
+    optional string destination_device = 8;
+    optional string destination_deck = 9;
+    optional string destination_nest = 10;
+    optional string destination_transfer_profile = 11;
+    optional double timeout_s = 12;
+  }
+
+  message GetManagerState {
+  }
+
+  message GetRobotStates {
+  }
+
+  message ListDevices {
+    optional bool refresh = 1;
+  }
+
+  message ListLabwareProfiles {
+    optional bool refresh = 1;
+  }
+
+  message ListTransferProfiles {
+    optional bool refresh = 1;
+  }
+
+  message GetLabwarePresence {
+    optional string robot = 1;
+  }
+
+  message GetTransferEstimate {
+    optional string robot = 1;
+    optional string labware_profile = 2;
+    optional string source_device = 3;
+    optional string source_deck = 4;
+    optional string source_nest = 5;
+    optional string source_transfer_profile = 6;
+    optional string destination_device = 7;
+    optional string destination_deck = 8;
+    optional string destination_nest = 9;
+    optional string destination_transfer_profile = 10;
+  }
+
+  // arm_inspected is "yes" only after the arm was inspected and STACK
+  // recovered in the STACK Manager; only the exact strings "yes" and "no"
+  // are accepted.
+  message AcknowledgeFailure {
+    optional string guid = 1;
+    optional string arm_inspected = 2;
+  }
+
+  message GetFailureLatch {
+  }
+}
+
+// Config scalars have no presence: 0 / "" mean unset.
+// There is deliberately no lock directory field: galago and stack-mcp must
+// contend on the same owner lock. Credentials come only from STACK_USER and
+// STACK_PASSWORD in the tool server's environment, never from Config.
+message Config {
+  string host = 1;
+  // 0 means the default manager port (5005).
+  int32 port = 2;
+  // 0 means the adapter default (used from Phase 5).
+  double transfer_timeout_s = 3;
+  // Blank means the per-user state directory (used from Phase 5).
+  string ledger_dir = 4;
+}

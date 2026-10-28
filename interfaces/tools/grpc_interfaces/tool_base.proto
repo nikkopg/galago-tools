@@ -26,6 +26,7 @@ import "tools/grpc_interfaces/pyhamilton.proto";
 import "tools/grpc_interfaces/clariostar.proto";
 import "tools/grpc_interfaces/lcus1_relay.proto";
 import "tools/grpc_interfaces/fast.proto";
+import "tools/grpc_interfaces/stack.proto";
 
 message Command {
   oneof tool_command {
@@ -52,6 +53,7 @@ message Command {
     tools.grpc_interfaces.clariostar.Command clariostar = 21;
     tools.grpc_interfaces.lcus1_relay.Command lcus1_relay = 22;
     tools.grpc_interfaces.fast.Command fast = 23;
+    tools.grpc_interfaces.stack.Command stack = 24;
   }
 }
 
@@ -82,6 +84,7 @@ message Config {
     tools.grpc_interfaces.clariostar.Config clariostar = 40;
     tools.grpc_interfaces.lcus1_relay.Config lcus1_relay = 41;
     tools.grpc_interfaces.fast.Config fast = 42;
+    tools.grpc_interfaces.stack.Config stack = 43;
   }
 }
 

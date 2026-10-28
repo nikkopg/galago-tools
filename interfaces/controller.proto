@@ -28,6 +28,7 @@ enum ToolType {
   clariostar = 21;
   lcus1_relay = 22;
   fast = 23;
+  stack = 24;
 }
 
 message ToolConfig {
