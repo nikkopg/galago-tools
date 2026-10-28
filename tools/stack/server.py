@@ -17,6 +17,7 @@ import logging
 import math
 from typing import Any, Optional, cast
 
+import grpc
 from google.protobuf import message
 from google.protobuf.struct_pb2 import Struct
 from stack_automation_layer.composition import OwnedService, open_service
@@ -27,6 +28,7 @@ from stack_automation_layer.service import StackService
 from tools.base_server import ToolServer, serve
 from tools.grpc_interfaces.stack_pb2 import Command, Config
 from tools.grpc_interfaces.tool_base_pb2 import (
+    DRIVER_ERROR,
     ERROR_FROM_TOOL,
     INVALID_ARGUMENTS,
     NOT_READY,
@@ -34,6 +36,7 @@ from tools.grpc_interfaces.tool_base_pb2 import (
     ExecuteCommandReply,
     ResponseCode,
 )
+from tools.grpc_interfaces.tool_base_pb2 import Command as ToolCommand
 
 DEFAULT_PORT = 5005
 
@@ -60,6 +63,21 @@ EST_ACK_S = 2
 # D-18: commands the real-mode adapter refuses without touching the service
 # (Phase 5 wires them). They win over the not-configured check (D-14).
 UNAVAILABLE_COMMANDS = frozenset({"Transfer", "AcknowledgeFailure", "GetFailureLatch"})
+
+# D-13: the eight read-only commands (oneof field names) that bypass the BUSY
+# gate so an operator can read STACK state while a motion command holds the
+# tool. get_transfer_estimate is included (D-15): it sends one estimation POST
+# and never moves anything. transfer and acknowledge_failure are never in it.
+READ_COMMANDS = frozenset({
+    "get_manager_state",
+    "get_robot_states",
+    "list_devices",
+    "list_labware_profiles",
+    "list_transfer_profiles",
+    "get_labware_presence",
+    "get_transfer_estimate",
+    "get_failure_latch",
+})
 
 # D-14: real mode with no service yet.
 _NOT_CONFIGURED_MESSAGE = "stack: not configured"
@@ -287,6 +305,36 @@ class StackServer(ToolServer):
         self._owned = open_service(host, port, owner="galago")
         self.service = self._owned.service
         logging.warning(_RESTART_WARNING)
+
+    def ExecuteCommand(
+        self, request: ToolCommand, context: grpc.ServicerContext
+    ) -> ExecuteCommandReply:
+        """Override of ToolServer.ExecuteCommand (D-13..D-15, STK-05).
+
+        base_server refuses every command unless READY, sets BUSY for the whole
+        command and resets READY in its finally. A read must answer while a
+        motion command holds the tool BUSY and must not flip its status, so
+        this override bypasses those three for READ_COMMANDS only. It still
+        runs the argument check, simulated mode and the real-mode
+        not-configured guard because it goes through _dispatchCommand. Never
+        calls isReady, parseCommand or setStatus on this path. Every other
+        request (a non-stack tool_command, a stack request with no command, any
+        non-read command) returns super().ExecuteCommand(request, context)
+        unchanged. tools/base_server.py is never edited."""
+        if request.WhichOneof("tool_command") == self.toolType:
+            stack_command = request.stack
+            field_name = stack_command.WhichOneof("command")
+            if field_name in READ_COMMANDS:
+                command = getattr(stack_command, field_name)
+                try:
+                    logging.info(f"Running command {command.__class__.__name__}")
+                    return self._dispatchCommand(command)
+                except Exception as e:
+                    logging.error(f"Error on Tool ={self.toolId}")
+                    self.last_error = str(e)
+                    return ExecuteCommandReply(
+                        response=DRIVER_ERROR, error_message=_one_line(str(e), 500))
+        return super().ExecuteCommand(request, context)
 
     def _dispatchCommand(self, command: message.Message) -> ExecuteCommandReply:
         # D-17: adapter arguments are checked first, in both modes; the base

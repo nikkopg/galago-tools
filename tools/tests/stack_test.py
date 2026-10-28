@@ -66,7 +66,7 @@ try:
     from stack_automation_layer.service import StackService
 
     from tools.stack import server as stack_server
-    from tools.stack.server import StackServer, _result_reply
+    from tools.stack.server import READ_COMMANDS, StackServer, _result_reply
 except ModuleNotFoundError as exc:
     if exc.name and exc.name.split(".")[0] in ("stack_automation_layer", "httpx"):
         raise unittest.SkipTest(
@@ -1713,3 +1713,23 @@ class TestBusyReads(_RealModeGrpcTestCase):
         thread.join(10)
         self.assertEqual(result["transfer"].response, SUCCESS)
         self.assertEqual(self._health().status, READY)
+
+
+class TestReadCommandSet(unittest.TestCase):
+    """T-04-19: the BUSY-bypass set is pinned so a motion or acknowledge command
+    can never join it silently."""
+
+    def test_the_set_is_exactly_the_eight_reads(self) -> None:
+        self.assertEqual(READ_COMMANDS, frozenset({
+            "get_manager_state", "get_robot_states", "list_devices",
+            "list_labware_profiles", "list_transfer_profiles", "get_labware_presence",
+            "get_transfer_estimate", "get_failure_latch",
+        }))
+
+    def test_motion_and_acknowledge_are_excluded(self) -> None:
+        self.assertNotIn("transfer", READ_COMMANDS)
+        self.assertNotIn("acknowledge_failure", READ_COMMANDS)
+
+    def test_every_entry_is_a_field_of_the_stack_command_oneof(self) -> None:
+        oneof = {f.name for f in stack_pb2.Command.DESCRIPTOR.oneofs_by_name["command"].fields}
+        self.assertLessEqual(READ_COMMANDS, oneof)
