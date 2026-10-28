@@ -15,8 +15,9 @@ read, an unknown shape) is an ERROR_FROM_TOOL carrying a one-line message.
 import argparse
 import logging
 import math
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
+from google.protobuf import message
 from google.protobuf.struct_pb2 import Struct
 from stack_automation_layer.composition import OwnedService, open_service
 from stack_automation_layer.model import Location, TransferRequest
@@ -27,6 +28,7 @@ from tools.base_server import ToolServer, serve
 from tools.grpc_interfaces.stack_pb2 import Command, Config
 from tools.grpc_interfaces.tool_base_pb2 import (
     ERROR_FROM_TOOL,
+    INVALID_ARGUMENTS,
     SUCCESS,
     ExecuteCommandReply,
     ResponseCode,
@@ -45,6 +47,21 @@ COMMAND_TO_SERVICE_METHOD = {
     "GetLabwarePresence": "labware_presence",
     "GetTransferEstimate": "estimate_transfer",
 }
+
+# D-19: every Estimate<Cmd> hook returns one of these local constants (seconds);
+# none does I/O, so neither a simulated run nor the EstimateDuration RPC can
+# touch the instrument or raise.
+EST_TRANSFER_S = 35
+EST_TRANSFER_ESTIMATE_S = 3
+EST_READ_S = 2
+EST_ACK_S = 2
+
+# D-18: commands the real-mode adapter refuses without touching the service
+# (Phase 5 wires them). They win over the not-configured check (D-14).
+UNAVAILABLE_COMMANDS = frozenset({"Transfer", "AcknowledgeFailure", "GetFailureLatch"})
+
+# D-14: real mode with no service yet.
+_NOT_CONFIGURED_MESSAGE = "stack: not configured"
 
 # D-09: logged once per fresh open. A restart of this tool server silently
 # drops the core's in-process failure latch and in-flight guard.
@@ -126,6 +143,28 @@ def _reply(code: ResponseCode, *, message: str = "",
         s.update(meta)
         reply.meta_data.CopyFrom(s)
     return reply
+
+
+def _unavailable_reply(name: str) -> ExecuteCommandReply:
+    """D-18: ERROR_FROM_TOOL, because galago-core hides the text of
+    INVALID_ARGUMENTS / NOT_READY replies from the operator."""
+    return _reply(ERROR_FROM_TOOL, message=f"stack: {name} is not available in this build")
+
+
+def _check_args(command: message.Message) -> list[str]:
+    """D-17: the adapter's own argument rules, identical in both modes. Only
+    arguments this adapter owns are checked; instrument fields (robot, nests,
+    profiles) are the core's business. Returns a list of problems, [] when ok."""
+    problems: list[str] = []
+    cmd = cast(Any, command)
+    if type(command).__name__ == "Transfer":
+        if not (cmd.HasField("step_key") and cmd.step_key.strip()):
+            problems.append("step_key is required")
+        if cmd.HasField("timeout_s"):
+            value = cmd.timeout_s
+            if not math.isfinite(value) or value < 0:
+                problems.append(f"timeout_s must be a finite number >= 0 (got {value!r})")
+    return problems
 
 
 def _find_guid(d: dict) -> Optional[str]:
@@ -241,6 +280,16 @@ class StackServer(ToolServer):
         self.service = self._owned.service
         logging.warning(_RESTART_WARNING)
 
+    def _dispatchCommand(self, command: message.Message) -> ExecuteCommandReply:
+        # D-17: adapter arguments are checked first, in both modes; the base
+        # class then runs the simulated sleep or the handler.
+        problems = _check_args(command)
+        if problems:
+            return _reply(
+                INVALID_ARGUMENTS,
+                message=_one_line("invalid arguments: " + "; ".join(problems), 500))
+        return super()._dispatchCommand(command)
+
     def _require_service(self) -> StackService:
         if self.service is None:
             raise RuntimeError("stack: not configured")
@@ -271,6 +320,13 @@ class StackServer(ToolServer):
     def GetTransferEstimate(self, params: "Command.GetTransferEstimate") -> ExecuteCommandReply:
         service = self._require_service()
         return _result_reply(service.estimate_transfer(_transfer_request(params)))
+
+    def Transfer(self, params: "Command.Transfer") -> ExecuteCommandReply:
+        # D-18: no real-mode motion path in this phase; never touches the service.
+        return _unavailable_reply("Transfer")
+
+    def EstimateTransfer(self, params: "Command.Transfer") -> int:
+        return EST_TRANSFER_S
 
 
 if __name__ == "__main__":

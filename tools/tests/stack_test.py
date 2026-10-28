@@ -11,6 +11,8 @@ import json
 import os
 import socket
 import tempfile
+import time
+import types
 import unittest
 from concurrent import futures
 from pathlib import Path
@@ -1288,3 +1290,78 @@ class TestResultMapping(_StackTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class _SimulatedGrpcTestCase(_StackTestCase):
+    """Shared simulated-mode in-process gRPC fixture: open_service is replaced
+    by a MagicMock that must never be called, and tools.base_server.time.sleep
+    is faked so the constant estimates are recorded, not slept. Declares no
+    tests."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.open_service = MagicMock()
+        patcher = patch("tools.stack.server.open_service", self.open_service)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+        self.sleeps: list[float] = []
+        time_patcher = patch(
+            "tools.base_server.time",
+            types.SimpleNamespace(time=time.time, sleep=self._fake_sleep))
+        time_patcher.start()
+        self.addCleanup(time_patcher.stop)
+
+        self.ledger_path = Path(self.lock_dir) / "ledger"
+        self.server = StackServer()
+        self.stub = _serve_in_process(self, self.server)
+        reply = self.stub.Configure(tool_base_pb2.Config(
+            simulated=True, toolId="stack-sim",
+            stack=stack_pb2.Config(host="127.0.0.1", ledger_dir=str(self.ledger_path))))
+        self.assertEqual(reply.response, SUCCESS)
+
+    def _fake_sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+
+    def _stack(self, **command: Any) -> tool_base_pb2.Command:
+        return tool_base_pb2.Command(stack=stack_pb2.Command(**command))
+
+    def _assert_core_free(self) -> None:
+        self.open_service.assert_not_called()
+        self.assertIsNone(self.server.service)
+        self.assertEqual(list(Path(self.lock_dir).glob("*.lock")), [])
+        self.assertFalse(self.ledger_path.exists())
+
+
+class TestSimulatedTransferOverGrpc(_SimulatedGrpcTestCase):
+    """STK-06 tracer: a simulated Transfer validates the adapter's arguments,
+    sleeps the constant estimate and never touches the core."""
+
+    def _transfer(self, **fields: Any) -> Any:
+        return self.stub.ExecuteCommand(self._stack(
+            transfer=stack_pb2.Command.Transfer(**fields)))
+
+    def test_status_is_simulated(self) -> None:
+        self.assertEqual(self.stub.GetStatus(empty_pb2.Empty()).status,
+                         tool_base_pb2.SIMULATED)
+
+    def test_valid_transfer_sleeps_the_constant_and_succeeds(self) -> None:
+        reply = self._transfer(step_key="run-1:stack-1", robot="R1")
+        self.assertEqual(reply.response, SUCCESS)
+        self.assertEqual(self.sleeps, [35.0])
+        self._assert_core_free()
+
+    def test_missing_or_blank_step_key_is_invalid_and_does_not_sleep(self) -> None:
+        for label, fields in (("unset", {}), ("blank", {"step_key": "   "})):
+            with self.subTest(label):
+                reply = self._transfer(**fields)
+                self.assertEqual(reply.response, tool_base_pb2.INVALID_ARGUMENTS)
+                self.assertIn("step_key", reply.error_message)
+                self.assertEqual(self.sleeps, [])
+        self._assert_core_free()
+
+    def test_nan_timeout_is_invalid(self) -> None:
+        reply = self._transfer(step_key="k", timeout_s=float("nan"))
+        self.assertEqual(reply.response, tool_base_pb2.INVALID_ARGUMENTS)
+        self.assertEqual(self.sleeps, [])
+        self._assert_core_free()
