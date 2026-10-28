@@ -5,16 +5,16 @@ milestone_name: STACK Tool & STACK↔F.A.S.T. Handoff
 current_phase: 4
 current_phase_name: STACK Tool Registration, Reads & Estimate
 status: executing
-stopped_at: Completed 04-02-PLAN.md
-last_updated: "2026-10-28T22:25:55.382Z"
+stopped_at: Completed 04-03-PLAN.md
+last_updated: "2026-10-28T22:30:48.400Z"
 last_activity: 2026-10-28
 last_activity_desc: Phase 4 execution started
-state_head: 5ba19c34fb191a6d1a415c37a697974134dde47c
+state_head: 5b85b921128b190c7d4ab15844d05291d24f912e
 progress:
   total_phases: 4
   completed_phases: 0
   total_plans: 5
-  completed_plans: 2
+  completed_plans: 3
   percent: 0
 ---
 
@@ -32,7 +32,7 @@ acknowledges on its own. For the STACK: a step never sends a second transfer.
 ## Current Position
 
 Phase: 4 (STACK Tool Registration, Reads & Estimate) — EXECUTING
-Plan: 3 of 5
+Plan: 4 of 5
 Status: Ready to execute
 Last activity: 2026-10-28 — Phase 4 execution started
 
@@ -82,6 +82,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 02 P05 | 25min | 2 tasks | 2 files |
 | Phase 04 P01 | 2 min | 3 tasks | 8 files |
 | Phase 04 P02 | 8 min | 3 tasks | 2 files |
+| Phase 04 P03 | 15 min | 3 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -107,6 +108,8 @@ v2 roadmap-level decisions (2026-10-28, detail in PROJECT.md Key Decisions):
 - [Phase 04]: StackServer._configure is the thinnest D-07 path (open_service owner galago); Plan 02 adds validation and close-first lifecycle
 - [Phase 04]: Same-endpoint Configure reuse keyed on core endpoint_key vs OwnedService.endpoint; close-first on endpoint change so a failed open leaves no lock or service
 - [Phase 04]: transfer_timeout_s and ledger_dir are record-only in Configure; ledger path untouched until Phase 5
+- [Phase 04]: 04-03: blank/whitespace instrument fields reach the core as None; the adapter applies no instrument rule
+- [Phase 04]: 04-03: operator error line = kind, reason, guid, then one bounded structured hint; core explanation/detail text never read
 
 ### Pending Todos
 
@@ -139,8 +142,8 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-28T22:25:55.359Z
-Stopped at: Completed 04-02-PLAN.md
+Last session: 2026-10-28T22:30:48.377Z
+Stopped at: Completed 04-03-PLAN.md
 Resume file: None
 
 ## Operator Next Steps

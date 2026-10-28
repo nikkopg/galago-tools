@@ -21,7 +21,7 @@ milestone; stack-automation-layer core gaps are fixed there via `/gsd-quick`. Re
   `composition.open_service(..., owner="galago")` with credentials from `STACK_USER`/`STACK_PASSWORD`,
   imports nothing from `stack_automation_layer.mcp`, pins the core by SHA, has no `lock_dir` field, and a
   lock held by stack-mcp fails Configure naming the holder
-- [ ] **STK-03**: Operator can read manager state, robot states, devices, labware profiles, transfer
+- [x] **STK-03**: Operator can read manager state, robot states, devices, labware profiles, transfer
   profiles and labware presence — each 1:1 onto a core method, contract v1 `to_dict()` in the reply meta
 - [ ] **STK-04**: Operator can get a transfer estimate (`GetTransferEstimate` → `estimate_transfer`,
   nothing moves); `Estimate<Cmd>` hooks are local constants with no I/O
@@ -29,7 +29,7 @@ milestone; stack-automation-layer core gaps are fixed there via `/gsd-quick`. Re
   override); motion commands stay serialised
 - [ ] **STK-06**: Simulated mode validates arguments (including `step_key`), sleeps the constant
   estimate, never contacts the core and never writes the ledger
-- [ ] **STK-07**: Result mapping — `ran`, read kinds, `estimated`, `failureAcknowledged` → SUCCESS with
+- [x] **STK-07**: Result mapping — `ran`, read kinds, `estimated`, `failureAcknowledged` → SUCCESS with
   an empty message; every other core kind → `ERROR_FROM_TOOL` with a one-line message carrying reason
   and guid; adapter argument errors → `INVALID_ARGUMENTS`; a core rejection never becomes SUCCESS
 
@@ -114,11 +114,11 @@ milestone; stack-automation-layer core gaps are fixed there via `/gsd-quick`. Re
 |-------------|-------|--------|
 | STK-01 | Phase 4 | Complete |
 | STK-02 | Phase 4 | Complete |
-| STK-03 | Phase 4 | Pending |
+| STK-03 | Phase 4 | Complete |
 | STK-04 | Phase 4 | Pending |
 | STK-05 | Phase 4 | Pending |
 | STK-06 | Phase 4 | Pending |
-| STK-07 | Phase 4 | Pending |
+| STK-07 | Phase 4 | Complete |
 | XFR-01 | Phase 5 | Pending |
 | XFR-02 | Phase 5 | Pending |
 | XFR-03 | Phase 5 | Pending |
