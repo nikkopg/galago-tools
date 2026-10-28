@@ -34,6 +34,18 @@ from tools.grpc_interfaces.tool_base_pb2 import (
 
 DEFAULT_PORT = 5005
 
+# D-01: every handler maps 1:1 onto one StackService method. The Phase 5
+# commands (Transfer, AcknowledgeFailure, GetFailureLatch) are not wired here.
+COMMAND_TO_SERVICE_METHOD = {
+    "GetManagerState": "manager_state",
+    "GetRobotStates": "robot_states",
+    "ListDevices": "devices",
+    "ListLabwareProfiles": "labware_profiles",
+    "ListTransferProfiles": "transfer_profiles",
+    "GetLabwarePresence": "labware_presence",
+    "GetTransferEstimate": "estimate_transfer",
+}
+
 # D-09: logged once per fresh open. A restart of this tool server silently
 # drops the core's in-process failure latch and in-flight guard.
 _RESTART_WARNING = (
@@ -66,6 +78,11 @@ def _text_or_none(cmd: Any, field: str) -> Optional[str]:
         return None
     value = getattr(cmd, field)
     return value if value.strip() else None
+
+
+def _flag(cmd: Any, field: str) -> bool:
+    """An optional bool field: unset is False."""
+    return bool(cmd.HasField(field) and getattr(cmd, field))
 
 
 def _transfer_request(cmd: Any) -> TransferRequest:
@@ -197,6 +214,25 @@ class StackServer(ToolServer):
 
     def GetManagerState(self, params: "Command.GetManagerState") -> ExecuteCommandReply:
         return _result_reply(self._require_service().manager_state())
+
+    def GetRobotStates(self, params: "Command.GetRobotStates") -> ExecuteCommandReply:
+        return _result_reply(self._require_service().robot_states())
+
+    def ListDevices(self, params: "Command.ListDevices") -> ExecuteCommandReply:
+        service = self._require_service()
+        return _result_reply(service.devices(refresh=_flag(params, "refresh")))
+
+    def ListLabwareProfiles(self, params: "Command.ListLabwareProfiles") -> ExecuteCommandReply:
+        service = self._require_service()
+        return _result_reply(service.labware_profiles(refresh=_flag(params, "refresh")))
+
+    def ListTransferProfiles(self, params: "Command.ListTransferProfiles") -> ExecuteCommandReply:
+        service = self._require_service()
+        return _result_reply(service.transfer_profiles(refresh=_flag(params, "refresh")))
+
+    def GetLabwarePresence(self, params: "Command.GetLabwarePresence") -> ExecuteCommandReply:
+        service = self._require_service()
+        return _result_reply(service.labware_presence(_text_or_none(params, "robot")))
 
     def GetTransferEstimate(self, params: "Command.GetTransferEstimate") -> ExecuteCommandReply:
         service = self._require_service()
