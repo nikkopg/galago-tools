@@ -34,7 +34,7 @@ Companion: galago-core's own parallel milestone (codegen, command forms, operato
   on its own; a STACK motion is submitted at most once per step key.
 - Claude sends `Configure` only on the user's explicit request with no run in flight.
 
-- [ ] **Phase 4: STACK Tool Registration, Reads & Estimate** - Register the STACK tool type and let an
+- [x] **Phase 4: STACK Tool Registration, Reads & Estimate** - Register the STACK tool type and let an (completed 2026-10-29)
   operator Configure it, read instrument state and get a transfer estimate, with no path that can move
   the arm.
 - [ ] **Phase 5: F5-safe Transfer & Operator Acknowledge** - The only motion path: a `Transfer` that
@@ -80,7 +80,7 @@ pinned by SHA, no cross-repo gate). Its `stack.proto` is the input to DEP-02.
      `Transfer`, `AcknowledgeFailure` and the latch-status read (real-mode handlers refused until
      Phase 5), so galago-core's DEP-02 codegen runs once; a later proto change in v2 is a deviation
      that re-opens DEP-02 and needs the user's sign-off.
-**Plans:** 5/5 plans executed (waves 1-5, sequential: every plan touches `tools/stack/server.py` and `tools/tests/stack_test.py`)
+**Plans:** 5/5 plans complete (waves 1-5, sequential: every plan touches `tools/stack/server.py` and `tools/tests/stack_test.py`)
 
 Plans:
 **Wave 1**
@@ -213,7 +213,7 @@ Phases execute in numeric order: 4 → 5 → 6 → 7 (Phase 5 waits on DEP-01; P
 
 | Phase | Milestone | Plans Complete | Status | Completed |
 |-------|-----------|----------------|--------|-----------|
-| 4. STACK Tool Registration, Reads & Estimate | v2 | 5/5 | In Progress | - |
+| 4. STACK Tool Registration, Reads & Estimate | v2 | 5/5 | Complete    | 2026-10-29 |
 | 5. F5-safe Transfer & Operator Acknowledge | v2 | 0/TBD | Not started | - |
 | 6. GAL-02 Workflow, Simulated Workcell & PAC-Simulator Run | v2 | 0/TBD | Not started | - |
 | 7. Deploy & Supervised Live STACK + Handoff | v2 | 0/TBD | Not started | - |
