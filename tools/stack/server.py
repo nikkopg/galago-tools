@@ -349,6 +349,35 @@ class StackServer(ToolServer):
     def EstimateTransfer(self, params: "Command.Transfer") -> int:
         return EST_TRANSFER_S
 
+    # D-19: constant estimates. No attribute access on params or self.service
+    # and no I/O, so EstimateDuration (which bypasses _check_args) cannot raise.
+    def EstimateGetManagerState(self, params: "Command.GetManagerState") -> int:
+        return EST_READ_S
+
+    def EstimateGetRobotStates(self, params: "Command.GetRobotStates") -> int:
+        return EST_READ_S
+
+    def EstimateListDevices(self, params: "Command.ListDevices") -> int:
+        return EST_READ_S
+
+    def EstimateListLabwareProfiles(self, params: "Command.ListLabwareProfiles") -> int:
+        return EST_READ_S
+
+    def EstimateListTransferProfiles(self, params: "Command.ListTransferProfiles") -> int:
+        return EST_READ_S
+
+    def EstimateGetLabwarePresence(self, params: "Command.GetLabwarePresence") -> int:
+        return EST_READ_S
+
+    def EstimateGetTransferEstimate(self, params: "Command.GetTransferEstimate") -> int:
+        return EST_TRANSFER_ESTIMATE_S
+
+    def EstimateAcknowledgeFailure(self, params: "Command.AcknowledgeFailure") -> int:
+        return EST_ACK_S
+
+    def EstimateGetFailureLatch(self, params: "Command.GetFailureLatch") -> int:
+        return EST_READ_S
+
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.DEBUG)

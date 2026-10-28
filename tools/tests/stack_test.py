@@ -1508,3 +1508,112 @@ class TestRealModeRefusalsOrdering(_StackTestCase):
 
     def test_transfer_without_step_key_is_invalid_arguments(self) -> None:
         self.assertEqual(self._dispatch("Transfer").response, tool_base_pb2.INVALID_ARGUMENTS)
+
+
+_ESTIMATE_CONSTANTS = {
+    "Transfer": 35,
+    "GetTransferEstimate": 3,
+    "AcknowledgeFailure": 2,
+    "GetManagerState": 2,
+    "GetRobotStates": 2,
+    "ListDevices": 2,
+    "ListLabwareProfiles": 2,
+    "ListTransferProfiles": 2,
+    "GetLabwarePresence": 2,
+    "GetFailureLatch": 2,
+}
+
+# Valid adapter arguments for every command (the instrument fields stay blank).
+_VALID_ARGS: dict[str, dict[str, Any]] = {
+    "Transfer": {"step_key": "run-1:stack-1"},
+    "AcknowledgeFailure": {"guid": "g", "arm_inspected": "yes"},
+}
+
+
+class TestEstimates(_RealModeGrpcTestCase):
+    """D-19: every Estimate<Cmd> hook is a local constant."""
+
+    def test_the_hook_set_matches_the_ten_commands(self) -> None:
+        hooks = {n for n in dir(StackServer) if n.startswith("Estimate") and n != "EstimateDuration"}
+        self.assertEqual(hooks, {"Estimate" + n for n in _ESTIMATE_CONSTANTS})
+        names = {f.message_type.name
+                 for f in stack_pb2.Command.DESCRIPTOR.oneofs_by_name["command"].fields}
+        self.assertEqual(set(_ESTIMATE_CONSTANTS), names)
+
+    def test_each_hook_returns_its_constant_as_an_int(self) -> None:
+        for name, expected in _ESTIMATE_CONSTANTS.items():
+            with self.subTest(name):
+                value = getattr(StackServer(), "Estimate" + name)(
+                    getattr(stack_pb2.Command, name)())
+                self.assertEqual(value, expected)
+                self.assertIs(type(value), int)
+
+    def test_hooks_ignore_malformed_messages_and_never_touch_the_service(self) -> None:
+        bad = {
+            "Transfer": stack_pb2.Command.Transfer(timeout_s=float("nan")),
+            "AcknowledgeFailure": stack_pb2.Command.AcknowledgeFailure(arm_inspected="maybe"),
+        }
+        for name, message_ in bad.items():
+            with self.subTest(name):
+                self.assertEqual(getattr(self.server, "Estimate" + name)(message_),
+                                 _ESTIMATE_CONSTANTS[name])
+        for name in _ESTIMATE_CONSTANTS:
+            with self.subTest(f"no-service {name}"):
+                self.assertEqual(
+                    getattr(StackServer(), "Estimate" + name)(getattr(stack_pb2.Command, name)()),
+                    _ESTIMATE_CONSTANTS[name])
+        self.assertEqual(self.service.mock_calls, [])
+
+    def test_estimate_duration_rpc_returns_the_constant_for_every_command(self) -> None:
+        for name, expected in _ESTIMATE_CONSTANTS.items():
+            with self.subTest(name):
+                snake = "".join("_" + c.lower() if c.isupper() else c for c in name).lstrip("_")
+                reply = self.stub.EstimateDuration(self._stack(
+                    **{snake: getattr(stack_pb2.Command, name)(**_VALID_ARGS.get(name, {}))}))
+                self.assertEqual(reply.response, SUCCESS)
+                self.assertEqual(reply.estimated_duration_seconds, expected)
+        self.assertEqual(self.service.mock_calls, [])
+
+    def test_estimate_duration_rpc_survives_malformed_arguments(self) -> None:
+        reply = self.stub.EstimateDuration(self._stack(
+            transfer=stack_pb2.Command.Transfer(timeout_s=float("nan"))))
+        self.assertEqual(reply.response, SUCCESS)
+        self.assertEqual(reply.estimated_duration_seconds, 35)
+
+
+class TestSimulatedCommands(_SimulatedGrpcTestCase):
+    """STK-06: all ten commands rehearse core-free in simulated mode."""
+
+    def test_every_command_sleeps_its_constant_and_succeeds(self) -> None:
+        for name, expected in _ESTIMATE_CONSTANTS.items():
+            with self.subTest(name):
+                snake = "".join("_" + c.lower() if c.isupper() else c for c in name).lstrip("_")
+                before = len(self.sleeps)
+                reply = self.stub.ExecuteCommand(self._stack(
+                    **{snake: getattr(stack_pb2.Command, name)(**_VALID_ARGS.get(name, {}))}))
+                self.assertEqual(reply.response, SUCCESS, reply.error_message)
+                self.assertEqual(self.sleeps[before:], [float(expected)])
+        self._assert_core_free()
+
+    def test_acknowledge_with_no_is_also_success(self) -> None:
+        reply = self.stub.ExecuteCommand(self._stack(
+            acknowledge_failure=stack_pb2.Command.AcknowledgeFailure(
+                guid="g", arm_inspected="no")))
+        self.assertEqual(reply.response, SUCCESS)
+        self.assertEqual(self.sleeps, [2.0])
+        self._assert_core_free()
+
+    def test_blank_instrument_fields_pass_the_argument_check(self) -> None:
+        reply = self.stub.ExecuteCommand(self._stack(
+            get_transfer_estimate=stack_pb2.Command.GetTransferEstimate(
+                robot="", source_nest="  ")))
+        self.assertEqual(reply.response, SUCCESS)
+        self.assertEqual(self.sleeps, [3.0])
+
+    def test_bad_adapter_arguments_are_rejected_in_simulated_mode_too(self) -> None:
+        reply = self.stub.ExecuteCommand(self._stack(
+            acknowledge_failure=stack_pb2.Command.AcknowledgeFailure(
+                guid="g", arm_inspected="Yes")))
+        self.assertEqual(reply.response, tool_base_pb2.INVALID_ARGUMENTS)
+        self.assertEqual(self.sleeps, [])
+        self._assert_core_free()
