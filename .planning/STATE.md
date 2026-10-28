@@ -4,17 +4,17 @@ milestone: v2
 milestone_name: STACK Tool & STACK↔F.A.S.T. Handoff
 current_phase: 4
 current_phase_name: STACK Tool Registration, Reads & Estimate
-status: executing
-stopped_at: Completed 04-04-PLAN.md
-last_updated: "2026-10-28T22:34:32.173Z"
+status: verifying
+stopped_at: Completed 04-05-PLAN.md
+last_updated: "2026-10-28T22:37:17.306Z"
 last_activity: 2026-10-28
 last_activity_desc: Phase 4 execution started
-state_head: 4599009f670aca493b3ed76c52b62fca6f3689a1
+state_head: e5c3c3749821bb862abb143c3b100263230ed385
 progress:
   total_phases: 4
   completed_phases: 0
   total_plans: 5
-  completed_plans: 4
+  completed_plans: 5
   percent: 0
 ---
 
@@ -33,7 +33,7 @@ acknowledges on its own. For the STACK: a step never sends a second transfer.
 
 Phase: 4 (STACK Tool Registration, Reads & Estimate) — EXECUTING
 Plan: 5 of 5
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-10-28 — Phase 4 execution started
 
 Progress: [░░░░░░░░░░] 0%
@@ -84,6 +84,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 04 P02 | 8 min | 3 tasks | 2 files |
 | Phase 04 P03 | 15 min | 3 tasks | 2 files |
 | Phase 04 P04 | 20 min | 3 tasks | 2 files |
+| Phase 4 P05 | 15 min | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -112,6 +113,7 @@ v2 roadmap-level decisions (2026-10-28, detail in PROJECT.md Key Decisions):
 - [Phase 04]: 04-03: blank/whitespace instrument fields reach the core as None; the adapter applies no instrument rule
 - [Phase 04]: 04-03: operator error line = kind, reason, guid, then one bounded structured hint; core explanation/detail text never read
 - [Phase 04]: 04-04: Phase 5 commands (Transfer, AcknowledgeFailure, GetFailureLatch) are refused in real mode before the not-configured check; arm_inspected matched byte-for-byte against yes/no
+- [Phase 4]: 04-05: READ_COMMANDS (eight reads incl. get_transfer_estimate, get_failure_latch) bypass BUSY via StackServer.ExecuteCommand; reads never call isReady/parseCommand/setStatus; transfer/acknowledge_failure never in set
 
 ### Pending Todos
 
@@ -144,8 +146,8 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-28T22:34:32.150Z
-Stopped at: Completed 04-04-PLAN.md
+Last session: 2026-10-28T22:37:17.283Z
+Stopped at: Completed 04-05-PLAN.md
 Resume file: None
 
 ## Operator Next Steps

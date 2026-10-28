@@ -80,7 +80,7 @@ pinned by SHA, no cross-repo gate). Its `stack.proto` is the input to DEP-02.
      `Transfer`, `AcknowledgeFailure` and the latch-status read (real-mode handlers refused until
      Phase 5), so galago-core's DEP-02 codegen runs once; a later proto change in v2 is a deviation
      that re-opens DEP-02 and needs the user's sign-off.
-**Plans:** 4/5 plans executed (waves 1-5, sequential: every plan touches `tools/stack/server.py` and `tools/tests/stack_test.py`)
+**Plans:** 5/5 plans executed (waves 1-5, sequential: every plan touches `tools/stack/server.py` and `tools/tests/stack_test.py`)
 
 Plans:
 **Wave 1**
@@ -96,7 +96,7 @@ Plans:
 - [x] 04-04-PLAN.md — Simulated mode, adapter-argument checks, real-mode refusals and constant estimate hooks (STK-06, STK-04, SC 5)
 
 **Wave 5** *(blocked on Wave 4 completion)*
-- [ ] 04-05-PLAN.md — Reads answer while BUSY via the ExecuteCommand override, test-first (STK-05)
+- [x] 04-05-PLAN.md — Reads answer while BUSY via the ExecuteCommand override, test-first (STK-05)
 
 **Notes**: Proto freeze made binding by the user at roadmap approval (2026-10-28). Message names must avoid `GetStatus`,
 `EstimateDuration`, `Configure`, `ExecuteCommand` and any `Estimate*` prefix. Research flag: none
@@ -213,7 +213,7 @@ Phases execute in numeric order: 4 → 5 → 6 → 7 (Phase 5 waits on DEP-01; P
 
 | Phase | Milestone | Plans Complete | Status | Completed |
 |-------|-----------|----------------|--------|-----------|
-| 4. STACK Tool Registration, Reads & Estimate | v2 | 4/5 | In Progress | - |
+| 4. STACK Tool Registration, Reads & Estimate | v2 | 5/5 | In Progress | - |
 | 5. F5-safe Transfer & Operator Acknowledge | v2 | 0/TBD | Not started | - |
 | 6. GAL-02 Workflow, Simulated Workcell & PAC-Simulator Run | v2 | 0/TBD | Not started | - |
 | 7. Deploy & Supervised Live STACK + Handoff | v2 | 0/TBD | Not started | - |

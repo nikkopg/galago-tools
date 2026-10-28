@@ -25,7 +25,7 @@ milestone; stack-automation-layer core gaps are fixed there via `/gsd-quick`. Re
   profiles and labware presence — each 1:1 onto a core method, contract v1 `to_dict()` in the reply meta
 - [x] **STK-04**: Operator can get a transfer estimate (`GetTransferEstimate` → `estimate_transfer`,
   nothing moves); `Estimate<Cmd>` hooks are local constants with no I/O
-- [ ] **STK-05**: Reads work from the tool page while a Transfer is in flight (fast-style `ExecuteCommand`
+- [x] **STK-05**: Reads work from the tool page while a Transfer is in flight (fast-style `ExecuteCommand`
   override); motion commands stay serialised
 - [x] **STK-06**: Simulated mode validates arguments (including `step_key`), sleeps the constant
   estimate, never contacts the core and never writes the ledger
@@ -116,7 +116,7 @@ milestone; stack-automation-layer core gaps are fixed there via `/gsd-quick`. Re
 | STK-02 | Phase 4 | Complete |
 | STK-03 | Phase 4 | Complete |
 | STK-04 | Phase 4 | Complete |
-| STK-05 | Phase 4 | Pending |
+| STK-05 | Phase 4 | Complete |
 | STK-06 | Phase 4 | Complete |
 | STK-07 | Phase 4 | Complete |
 | XFR-01 | Phase 5 | Pending |
