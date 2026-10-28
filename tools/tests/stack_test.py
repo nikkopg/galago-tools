@@ -19,6 +19,7 @@ from unittest.mock import MagicMock, patch
 
 import grpc
 from google.protobuf import empty_pb2
+from google.protobuf.json_format import MessageToDict
 from google.protobuf.struct_pb2 import Struct
 from google.protobuf.descriptor import FieldDescriptor
 
@@ -32,15 +33,23 @@ try:
     import httpx  # noqa: F401
     import stack_automation_layer.composition as core_composition
     from stack_automation_layer.owner_lock import StackOwnedError, acquire_owner_lock
+    from stack_automation_layer.knowledge import LabwareProfile, TransferProfile
     from stack_automation_layer.model import Location, TransferRequest
     from stack_automation_layer.results import (
+        DeviceTree,
         Estimated,
+        LabwarePresence,
+        LabwareProfiles,
+        ManagerState,
         NeedsInput,
         ReadFailed,
         Rejected,
+        RobotStates,
+        TransferProfiles,
     )
     from stack_automation_layer.service import StackService
 
+    from tools.stack import server as stack_server
     from tools.stack.server import StackServer
 except ModuleNotFoundError as exc:
     if exc.name and exc.name.split(".")[0] in ("stack_automation_layer", "httpx"):
@@ -875,6 +884,182 @@ class TestTransferEstimate(_RealModeGrpcTestCase):
         reply = self._estimate()
         self.assertEqual(reply.response, ERROR_FROM_TOOL)
         self.assertEqual(self.service.estimate_transfer.call_count, 1)
+
+
+class TestReadCommands(_RealModeGrpcTestCase):
+    """STK-03: each read calls exactly one mapped core method and returns the
+    core's to_dict() untouched as meta."""
+
+    def _read(self, **command: Any) -> Any:
+        return self.stub.ExecuteCommand(self._stack(**command))
+
+    def _only_call(self, name: str) -> Any:
+        self.assertEqual([c[0] for c in self.service.mock_calls], [name])
+        return self.service.mock_calls[0]
+
+    def test_robot_states_and_manager_state_take_no_arguments(self) -> None:
+        self.service.robot_states.return_value = RobotStates(robots=[])
+        self._read(get_robot_states=stack_pb2.Command.GetRobotStates())
+        self.assertEqual(self._only_call("robot_states").args, ())
+        self.assertEqual(self.service.robot_states.call_args.kwargs, {})
+        self.service.reset_mock()
+        self.service.manager_state.return_value = ManagerState(
+            mode="Idle", recovery=None, api_version="3")
+        self._read(get_manager_state=stack_pb2.Command.GetManagerState())
+        self.assertEqual(self._only_call("manager_state").args, ())
+        self.assertEqual(self.service.manager_state.call_args.kwargs, {})
+
+    def test_refresh_flag_reaches_the_core_as_a_keyword(self) -> None:
+        reads = (
+            ("devices", "list_devices", stack_pb2.Command.ListDevices,
+             DeviceTree(devices=(), ambiguous=[], api_version="3")),
+            ("labware_profiles", "list_labware_profiles",
+             stack_pb2.Command.ListLabwareProfiles, LabwareProfiles(profiles=[])),
+            ("transfer_profiles", "list_transfer_profiles",
+             stack_pb2.Command.ListTransferProfiles, TransferProfiles(profiles=[])),
+        )
+        for method, field, message, result in reads:
+            getattr(self.service, method).return_value = result
+            for label, kwargs, expected in (
+                ("unset", {}, False), ("true", {"refresh": True}, True),
+                ("false", {"refresh": False}, False),
+            ):
+                with self.subTest(method=method, refresh=label):
+                    self.service.reset_mock()
+                    reply = self._read(**{field: message(**kwargs)})
+                    self.assertEqual(reply.response, SUCCESS)
+                    self._only_call(method)
+                    call = getattr(self.service, method).call_args
+                    self.assertEqual(call.args, ())
+                    self.assertEqual(call.kwargs, {"refresh": expected})
+
+    def test_presence_robot_blank_reaches_the_core_as_none(self) -> None:
+        self.service.labware_presence.return_value = ReadFailed(
+            error={"status": None, "name": "malformedPresence"})
+        for label, kwargs in (("unset", {}), ("empty", {"robot": ""}),
+                              ("blank", {"robot": "   "})):
+            with self.subTest(label):
+                self.service.reset_mock()
+                self._read(get_labware_presence=stack_pb2.Command.GetLabwarePresence(**kwargs))
+                self.service.labware_presence.assert_called_once_with(None)
+                self.assertEqual(len(self.service.mock_calls), 1)
+        self.service.reset_mock()
+        self.service.labware_presence.return_value = LabwarePresence(
+            robot_name="R1", has_labware=True)
+        self._read(get_labware_presence=stack_pb2.Command.GetLabwarePresence(robot="R1"))
+        self.service.labware_presence.assert_called_once_with("R1")
+
+    def test_each_read_returns_success_with_core_meta(self) -> None:
+        cases = (
+            ("robot_states", "get_robot_states", stack_pb2.Command.GetRobotStates(),
+             RobotStates(robots=[{"robotName": "R1", "state": "Idle"}])),
+            ("devices", "list_devices", stack_pb2.Command.ListDevices(),
+             DeviceTree(devices=(), ambiguous=["dupDeck"], api_version="3")),
+            ("labware_profiles", "list_labware_profiles",
+             stack_pb2.Command.ListLabwareProfiles(),
+             LabwareProfiles(profiles=[LabwareProfile(name="plate96", grip_force=4.5)])),
+            ("transfer_profiles", "list_transfer_profiles",
+             stack_pb2.Command.ListTransferProfiles(),
+             TransferProfiles(profiles=[TransferProfile(name="slow", fields={"v": 1.5})])),
+            ("labware_presence", "get_labware_presence",
+             stack_pb2.Command.GetLabwarePresence(robot="R1"),
+             LabwarePresence(robot_name="R1", has_labware=True)),
+        )
+        for method, field, message, result in cases:
+            with self.subTest(method):
+                self.service.reset_mock()
+                getattr(self.service, method).return_value = result
+                reply = self._read(**{field: message})
+                self.assertEqual(reply.response, SUCCESS)
+                self.assertEqual(reply.error_message, "")
+                self.assertEqual(reply.meta_data, _struct(result.to_dict()))
+                self.assertEqual(len(self.service.mock_calls), 1)
+                self.assertEqual(self._health().status, READY)
+
+    def test_list_order_and_duplicates_are_preserved(self) -> None:
+        self.service.robot_states.return_value = RobotStates(robots=[
+            {"name": "R2"}, {"name": "R1"}, {"name": "R1"}])
+        self.service.labware_profiles.return_value = LabwareProfiles(profiles=[
+            LabwareProfile(name=n) for n in ("zeta", "alpha", "zeta")])
+        self.service.transfer_profiles.return_value = TransferProfiles(profiles=[
+            TransferProfile(name=n) for n in ("zeta", "alpha", "zeta")])
+        robots = MessageToDict(self._read(
+            get_robot_states=stack_pb2.Command.GetRobotStates()).meta_data)
+        self.assertEqual([r["name"] for r in robots["robots"]], ["R2", "R1", "R1"])
+        labware = MessageToDict(self._read(
+            list_labware_profiles=stack_pb2.Command.ListLabwareProfiles()).meta_data)
+        self.assertEqual([p["name"] for p in labware["profiles"]], ["zeta", "alpha", "zeta"])
+        transfer = MessageToDict(self._read(
+            list_transfer_profiles=stack_pb2.Command.ListTransferProfiles()).meta_data)
+        self.assertEqual([p["name"] for p in transfer["profiles"]], ["zeta", "alpha", "zeta"])
+
+    def test_has_labware_false_is_kept_not_dropped(self) -> None:
+        self.service.labware_presence.return_value = LabwarePresence(
+            robot_name="R1", has_labware=False)
+        reply = self._read(
+            get_labware_presence=stack_pb2.Command.GetLabwarePresence(robot="R1"))
+        self.assertEqual(reply.response, SUCCESS)
+        self.assertIn("hasLabware", reply.meta_data)
+        self.assertIs(reply.meta_data["hasLabware"], False)
+
+    def test_presence_unavailable_is_an_error_without_has_labware(self) -> None:
+        self.service.labware_presence.return_value = ReadFailed(
+            error={"status": None, "name": "malformedPresence", "family": "http",
+                   "code": None, "detail": None},
+            message="presence unavailable")
+        reply = self._read(
+            get_labware_presence=stack_pb2.Command.GetLabwarePresence(robot="R1"))
+        self.assertEqual(reply.response, ERROR_FROM_TOOL)
+        self.assertNotIn("hasLabware", reply.meta_data)
+        self.assertTrue(reply.error_message.startswith("stack: readFailed"))
+
+
+class TestOneToOneSurface(_StackTestCase):
+    def test_map_has_seven_keys_matching_the_oneof_names(self) -> None:
+        mapping = stack_server.COMMAND_TO_SERVICE_METHOD
+        self.assertEqual(len(mapping), 7)
+        oneof = stack_pb2.Command.DESCRIPTOR.oneofs_by_name["command"].fields
+        names = {f.message_type.name for f in oneof}
+        self.assertEqual(set(mapping) | {"Transfer", "AcknowledgeFailure", "GetFailureLatch"},
+                         names)
+
+    def test_every_key_is_a_server_method_and_every_value_a_service_method(self) -> None:
+        server = StackServer()
+        for name, method in stack_server.COMMAND_TO_SERVICE_METHOD.items():
+            self.assertTrue(callable(getattr(server, name)), name)
+            self.assertTrue(hasattr(StackService, method), method)
+            self.assertNotIn(method, _FORBIDDEN_SERVICE_CALLS)
+
+    def test_each_mapped_command_records_exactly_one_mapped_call(self) -> None:
+        results = {
+            "manager_state": ManagerState(mode="Idle", recovery=None, api_version="3"),
+            "robot_states": RobotStates(robots=[]),
+            "devices": DeviceTree(devices=(), ambiguous=[], api_version="3"),
+            "labware_profiles": LabwareProfiles(profiles=[]),
+            "transfer_profiles": TransferProfiles(profiles=[]),
+            "labware_presence": LabwarePresence(robot_name="R1", has_labware=False),
+            "estimate_transfer": Estimated(estimated_time="00:00:01", guid=None),
+        }
+        messages = {
+            "GetManagerState": stack_pb2.Command.GetManagerState(),
+            "GetRobotStates": stack_pb2.Command.GetRobotStates(),
+            "ListDevices": stack_pb2.Command.ListDevices(),
+            "ListLabwareProfiles": stack_pb2.Command.ListLabwareProfiles(),
+            "ListTransferProfiles": stack_pb2.Command.ListTransferProfiles(),
+            "GetLabwarePresence": stack_pb2.Command.GetLabwarePresence(robot="R1"),
+            "GetTransferEstimate": stack_pb2.Command.GetTransferEstimate(**_ESTIMATE_FIELDS),
+        }
+        self.assertEqual(set(messages), set(stack_server.COMMAND_TO_SERVICE_METHOD))
+        for command, method in stack_server.COMMAND_TO_SERVICE_METHOD.items():
+            with self.subTest(command=command):
+                server = StackServer()
+                service = MagicMock(spec=StackService)
+                getattr(service, method).return_value = results[method]
+                server.service = service
+                server.config = stack_pb2.Config(host="127.0.0.1")
+                reply = getattr(server, command)(messages[command])
+                self.assertEqual(reply.response, SUCCESS)
+                self.assertEqual([c[0] for c in service.mock_calls], [method])
 
 
 if __name__ == "__main__":
