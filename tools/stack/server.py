@@ -19,6 +19,7 @@ from typing import Any, Optional
 
 from google.protobuf.struct_pb2 import Struct
 from stack_automation_layer.composition import OwnedService, open_service
+from stack_automation_layer.model import Location, TransferRequest
 from stack_automation_layer.owner_lock import endpoint_key
 from stack_automation_layer.service import StackService
 
@@ -55,6 +56,38 @@ _SUCCESS_KINDS = frozenset({
     "failureAcknowledged",
     "ran",
 })
+
+
+def _text_or_none(cmd: Any, field: str) -> Optional[str]:
+    """An instrument field, or None when it is unset or blank. proto3 presence
+    is True for an explicit "" (Pitfall 8), so a blank is treated as unset; a
+    non-blank value passes unchanged -- the adapter applies no instrument rule."""
+    if not cmd.HasField(field):
+        return None
+    value = getattr(cmd, field)
+    return value if value.strip() else None
+
+
+def _transfer_request(cmd: Any) -> TransferRequest:
+    """Build the core's TransferRequest from a GetTransferEstimate command,
+    blank or unset fields as None (the core's missing_fields, not this
+    adapter, decides what is incomplete)."""
+    return TransferRequest(
+        robot=_text_or_none(cmd, "robot"),
+        labware_profile=_text_or_none(cmd, "labware_profile"),
+        source=Location(
+            device=_text_or_none(cmd, "source_device"),
+            deck=_text_or_none(cmd, "source_deck"),
+            nest=_text_or_none(cmd, "source_nest"),
+            transfer_profile=_text_or_none(cmd, "source_transfer_profile"),
+        ),
+        destination=Location(
+            device=_text_or_none(cmd, "destination_device"),
+            deck=_text_or_none(cmd, "destination_deck"),
+            nest=_text_or_none(cmd, "destination_nest"),
+            transfer_profile=_text_or_none(cmd, "destination_transfer_profile"),
+        ),
+    )
 
 
 def _one_line(text: str, limit: int) -> str:
@@ -164,6 +197,10 @@ class StackServer(ToolServer):
 
     def GetManagerState(self, params: "Command.GetManagerState") -> ExecuteCommandReply:
         return _result_reply(self._require_service().manager_state())
+
+    def GetTransferEstimate(self, params: "Command.GetTransferEstimate") -> ExecuteCommandReply:
+        service = self._require_service()
+        return _result_reply(service.estimate_transfer(_transfer_request(params)))
 
 
 if __name__ == "__main__":

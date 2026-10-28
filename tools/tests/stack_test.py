@@ -19,6 +19,7 @@ from unittest.mock import MagicMock, patch
 
 import grpc
 from google.protobuf import empty_pb2
+from google.protobuf.struct_pb2 import Struct
 from google.protobuf.descriptor import FieldDescriptor
 
 # Every import that depends on the private stack-automation-layer core (a
@@ -31,8 +32,14 @@ try:
     import httpx  # noqa: F401
     import stack_automation_layer.composition as core_composition
     from stack_automation_layer.owner_lock import StackOwnedError, acquire_owner_lock
-    from stack_automation_layer.results import ReadFailed  # noqa: F401
-    from stack_automation_layer.service import StackService  # noqa: F401
+    from stack_automation_layer.model import Location, TransferRequest
+    from stack_automation_layer.results import (
+        Estimated,
+        NeedsInput,
+        ReadFailed,
+        Rejected,
+    )
+    from stack_automation_layer.service import StackService
 
     from tools.stack.server import StackServer
 except ModuleNotFoundError as exc:
@@ -44,7 +51,13 @@ except ModuleNotFoundError as exc:
     raise
 
 from tools.grpc_interfaces import controller_pb2, stack_pb2, tool_base_pb2
-from tools.grpc_interfaces.tool_base_pb2 import ERROR_FROM_TOOL, FAILED, NOT_READY, SUCCESS
+from tools.grpc_interfaces.tool_base_pb2 import (
+    ERROR_FROM_TOOL,
+    FAILED,
+    NOT_READY,
+    READY,
+    SUCCESS,
+)
 from tools.grpc_interfaces.tool_driver_pb2_grpc import (
     ToolDriverStub,
     add_ToolDriverServicer_to_server,
@@ -750,6 +763,118 @@ class TestAdapterInvariant(unittest.TestCase):
             with self.subTest(statement=statement):
                 planted = _plant(self.server, "GetManagerState", statement)
                 self.assertEqual(_stack_adapter_violations(self._with(planted)), [])
+
+
+def _struct(d: dict) -> Struct:
+    s = Struct()
+    s.update(d)
+    return s
+
+
+class _RealModeGrpcTestCase(_StackTestCase):
+    """Shared real-mode in-process gRPC fixture: a StackServer with a
+    MagicMock(spec=StackService) injected directly (no open_service, no lock,
+    no network) and a real gRPC server/stub pair. Declares no tests."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.server = StackServer()
+        self.service = MagicMock(spec=StackService)
+        self.server.service = self.service
+        self.server.config = stack_pb2.Config(host="127.0.0.1")
+        self.server.status = READY
+        self.stub = _serve_in_process(self, self.server)
+
+    def _stack(self, **command: Any) -> tool_base_pb2.Command:
+        return tool_base_pb2.Command(stack=stack_pb2.Command(**command))
+
+    def _health(self) -> tool_base_pb2.StatusReply:
+        return self.stub.GetStatus(empty_pb2.Empty())  # type: ignore[no-any-return]
+
+
+_ESTIMATE_FIELDS = {
+    "robot": "R1",
+    "labware_profile": "plate96",
+    "source_device": "SD",
+    "source_deck": "SK",
+    "source_nest": "SN",
+    "source_transfer_profile": "STP",
+    "destination_device": "DD",
+    "destination_deck": "DK",
+    "destination_nest": "DN",
+    "destination_transfer_profile": "DTP",
+}
+
+
+class TestTransferEstimate(_RealModeGrpcTestCase):
+    """STK-04: GetTransferEstimate -> estimate_transfer, once, nothing else."""
+
+    def _estimate(self, **fields: Any) -> Any:
+        return self.stub.ExecuteCommand(self._stack(
+            get_transfer_estimate=stack_pb2.Command.GetTransferEstimate(**fields)))
+
+    def test_all_fields_reach_estimate_transfer_once_and_nothing_else(self) -> None:
+        self.service.estimate_transfer.return_value = Estimated(
+            estimated_time="00:00:48", guid=None, advisories=[], seconds=48.0)
+        self._estimate(**_ESTIMATE_FIELDS)
+        self.service.estimate_transfer.assert_called_once_with(TransferRequest(
+            robot="R1", labware_profile="plate96",
+            source=Location(device="SD", deck="SK", nest="SN", transfer_profile="STP"),
+            destination=Location(device="DD", deck="DK", nest="DN", transfer_profile="DTP")))
+        self.assertEqual(len(self.service.mock_calls), 1)
+
+    def test_unset_empty_and_blank_fields_become_none(self) -> None:
+        self.service.estimate_transfer.return_value = NeedsInput(missing=["robot"])
+        for label, fields in (
+            ("unset", {}),
+            ("empty", {name: "" for name in _ESTIMATE_FIELDS}),
+            ("blank", {name: "   " for name in _ESTIMATE_FIELDS}),
+        ):
+            with self.subTest(label):
+                self.service.reset_mock()
+                self._estimate(**fields)
+                self.service.estimate_transfer.assert_called_once_with(TransferRequest(
+                    robot=None, labware_profile=None,
+                    source=Location(None, None, None, None),
+                    destination=Location(None, None, None, None)))
+                self.assertEqual(len(self.service.mock_calls), 1)
+
+    def test_a_non_blank_value_passes_unchanged(self) -> None:
+        self.service.estimate_transfer.return_value = NeedsInput(missing=[])
+        self._estimate(robot="  R1  ")
+        request = self.service.estimate_transfer.call_args.args[0]
+        self.assertEqual(request.robot, "  R1  ")
+
+    def test_estimated_is_success_with_empty_message_and_core_meta(self) -> None:
+        result = Estimated(estimated_time="00:00:48", guid=None, advisories=[], seconds=48.0)
+        self.service.estimate_transfer.return_value = result
+        reply = self._estimate(**_ESTIMATE_FIELDS)
+        self.assertEqual(reply.response, SUCCESS)
+        self.assertEqual(reply.error_message, "")
+        self.assertEqual(reply.meta_data, _struct(result.to_dict()))
+        self.assertEqual(self._health().status, READY)
+
+    def test_needs_input_rejected_and_read_failed_are_never_success(self) -> None:
+        cases = (
+            ("needsInput", NeedsInput(missing=["robot", "source"])),
+            ("rejected", Rejected(stage="local", findings=[{"name": "unknownNest"}])),
+            ("readFailed", ReadFailed(error={"status": None, "name": "ConnectError"})),
+        )
+        for kind, result in cases:
+            with self.subTest(kind):
+                self.service.estimate_transfer.return_value = result
+                reply = self._estimate(**_ESTIMATE_FIELDS)
+                self.assertEqual(reply.response, ERROR_FROM_TOOL)
+                self.assertTrue(reply.error_message.startswith(f"stack: {kind}"),
+                                reply.error_message)
+                self.assertEqual(self._health().status, READY)
+
+    def test_all_blank_request_is_judged_by_the_core_not_the_adapter(self) -> None:
+        self.service.estimate_transfer.return_value = NeedsInput(
+            missing=["robot", "labwareProfile"])
+        reply = self._estimate()
+        self.assertEqual(reply.response, ERROR_FROM_TOOL)
+        self.assertEqual(self.service.estimate_transfer.call_count, 1)
 
 
 if __name__ == "__main__":
