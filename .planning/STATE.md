@@ -5,16 +5,16 @@ milestone_name: STACK Tool & STACK↔F.A.S.T. Handoff
 current_phase: 4
 current_phase_name: STACK Tool Registration, Reads & Estimate
 status: executing
-stopped_at: Completed 04-01-PLAN.md
-last_updated: "2026-10-28T22:22:07.274Z"
+stopped_at: Completed 04-02-PLAN.md
+last_updated: "2026-10-28T22:25:55.382Z"
 last_activity: 2026-10-28
 last_activity_desc: Phase 4 execution started
-state_head: bcbbf8e245877dc77dbdaaa1e5d18a768dffa8f8
+state_head: 5ba19c34fb191a6d1a415c37a697974134dde47c
 progress:
   total_phases: 4
   completed_phases: 0
   total_plans: 5
-  completed_plans: 1
+  completed_plans: 2
   percent: 0
 ---
 
@@ -32,7 +32,7 @@ acknowledges on its own. For the STACK: a step never sends a second transfer.
 ## Current Position
 
 Phase: 4 (STACK Tool Registration, Reads & Estimate) — EXECUTING
-Plan: 2 of 5
+Plan: 3 of 5
 Status: Ready to execute
 Last activity: 2026-10-28 — Phase 4 execution started
 
@@ -81,6 +81,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 03 P08 | ~25min | 2 tasks | 1 files |
 | Phase 02 P05 | 25min | 2 tasks | 2 files |
 | Phase 04 P01 | 2 min | 3 tasks | 8 files |
+| Phase 04 P02 | 8 min | 3 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -104,6 +105,8 @@ v2 roadmap-level decisions (2026-10-28, detail in PROJECT.md Key Decisions):
   workflow + simulated runs (gated on DEP-02) → 7 deploy + supervised live (DEP-03 recommended).
 - [Phase 04]: stack.proto v2 frozen exactly as D-01..D-05 (user: Freeze); Command 24, Config 43, ToolType 24
 - [Phase 04]: StackServer._configure is the thinnest D-07 path (open_service owner galago); Plan 02 adds validation and close-first lifecycle
+- [Phase 04]: Same-endpoint Configure reuse keyed on core endpoint_key vs OwnedService.endpoint; close-first on endpoint change so a failed open leaves no lock or service
+- [Phase 04]: transfer_timeout_s and ledger_dir are record-only in Configure; ledger path untouched until Phase 5
 
 ### Pending Todos
 
@@ -136,8 +139,8 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-28T22:22:07.252Z
-Stopped at: Completed 04-01-PLAN.md
+Last session: 2026-10-28T22:25:55.359Z
+Stopped at: Completed 04-02-PLAN.md
 Resume file: None
 
 ## Operator Next Steps

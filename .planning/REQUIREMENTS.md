@@ -17,7 +17,7 @@ milestone; stack-automation-layer core gaps are fixed there via `/gsd-quick`. Re
 
 - [x] **STK-01**: `stack.proto` exists and is registered (`tool_base` Command `stack = 24`, Config
   `stack = 43`; `controller.proto` `stack = 24`); `bin/make proto test` is green
-- [ ] **STK-02**: Operator can Configure the STACK tool with host/port; the tool opens the core only via
+- [x] **STK-02**: Operator can Configure the STACK tool with host/port; the tool opens the core only via
   `composition.open_service(..., owner="galago")` with credentials from `STACK_USER`/`STACK_PASSWORD`,
   imports nothing from `stack_automation_layer.mcp`, pins the core by SHA, has no `lock_dir` field, and a
   lock held by stack-mcp fails Configure naming the holder
@@ -113,7 +113,7 @@ milestone; stack-automation-layer core gaps are fixed there via `/gsd-quick`. Re
 | Requirement | Phase | Status |
 |-------------|-------|--------|
 | STK-01 | Phase 4 | Complete |
-| STK-02 | Phase 4 | Pending |
+| STK-02 | Phase 4 | Complete |
 | STK-03 | Phase 4 | Pending |
 | STK-04 | Phase 4 | Pending |
 | STK-05 | Phase 4 | Pending |
