@@ -13,6 +13,7 @@ from typing import Any, Callable
 from unittest.mock import MagicMock, patch
 
 import grpc
+from google.protobuf import empty_pb2
 from google.protobuf.descriptor import FieldDescriptor
 
 # Every import that depends on the private stack-automation-layer core (a
@@ -38,7 +39,7 @@ except ModuleNotFoundError as exc:
     raise
 
 from tools.grpc_interfaces import controller_pb2, stack_pb2, tool_base_pb2
-from tools.grpc_interfaces.tool_base_pb2 import ERROR_FROM_TOOL, SUCCESS
+from tools.grpc_interfaces.tool_base_pb2 import ERROR_FROM_TOOL, FAILED, NOT_READY, SUCCESS
 from tools.grpc_interfaces.tool_driver_pb2_grpc import (
     ToolDriverStub,
     add_ToolDriverServicer_to_server,
@@ -270,6 +271,120 @@ class TestTracerManagerStateOverGrpc(_StackTestCase):
         self.assertEqual(reply.response, ERROR_FROM_TOOL)
         self.assertTrue(reply.error_message.startswith("stack: readFailed"), reply.error_message)
         self.assertNotIn("\n", reply.error_message)
+
+
+def _real_config(host: str, port: int, **kwargs: Any) -> tool_base_pb2.Config:
+    return tool_base_pb2.Config(
+        simulated=False, toolId="stack-test",
+        stack=stack_pb2.Config(host=host, port=port, **kwargs))
+
+
+class TestStackOwned(_StackTestCase):
+    """STK-02: an owner lock held by another front end (stack-mcp) fails
+    Configure once, names the holder, and is left untouched."""
+
+    def test_mcp_holder_fails_configure_naming_the_holder(self) -> None:
+        port = _free_tcp_port()
+        held = acquire_owner_lock("127.0.0.1", port, owner="mcp", lock_dir=self.lock_dir)
+        self.addCleanup(held.release)
+        server = StackServer()
+        stub = _serve_in_process(self, server)
+        with patch.object(core_composition, "RestStackClient") as rest_client:
+            reply = stub.Configure(_real_config("127.0.0.1", port))
+        self.assertEqual(reply.response, NOT_READY)
+        self.assertIn("already owned by mcp", reply.error_message)
+        self.assertEqual(stub.GetStatus(empty_pb2.Empty()).status, FAILED)
+        self.assertIsNone(server.service)
+        self.assertIsNone(server._owned)
+        rest_client.assert_not_called()
+        with self.assertRaises(StackOwnedError) as ctx:
+            acquire_owner_lock("127.0.0.1", port, owner="mcp", lock_dir=self.lock_dir)
+        self.assertEqual(ctx.exception.holder.owner, "mcp")
+
+
+class TestConfigureOwnership(_StackTestCase):
+    def _patched_open(self) -> MagicMock:
+        return MagicMock(side_effect=_fake_open_service(_fake_transport()))
+
+    def _assert_free(self, port: int) -> None:
+        # acquire succeeds only when nobody holds the endpoint.
+        acquire_owner_lock(
+            "127.0.0.1", port, owner="mcp", lock_dir=self.lock_dir).release()
+
+    def test_first_configure_holds_the_lock_as_galago(self) -> None:
+        port = _free_tcp_port()
+        with patch("tools.stack.server.open_service", self._patched_open()):
+            stub = _serve_in_process(self, StackServer())
+            self.assertEqual(stub.Configure(_real_config("127.0.0.1", port)).response, SUCCESS)
+        with self.assertRaises(StackOwnedError) as ctx:
+            acquire_owner_lock("127.0.0.1", port, owner="mcp", lock_dir=self.lock_dir)
+        self.assertEqual(ctx.exception.holder.owner, "galago")
+        self.assertEqual(ctx.exception.holder.pid, os.getpid())
+
+    def test_same_endpoint_reconfigure_reuses_the_session(self) -> None:
+        port = _free_tcp_port()
+        opener = self._patched_open()
+        with patch("tools.stack.server.open_service", opener):
+            server = StackServer()
+            stub = _serve_in_process(self, server)
+            self.assertEqual(stub.Configure(_real_config("127.0.0.1", port)).response, SUCCESS)
+            first = server.service
+            for host in ("127.0.0.1", "  127.0.0.1  "):
+                with self.subTest(host=host):
+                    reply = stub.Configure(_real_config(host, port))
+                    self.assertEqual(reply.response, SUCCESS)
+                    self.assertEqual(opener.call_count, 1)
+                    self.assertIs(server.service, first)
+
+    def test_case_variants_of_a_hostname_reuse_the_session(self) -> None:
+        port = _free_tcp_port()
+        opener = self._patched_open()
+        with patch("tools.stack.server.open_service", opener):
+            server = StackServer()
+            stub = _serve_in_process(self, server)
+            self.assertEqual(stub.Configure(_real_config("localhost", port)).response, SUCCESS)
+            first = server.service
+            self.assertEqual(stub.Configure(_real_config("LOCALHOST", port)).response, SUCCESS)
+            self.assertEqual(opener.call_count, 1)
+            self.assertIs(server.service, first)
+
+    def test_moving_endpoints_closes_the_old_lock_first(self) -> None:
+        port_a, port_b, port_c = _free_tcp_port(), _free_tcp_port(), _free_tcp_port()
+        while port_b == port_a:
+            port_b = _free_tcp_port()
+        while port_c in (port_a, port_b):
+            port_c = _free_tcp_port()
+        fake_open = _fake_open_service(_fake_transport())
+        seen_free: list[bool] = []
+
+        def opener(host: str, port: int, *, owner: str) -> Any:
+            if port == port_b:
+                # Proves endpoint A was already released when B is opened.
+                self._assert_free(port_a)
+                seen_free.append(True)
+            return fake_open(host, port, owner=owner)
+
+        with patch("tools.stack.server.open_service", MagicMock(side_effect=opener)):
+            server = StackServer()
+            stub = _serve_in_process(self, server)
+            self.assertEqual(stub.Configure(_real_config("127.0.0.1", port_a)).response, SUCCESS)
+            self.assertEqual(stub.Configure(_real_config("127.0.0.1", port_b)).response, SUCCESS)
+            self.assertEqual(seen_free, [True])
+            self._assert_free(port_a)
+            with self.assertRaises(StackOwnedError) as ctx:
+                acquire_owner_lock("127.0.0.1", port_b, owner="mcp", lock_dir=self.lock_dir)
+            self.assertEqual(ctx.exception.holder.owner, "galago")
+
+        # The real open_service against a port another front end owns.
+        held = acquire_owner_lock("127.0.0.1", port_c, owner="mcp", lock_dir=self.lock_dir)
+        self.addCleanup(held.release)
+        with patch.object(core_composition, "RestStackClient"):
+            reply = stub.Configure(_real_config("127.0.0.1", port_c))
+        self.assertEqual(reply.response, NOT_READY)
+        self.assertIn("already owned by mcp", reply.error_message)
+        self._assert_free(port_b)
+        self.assertIsNone(server.service)
+        self.assertIsNone(server._owned)
 
 
 if __name__ == "__main__":

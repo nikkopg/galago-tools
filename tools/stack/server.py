@@ -18,6 +18,7 @@ from typing import Any, Optional
 
 from google.protobuf.struct_pb2 import Struct
 from stack_automation_layer.composition import OwnedService, open_service
+from stack_automation_layer.owner_lock import endpoint_key
 from stack_automation_layer.service import StackService
 
 from tools.base_server import ToolServer, serve
@@ -124,6 +125,16 @@ class StackServer(ToolServer):
         if not host:
             raise ValueError("stack: Config.host is required")
         port = config.port or DEFAULT_PORT
+        key = endpoint_key(host, port)
+        if self._owned is not None and self._owned.endpoint == key:
+            return
+        # Close-first: release the old owner lock before opening the new
+        # endpoint, so a failed open leaves this tool holding no lock and no
+        # service.
+        if self._owned is not None:
+            self._owned.close()
+            self._owned = None
+            self.service = None
         self._owned = open_service(host, port, owner="galago")
         self.service = self._owned.service
 
