@@ -1,18 +1,21 @@
-# galago-tools (nikkopg fork) — F.A.S.T. adapter
+# galago-tools (nikkopg fork) — F.A.S.T. & STACK adapters
 
 ## What This Is
 
 The `nikkopg/galago-tools` fork of `sciencecorp/galago-tools`: Galago's gRPC tool servers, plus a
-Formulatrix F.A.S.T. liquid-handler adapter (`tools/fast/`). The adapter maps Galago commands 1:1
-onto the shared `fast-mcp` core (`FastService`), so Galago drives the instrument through the same
-safety policy as the fast-mcp LLM agent. This GSD project covers the F.A.S.T. adapter and its
-rollout; galago-core (the web app, queue and run page) has its own GSD project.
+Formulatrix F.A.S.T. liquid-handler adapter (`tools/fast/`) and, from v2, a Formulatrix STACK
+plate-mover adapter (`tools/stack/`). Each adapter maps Galago commands 1:1 onto its instrument's
+shared core (`fast-mcp`'s `FastService`, stack-automation-layer's `StackService`), so Galago drives
+each instrument through the same safety policy as that instrument's MCP agent. This GSD project
+covers the adapters, the two-instrument workflow and their rollout; galago-core (the web app, queue
+and run page) has its own GSD project.
 
 ## Core Value
 
-An operator running a F.A.S.T. step from Galago can always see what the instrument is doing and
-recover it themselves. No code path in the adapter pauses, resumes or aborts the instrument on its
-own, and the adapter never holds a copy of an instrument safety rule (the fast-mcp core owns them).
+An operator running an instrument step from Galago can always see what the instrument is doing and
+recover it themselves. No adapter code path pauses, resumes, aborts, cancels, retries or
+acknowledges on its own, and no adapter holds a copy of an instrument safety rule (each core owns
+them). For the STACK: a step never sends a second transfer.
 
 ## Current State
 
@@ -26,15 +29,26 @@ pushed yet.
 **Governing design:** `docs/specs/2026-10-12-galago-live-run-control-design.md`.
 **Companion:** galago-core `.planning/` — "Live Run Control: queue & run page".
 
-## Next Milestone Goals
+## Current Milestone: v2 STACK Tool & STACK↔F.A.S.T. Handoff
 
-Not yet defined — start with `/gsd-new-milestone`. Candidates carried out of v1:
-- Fix WR-02 (`_is_no_error`'s loose `in (None, 0)` check) with the strict `_accepted()`-style rule.
-- Code backstop: the adapter refuses `Configure` while a run is in flight (T-03-05/T-03-08 are
-  procedural today).
-- Hard pause once the F.A.S.T. team documents `hardPause` (D5).
-- Push fast-mcp `fix/run-recovery-gate` to GitLab and the `feat/fast-tool` branches to the
-  `nikkopg` forks (user's action).
+**Goal:** Galago drives the Formulatrix STACK plate mover through the frozen stack-automation-layer
+core, and one Galago workflow hands a plate between the STACK and the F.A.S.T.
+
+**Target features:**
+- GAL-01: `tools/stack/` gRPC tool, 1:1 with the core's allowlisted intents — Transfer
+  (`plan_transfer` → `execute_transfer` → wait to a terminal result; starting the run is the
+  approval), reads (manager state, robot states, devices, labware profiles, labware presence),
+  EstimateDuration, and an operator-only AcknowledgeFailure (`"yes"` arm-inspected decision)
+- F5 guard: Transfer carries a required `step_key`; a persisted key→guid ledger means a re-executed
+  step re-attaches (`wait_transfer`) to its original guid and never submits again
+- Every non-`ran` core result (rejected/needsInput/refused/readFailed/lost/failed/aborted/
+  cancelled/timedOut) maps to a Galago error response, never SUCCESS
+- Simulation mode, a simulated workcell run, and a supervised, runbook-gated live run
+- GAL-02: a Galago workflow — STACK moves a plate from a nest/hotel onto the F.A.S.T. deck, the
+  F.A.S.T. runs its transfer, STACK moves the plate back
+
+**Carried v1 candidates (not in v2 scope unless pulled in):** WR-02 strict `_is_no_error`; adapter
+refusal of `Configure` mid-run; hard pause (D5); pushing branches (user's action).
 
 ## Requirements
 
@@ -70,8 +84,13 @@ Not yet defined — start with `/gsd-new-milestone`. Candidates carried out of v
 
 ### Active
 
-None yet — defined by the next milestone (see Next Milestone Goals). v1 traceability:
-`.planning/milestones/v1-REQUIREMENTS.md`.
+v2 requirements in `.planning/REQUIREMENTS.md` (v1 traceability:
+`.planning/milestones/v1-REQUIREMENTS.md`).
+
+- [ ] GAL-01 STACK gRPC tool (`tools/stack/`) on the frozen contract v1 core
+- [ ] F5-safe Transfer (step-key ledger, re-attach instead of re-submit)
+- [ ] Simulated workcell run and supervised live STACK run
+- [ ] GAL-02 STACK → F.A.S.T. → STACK plate-handoff workflow
 
 ### Out of Scope
 
@@ -83,7 +102,11 @@ None yet — defined by the next milestone (see Next Milestone Goals). v1 tracea
 - Upstream PRs to `sciencecorp/galago-tools` — fork-only; upstream cannot reach the private GitLab
   core dependency
 - galago-core F5 (queue re-ran one transfer 3 times) and F3 (run UI hides tool errors) — tracked
-  debt, out by user decision (2026-10-12)
+  debt, out by user decision (2026-10-12); v2 defends against F5 inside the STACK adapter instead
+- STACK safe-position and cancel from Galago — operator actions outside Galago for v2, the same way
+  fast-mcp kept cancel out of Galago
+- Fixing stack-automation-layer core gaps in this repo — a gap found here stops the work and is
+  fixed in stack-automation-layer via `/gsd-quick`
 
 ## Context
 
@@ -125,6 +148,22 @@ None yet — defined by the next milestone (see Next Milestone Goals). v1 tracea
   - Branches are not pushed (deferred D-02): pushing is the user's own action. Per local setup notes,
     push only to the `nikkopg` fork remote.
 
+- **STACK core (v2):** stack-automation-layer (GitLab `nikkopg/stack-automation-layer`, branch
+  `feat/initial-layer`, local clone `~/data/nikko/stack-automation-layer`). Result contract v1 is
+  frozen (`CONTRACT_VERSION = 1`, 2026-10-28, after the supervised hardware run); any key/type change
+  is a version bump plus an adapter migration. Its `.planning/PROJECT.md` is gitignored and was not
+  available on forb01 when v2 was scoped — CLAUDE.md, `docs/runbooks/stack-validation.md` and the
+  code were read instead.
+- **STACK hardware facts (runbook Part B):** manager `10.150.1.125:5005` (hostname `stack-server`),
+  robot `stack2-6`, nests `nest-1/deck1/A1`, `orange-nest/deck1/A1`, `rack/l1/A1`; build
+  `0.12.0-beta.1+1157`. Estimates run ~1.7x conservative on hardware. A second valid submit is
+  **accepted and queued**, not refused — only the core's in-flight and robot-idle gates stop a
+  double-queued motion, and those cover only a task still in flight (hence the step-key ledger).
+- **STACK core semantics the adapter depends on:** plan ids are in-memory, single-use, TTL-bound;
+  the post-failure latch lives in the serving process (a restart clears it, which the runbook
+  forbids as a way to clear a failure); the owner lock is per host string + per-user lock dir
+  (`STACK_MCP_LOCK_DIR`), owners `mcp` | `galago`.
+
 ## Constraints
 
 - **Python 3.10** — the fork runtime (D-01); the gate runs on 3.10.12
@@ -135,6 +174,16 @@ None yet — defined by the next milestone (see Next Milestone Goals). v1 tracea
 - **Physical decisions explicit** — `"yes"`/`"no"` strings, never bools with defaults
 - **ts-proto 1.151.1** for galago-core codegen of any proto change here (the local 1.153.2 breaks
   `tool_base.ts`)
+- **STACK core-only** — stack-automation-layer pinned by SHA, no `[mcp]` extra, nothing imported
+  from `stack_automation_layer.mcp`; the service opened only via `composition.open_service(...,
+  owner="galago")`; credentials only from `STACK_USER`/`STACK_PASSWORD`; bind only to contract v1
+  `to_dict()` shapes
+- **STACK single owner** — the tool holds the `galago` lock; stack-mcp (Claude Desktop) must be
+  closed during Galago runs; both front ends use the identical host string and lock dir
+- **No automatic motion retry** — a STACK motion is submitted at most once per step key; a core
+  rejection never reaches the arm
+- **STACK live motion** — only in a supervised, runbook-gated session with the user present; real
+  hardware is the default target, so the default test suite sends no STACK motion
 
 ## Key Decisions
 
@@ -149,6 +198,10 @@ None yet — defined by the next milestone (see Next Milestone Goals). v1 tracea
 | D-14 FAIL→fix→rerun cycles handled by stop/fix/gate/redeploy/rerun, never silent pass | Live defects found on real hardware must be fixed and re-verified, not worked around in the evidence record | Found and fixed three real defects live: galago-core's `pausePrompt` rendered the no-plate sentinel as literal `"-1"`; this repo's adapter appended a spurious `": NoError (0)"` suffix to the operator-abort wording (fixed `201d987`); galago-core's queue re-ran operator-aborted or `galago-web`-restart-orphaned steps (fixed by galago-core quick tasks `261015-h0q` and `261015-o44`, each live-verified) |
 | galago-tools manager (`:8081`) can restart a tool server without a service restart | Operators may use the manager page directly, outside the deploy runbook | Overwrites `F.A.S.T.log` in place; any no-restart or log-coverage check must track the tool-server listener PID, not the `galago-tools` service MainPID (confirmed during Phase 3's Safety invariant audit) |
 | Re-verify stale phases before closing; redeploy CR-01 without a live rerun | Verification went stale after the 02-05 fix; logs showed LIVE-07 used the in-flight Resume path, which CR-01 did not touch | ✓ Good — forb01 at HEAD 2026-10-16, Phase 3 re-verified `passed` |
+| v2: starting the Galago run is the approval for a STACK Transfer (plan → execute → wait in one command) | The core's plan id is in-memory, single-use and TTL-bound — unusable across workflow steps; operator-initiated runs already approve F.A.S.T. transfers | — Pending |
+| v2: AcknowledgeFailure is an operator-only Galago command with a `"yes"` arm-inspected decision | The failure latch lives in the Galago tool process; stack-mcp can't take the lock to acknowledge, and a restart clears the latch, which the runbook forbids | — Pending |
+| v2: F5 defence is a persisted `step_key` → guid ledger in the STACK adapter | STACK queues a second submit; the core's in-flight guard misses a re-execution after the first task finished; works regardless of galago-core | — Pending |
+| v2: research only what is new (STACK proto, galago-core two-tool workflow); skip the 4-researcher pass | `tools/fast/` is the template | — Pending |
 | Claude may send `Configure` only on the user's explicit request with no run in flight | User asked Claude to reconnect after the 2026-10-16 redeploy; the operator-only rule had no code backstop | ⚠️ Revisit — logged exception (T-03-05/T-03-08); add an adapter-side mid-run `Configure` refusal |
 
 ## Evolution
@@ -169,4 +222,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-10-16 after v1 milestone*
+*Last updated: 2026-10-28 after starting milestone v2*

@@ -1,20 +1,16 @@
 ---
 gsd_state_version: "1.0"
-milestone: v1
-milestone_name: F.A.S.T. Live Run Control (adapter & rollout)
-status: Awaiting next milestone
-stopped_at: Milestone v1 complete and archived
-last_updated: "2026-10-15T23:16:09.399Z"
-last_activity: 2026-10-16
-last_activity_desc: Milestone v1 completed and archived
-state_head: 07a081d1dd6c7b29abe41bd2a32779a3ad57a6a3
+milestone: v2
+milestone_name: STACK Tool & STACK↔F.A.S.T. Handoff
+status: planning
+last_updated: "2026-10-28T11:44:16.513Z"
+last_activity: 2026-10-28
 progress:
-  total_phases: 3
-  completed_phases: 3
-  total_plans: 18
-  completed_plans: 18
-  percent: 100
-current_phase: null
+  total_phases: 0
+  completed_phases: 0
+  total_plans: 0
+  completed_plans: 0
+  percent: 0
 ---
 
 # Project State
@@ -29,10 +25,10 @@ is doing and recover it themselves; no adapter code path pauses, resumes or abor
 
 ## Current Position
 
-Phase: Milestone v1 complete
+Phase: Not started (defining requirements)
 Plan: —
-Status: Awaiting next milestone
-Last activity: 2026-10-16 — Milestone v1 completed and archived
+Status: Defining requirements
+Last activity: 2026-10-28 — Milestone v2 started
 
 ## Performance Metrics
 
