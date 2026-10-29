@@ -2870,6 +2870,217 @@ class TestRestart(_LedgerCase):
         self.assertNotIn("reattachedAfterRestart", reply.meta_data)
 
 
+_ALLOWED_CORE_CALLS = frozenset(
+    {"plan_transfer", "execute_transfer", "wait", "wait_transfer", "latch_status"})
+
+
+class TestNeverResends(_LedgerCase):
+    """XFR-05 / D-15 / D-16 behavioural matrix: for one step key the total
+    execute_transfer count across every Transfer sent, every re-run and every
+    restart stays exactly 1, no path calls acknowledge_failure, and the core is
+    only ever reached through plan_transfer, execute_transfer, wait,
+    wait_transfer and latch_status. The one documented exception (a released
+    "nothing was sent" outcome) is pinned at the end. Fake cores only; the
+    re-attach clock is patched so no scenario can spin on the real clock."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        # Every read of the re-attach clock jumps 1000 s, so a core that times
+        # out forever ends the loop after one slice instead of spinning.
+        ticks = [0.0]
+
+        def _jump() -> float:
+            ticks[0] += 1000.0
+            return ticks[0]
+
+        patcher = patch.object(stack_server, "_monotonic", side_effect=_jump)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.cores: list[_FakeCore] = [self.core]
+
+    # Helpers ----------------------------------------------------------------
+
+    def _restarted(self) -> tuple[ToolDriverStub, _FakeCore]:
+        """A new StackServer (a new instance id) and a new fake core on the
+        same ledger directory: what a tool-server restart looks like."""
+        restarted = StackServer()
+        core = _FakeCore()
+        restarted.service = core  # type: ignore[assignment]
+        restarted.config = stack_pb2.Config(host="127.0.0.1")
+        restarted.status = READY
+        restarted._ledger_dir = self.ledger_dir
+        self.assertNotEqual(restarted._instance, self.server._instance)
+        stub = _serve_in_process(self, restarted)
+        self.cores.append(core)
+        return stub, core
+
+    def _send_via(self, stub: ToolDriverStub, key: str, **fields: Any) -> Any:
+        for name, value in _ESTIMATE_FIELDS.items():
+            fields.setdefault(name, value)
+        return stub.ExecuteCommand(self._stack(
+            transfer=stack_pb2.Command.Transfer(step_key=key, **fields)))
+
+    def _run_scenario(self, name: str, steps: list[tuple[Callable[[str], Any], int]],
+                      expected_executes: int = 1) -> None:
+        """Run each (step, expected response code) in order under one step key,
+        then assert the matrix invariants over every fake core that was used."""
+        key = f"run-1:{name}"
+        for number, (step, expected) in enumerate(steps, start=1):
+            reply = step(key)
+            self.assertEqual(
+                reply.response, expected, f"{name} step {number}: {reply.error_message}")
+        self.assertEqual(
+            sum(core.execute_calls for core in self.cores), expected_executes,
+            f"{name}: execute_transfer total")
+        for core in self.cores:
+            self.assertNotIn("acknowledge_failure", core.call_names)
+            self.assertLessEqual(set(core.call_names), _ALLOWED_CORE_CALLS)
+
+    def _again(self) -> tuple[Callable[[str], Any], int]:
+        """A re-run of the same request on the first server."""
+        return (lambda key: self._transfer(key), ERROR_FROM_TOOL)
+
+    # Scenarios --------------------------------------------------------------
+
+    def test_ran_then_f5_repeats_replay_and_never_re_send(self) -> None:
+        replays: list[Any] = []
+
+        def _repeat(key: str) -> Any:
+            reply = self._transfer(key)
+            replays.append(reply.meta_data["replayed"])
+            return reply
+
+        self._run_scenario("ran-f5", [
+            (lambda key: self._transfer(key), SUCCESS), (_repeat, SUCCESS), (_repeat, SUCCESS)])
+        self.assertEqual(replays, [True, True])
+        self.assertEqual(self.core.call_names.count("plan_transfer"), 1)
+
+    def test_ran_then_a_repeat_past_the_window_is_refused_without_a_send(self) -> None:
+        def _past_window(key: str) -> Any:
+            later = datetime.now(timezone.utc) + timedelta(seconds=601)
+            with patch.object(stack_server, "_utcnow", return_value=later):
+                return self._transfer(key)
+
+        def _inside_window(key: str) -> Any:
+            soon = datetime.now(timezone.utc) + timedelta(seconds=5)
+            with patch.object(stack_server, "_utcnow", return_value=soon):
+                return self._transfer(key)
+
+        self._run_scenario("ran-window", [
+            (lambda key: self._transfer(key), SUCCESS), (_inside_window, SUCCESS),
+            (_past_window, ERROR_FROM_TOOL), (_past_window, ERROR_FROM_TOOL)])
+
+    def test_failed_then_retries_are_refused_without_a_send(self) -> None:
+        self.core.wait_result = Failed(task=_snapshot(_GUID), reason="robotError")
+        self.core.latch_result = LatchStatus(latched=True, guid=_GUID, result_kind="failed")
+        self._run_scenario("failed", [
+            (lambda key: self._transfer(key), ERROR_FROM_TOOL), self._again(), self._again()])
+        self.assertEqual(self._records()["run-1:failed"]["state"], "done")
+
+    def test_timed_out_then_a_re_run_re_attaches_to_ran_and_replays(self) -> None:
+        self.core.wait_result = TimedOut(handle=TaskHandle(guid=_GUID))
+
+        def _re_attach(key: str) -> Any:
+            self.core.wait_transfer_results = [Ran(task=_ran_snapshot())]
+            return self._transfer(key)
+
+        self._run_scenario("timed-out", [
+            (lambda key: self._transfer(key), ERROR_FROM_TOOL), (_re_attach, SUCCESS),
+            (lambda key: self._transfer(key), SUCCESS)])
+        self.assertEqual(self.core.call_names.count("wait_transfer"), 1)
+
+    def test_a_poll_failure_then_a_re_run_re_attaches_to_ran(self) -> None:
+        self.core.wait_result = Lost(reason="pollFailed", handle=TaskHandle(guid=_GUID))
+        self.core.latch_result = LatchStatus(
+            latched=True, guid=_SUBMIT_GUID, result_kind="lost", reason="pollFailed")
+
+        def _re_attach(key: str) -> Any:
+            self.core.wait_transfer_results = [Ran(task=_ran_snapshot())]
+            return self._transfer(key)
+
+        self._run_scenario("poll-failed", [
+            (lambda key: self._transfer(key), ERROR_FROM_TOOL), (_re_attach, SUCCESS)])
+        self.assertEqual(self._records()["run-1:poll-failed"]["state"], "done")
+
+    def test_a_submit_outcome_unknown_is_refused_on_every_re_run(self) -> None:
+        self.core.execute_result = Lost(reason="submitOutcomeUnknown")
+        self.core.latch_result = LatchStatus(
+            latched=True, guid=_SUBMIT_GUID, result_kind="lost", reason="submitOutcomeUnknown")
+        self._run_scenario("submit-unknown", [
+            (lambda key: self._transfer(key), ERROR_FROM_TOOL), self._again(), self._again()])
+        self.assertEqual(self._records()["run-1:submit-unknown"]["state"], "outcomeUnknown")
+
+    def test_an_exception_after_the_write_ahead_is_refused_on_every_re_run(self) -> None:
+        self.core.execute_result = RuntimeError("boom")
+        self._run_scenario("raised", [
+            (lambda key: self._transfer(key), ERROR_FROM_TOOL), self._again(), self._again()])
+        self.assertEqual(self._records()["run-1:raised"]["state"], "submitting")
+
+    def test_a_mismatched_request_is_invalid_and_the_original_still_replays(self) -> None:
+        def _different(key: str) -> Any:
+            return self._transfer(key, robot="R2")
+
+        self._run_scenario("mismatch", [
+            (lambda key: self._transfer(key), SUCCESS),
+            (_different, tool_base_pb2.INVALID_ARGUMENTS),
+            (lambda key: self._transfer(key), SUCCESS)])
+        self.assertEqual(self.core.call_names.count("plan_transfer"), 1)
+
+    def test_a_restart_while_started_re_attaches_with_no_second_send(self) -> None:
+        self.core.wait_result = TimedOut(handle=TaskHandle(guid=_GUID))
+
+        def _after_restart(key: str) -> Any:
+            stub, core = self._restarted()
+            core.wait_transfer_results = [Ran(task=_ran_snapshot())]
+            reply = self._send_via(stub, key)
+            self.assertEqual(reply.meta_data["reattachedAfterRestart"], True)
+            self.assertEqual(core.call_names, ["wait_transfer"])
+            return reply
+
+        self._run_scenario("restart-started", [
+            (lambda key: self._transfer(key), ERROR_FROM_TOOL), (_after_restart, SUCCESS)])
+        self.assertEqual(self._records()["run-1:restart-started"]["state"], "done")
+
+    def test_a_restart_while_submitting_is_refused_with_no_second_send(self) -> None:
+        self.core.execute_result = RuntimeError("boom")
+
+        def _after_restart(key: str) -> Any:
+            stub, core = self._restarted()
+            reply = self._send_via(stub, key)
+            self.assertIn("tool restarted mid-transfer", reply.error_message)
+            self.assertEqual(core.calls, [])
+            return reply
+
+        self._run_scenario("restart-submitting", [
+            (lambda key: self._transfer(key), ERROR_FROM_TOOL), (_after_restart, ERROR_FROM_TOOL)])
+
+    def test_a_restart_after_done_replays_with_no_second_send(self) -> None:
+        def _after_restart(key: str) -> Any:
+            stub, core = self._restarted()
+            reply = self._send_via(stub, key)
+            self.assertEqual(reply.meta_data["replayed"], True)
+            self.assertEqual(core.calls, [])
+            return reply
+
+        self._run_scenario("restart-done", [
+            (lambda key: self._transfer(key), SUCCESS), (_after_restart, SUCCESS)])
+
+    def test_the_one_exception_a_released_outcome_re_runs_exactly_once_more(self) -> None:
+        """D-08: a refusal that proves nothing was sent releases the key, so the
+        re-run sends exactly one more execute_transfer; the key is then spent
+        and a third run replays (the total stays 2, never 3)."""
+        self.core.execute_result = Refused(reason="stackBusy")
+
+        def _re_run_accepted(key: str) -> Any:
+            self.core.execute_result = TaskHandle(guid=_GUID, robot="R1", estimated_s=30.0)
+            return self._transfer(key)
+
+        self._run_scenario("released", [
+            (lambda key: self._transfer(key), ERROR_FROM_TOOL), (_re_run_accepted, SUCCESS),
+            (lambda key: self._transfer(key), SUCCESS)], expected_executes=2)
+        self.assertEqual(self.core.call_names.count("plan_transfer"), 2)
+
+
 class TestTransferEstimate(_RealModeGrpcTestCase):
     """STK-04: GetTransferEstimate -> estimate_transfer, once, nothing else."""
 
