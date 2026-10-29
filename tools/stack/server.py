@@ -652,6 +652,9 @@ class StackServer(ToolServer):
         # with _ledger_dir, so a Configure can never move the ledger out from
         # under a step key that has already run.
         self._ledger_pinned: Optional[Path] = None
+        # WR-01: True once the running Transfer has found or written a record in
+        # the directory it pinned. Written only under _MOTION_LOCK.
+        self._ledger_used = False
         # WR-02: the status a refused Configure must leave standing, per thread
         # (base Configure sets FAILED on the same thread right after _configure).
         self._refused = threading.local()
@@ -1016,6 +1019,15 @@ class StackServer(ToolServer):
         service = self._require_service()
         if not _MOTION_LOCK.acquire(blocking=False):
             return _reply(ERROR_FROM_TOOL, message=_BUSY_MESSAGE)
+        # WR-01: the pin below is taken before anything is read from the ledger,
+        # so a Configure cannot move the directory under this Transfer. It is
+        # kept only when a record can exist there (see _ledger_used); otherwise
+        # the previous pin is put back, so a Transfer that wrote nothing (an
+        # unwritable directory, a plan that needs input) leaves the operator able
+        # to fix ledger_dir with a Configure.
+        previous: Optional[Path] = None
+        tentative = False
+        self._ledger_used = False
         try:
             # The key is used byte-exact: no strip, no case folding (D-06).
             key = params.step_key
@@ -1027,9 +1039,13 @@ class StackServer(ToolServer):
                 # so a Configure can never move the ledger afterwards.
                 with self._state:
                     directory = resolve_ledger_dir(self._ledger_dir)
+                    previous = self._ledger_pinned
                     self._ledger_pinned = directory
+                    tentative = True
                 ledger = Ledger(directory)
                 existing = ledger.get(key)
+                if existing is not None:
+                    self._ledger_used = True
             except (LedgerError, ValueError) as exc:
                 return _ledger_error_reply(exc, self._ledger_dir)
             decision = decide(existing, fingerprint=fp, instance=self._instance, now=_utcnow())
@@ -1043,6 +1059,9 @@ class StackServer(ToolServer):
                     service, ledger, key, decision.record, budget, decision.restarted)
             return self._ledger_reply(decision, key, service)
         finally:
+            if tentative and not self._ledger_used:
+                with self._state:
+                    self._ledger_pinned = previous
             _MOTION_LOCK.release()
 
     def _ledger_reply(self, decision: Decision, key: str,
@@ -1109,6 +1128,9 @@ class StackServer(ToolServer):
         except LedgerError as exc:
             return _reply(ERROR_FROM_TOOL, message=_one_line(
                 _WRITE_AHEAD_FAILED.format(reason=exc.reason), 300))
+        # A claim that returned (True, or False for a record written by another
+        # tool server) means a record exists in this directory: keep the pin.
+        self._ledger_used = True
         if not claimed:
             return _reply(ERROR_FROM_TOOL, message=_CLAIMED_ELSEWHERE)
         try:

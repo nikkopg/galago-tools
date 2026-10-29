@@ -3144,6 +3144,78 @@ class TestLedgerDirPinned(_LedgerCase):
         self.assertEqual(reply.response, NOT_READY)
         self.assertEqual(self.server._transfer_timeout_s, 0.0)
 
+    # WR-01 (iteration 2): a Transfer pins the directory only when a record can
+    # exist there. One that wrote nothing must not leave the operator unable to
+    # fix a bad ledger_dir without restarting the tool server.
+
+    def _assert_directory_can_still_move(self, port: int) -> None:
+        elsewhere = os.path.join(self._tmpdir.name, "another-ledger")
+        reply = self._configure(elsewhere, port)
+        self.assertEqual(reply.response, SUCCESS, reply.error_message)
+        self.assertEqual(self.server._ledger_dir, elsewhere)
+        self.core.calls.clear()
+        self.assertEqual(self._transfer().response, SUCCESS)
+        self.assertTrue(os.path.isfile(os.path.join(elsewhere, "stack-ledger.json")))
+
+    def test_a_transfer_whose_write_ahead_failed_does_not_pin_the_directory(self) -> None:
+        port = _free_tcp_port()
+        self.assertEqual(self._configure(self.ledger_dir, port).response, SUCCESS)
+        with patch.object(Ledger, "claim", side_effect=LedgerError("unwritable", "p")):
+            reply = self._transfer()
+        self.assertEqual(reply.response, ERROR_FROM_TOOL)
+        self.assertIn("fix the ledger directory", reply.error_message)
+        self.assertEqual(self.core.execute_calls, 0)
+        self.assertIsNone(self.server._ledger_pinned)
+        self._assert_directory_can_still_move(port)
+
+    def test_a_transfer_that_needs_input_does_not_pin_the_directory(self) -> None:
+        port = _free_tcp_port()
+        self.assertEqual(self._configure(self.ledger_dir, port).response, SUCCESS)
+        good_plan = self.core.plan_result
+        self.core.plan_result = NeedsInput(missing=["robot"])
+        self.assertEqual(self._transfer().response, ERROR_FROM_TOOL)
+        self.assertIsNone(self.server._ledger_pinned)
+        self.core.plan_result = good_plan
+        self._assert_directory_can_still_move(port)
+
+    def test_a_claim_that_returns_false_pins_the_directory(self) -> None:
+        # Another tool server wrote a record there: the directory is in use.
+        port = _free_tcp_port()
+        self.assertEqual(self._configure(self.ledger_dir, port).response, SUCCESS)
+        with patch.object(Ledger, "claim", return_value=False):
+            self.assertEqual(self._transfer().response, ERROR_FROM_TOOL)
+        self.assertEqual(
+            self._configure(os.path.join(self._tmpdir.name, "another-ledger"), port).response,
+            NOT_READY)
+
+    def test_a_transfer_that_finds_an_existing_record_pins_the_directory(self) -> None:
+        port = _free_tcp_port()
+        self.assertEqual(self._configure(self.ledger_dir, port).response, SUCCESS)
+        self._seed(state="submitting")
+        self.assertEqual(self._transfer().response, ERROR_FROM_TOOL)
+        self.assertEqual(self.core.execute_calls, 0)
+        self.assertEqual(
+            self._configure(os.path.join(self._tmpdir.name, "another-ledger"), port).response,
+            NOT_READY)
+
+    def test_the_directory_is_held_while_a_transfer_that_has_not_yet_written_is_running(
+            self) -> None:
+        # The pin is taken before the ledger is read and put back only when the
+        # Transfer ends without a record, so a Configure cannot move the
+        # directory under a Transfer that is about to claim in it.
+        port = _free_tcp_port()
+        self.assertEqual(self._configure(self.ledger_dir, port).response, SUCCESS)
+        seen: list[Any] = []
+
+        def _plan(request: Any) -> Any:
+            seen.append(self.server._ledger_pinned)
+            return NeedsInput(missing=["robot"])
+
+        self.core.plan_result = _plan
+        self.assertEqual(self._transfer().response, ERROR_FROM_TOOL)
+        self.assertEqual(seen, [Path(self.ledger_dir)])
+        self.assertIsNone(self.server._ledger_pinned)
+
 
 _ALLOWED_CORE_CALLS = frozenset(
     {"plan_transfer", "execute_transfer", "wait", "wait_transfer", "latch_status"})
