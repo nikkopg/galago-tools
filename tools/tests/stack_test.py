@@ -1108,6 +1108,15 @@ _MCP_MODULE = "stack_automation_layer.mcp"
 # stack-server host must never appear in adapter code (hard constraints).
 _FORBIDDEN_LITERALS = (_MCP_MODULE, "10.150.1.125", "stack-server")
 _REQUIRED_FUNCTIONS = ("_configure", "_result_reply", "GetManagerState")
+# D-16 call-site rules: each of these has exactly one call site, in the named
+# function; execute_transfer additionally never sits in a loop and always after
+# the write-ahead claim; acknowledge_failure may appear only in its handler.
+_SINGLE_SITE_CALLS = {"execute_transfer": "_run_fresh", "plan_transfer": "_run_fresh"}
+_LOOP_NODES = (ast.For, ast.AsyncFor, ast.While, ast.ListComp, ast.SetComp,
+               ast.DictComp, ast.GeneratorExp, ast.Lambda)
+_WRITE_AHEAD_CALL = "claim"
+_ACK_CALL = "acknowledge_failure"
+_ACK_HANDLER = "AcknowledgeFailure"
 
 
 def _name_of(func: ast.expr) -> Optional[str]:
@@ -1217,9 +1226,24 @@ class TestAdapterInvariant(unittest.TestCase):
         return trees
 
     def _assert_reported(self, tree: ast.Module, fragment: str) -> None:
-        violations = _stack_adapter_violations(self._with(tree))
+        self._assert_trees_reported(self._with(tree), fragment)
+
+    def _assert_trees_reported(self, trees: dict[str, ast.Module], fragment: str) -> None:
+        violations = _stack_adapter_violations(trees)
         self.assertTrue(violations, "expected a violation")
         self.assertTrue(any(fragment in v for v in violations), f"{fragment!r} not in {violations}")
+
+    def _assert_clean(self, tree: ast.Module) -> None:
+        self.assertEqual(_stack_adapter_violations(self._with(tree)), [])
+
+    def _renamed_call(self, old: str, new: str) -> ast.Module:
+        """Deep copy of server.py with every attribute call `.old(` renamed."""
+        tree = copy.deepcopy(self.server)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
+                    and node.func.attr == old:
+                node.func.attr = new
+        return tree
 
     def test_real_sources_are_clean(self) -> None:
         self.assertIn("server.py", self.trees)
@@ -1295,10 +1319,105 @@ class TestAdapterInvariant(unittest.TestCase):
             "self.service.manager_state()",
             "self.service.estimate_transfer(None)",
             "self.service.labware_presence(None)",
+            "self.service.latch_status()",
+            'self.service.wait_transfer("g", timeout_s=1.0)',
+            "self.service.wait(None, timeout_s=1.0)",
         ):
             with self.subTest(statement=statement):
                 planted = _plant(self.server, "GetManagerState", statement)
                 self.assertEqual(_stack_adapter_violations(self._with(planted)), [])
+
+    # -- XFR-05 call-site rules (D-16) -----------------------------------
+
+    def test_a_second_execute_transfer_is_reported(self) -> None:
+        self._assert_reported(
+            _plant(self.server, "GetManagerState", "self.service.execute_transfer(p)"),
+            "exactly one call site")
+        self._assert_reported(
+            _plant(self.server, "GetManagerState", "self.service.execute_transfer(p)"),
+            "outside _run_fresh")
+
+    def test_execute_transfer_in_a_loop_or_comprehension_is_reported(self) -> None:
+        for label, statement in (
+            ("for", "for _ in range(2):\n    service.execute_transfer(p)"),
+            ("while", "while True:\n    service.execute_transfer(p)"),
+            ("list", "[service.execute_transfer(p) for _ in range(2)]"),
+            ("set", "{service.execute_transfer(p) for _ in range(2)}"),
+            ("dict", "{_: service.execute_transfer(p) for _ in range(2)}"),
+            ("generator", "list(service.execute_transfer(p) for _ in range(2))"),
+            ("lambda", "f = lambda: service.execute_transfer(p)"),
+        ):
+            with self.subTest(label):
+                self._assert_reported(
+                    _plant(self.server, "_run_fresh", statement), "inside a loop")
+
+    def test_removing_the_real_execute_transfer_call_is_reported(self) -> None:
+        self._assert_reported(
+            self._renamed_call("execute_transfer", "execute_transfer_renamed"),
+            "exactly one call site")
+
+    def test_execute_transfer_before_the_write_ahead_claim_is_reported(self) -> None:
+        self._assert_reported(
+            self._renamed_call("claim", "claim_renamed"), "before the write-ahead claim")
+
+    def test_a_second_plan_transfer_is_reported(self) -> None:
+        self._assert_reported(
+            _plant(self.server, "GetManagerState", "self.service.plan_transfer(r)"),
+            "exactly one call site")
+        self._assert_reported(
+            _plant(self.server, "GetManagerState", "self.service.plan_transfer(r)"),
+            "outside _run_fresh")
+
+    def test_getattr_reaching_a_guarded_method_is_reported(self) -> None:
+        guarded = sorted(_FORBIDDEN_SERVICE_CALLS | set(_SINGLE_SITE_CALLS) | {_ACK_CALL})
+        for name in guarded:
+            with self.subTest(name=name):
+                self._assert_reported(
+                    _plant(self.server, "GetManagerState", f'getattr(service, "{name}")(p)'),
+                    "via getattr")
+
+    def test_an_aliased_guarded_method_is_reported(self) -> None:
+        self._assert_reported(
+            _plant(self.server, "GetManagerState", "fn = self.service.execute_transfer"),
+            "without a call")
+
+    def test_acknowledge_failure_outside_its_handler_is_reported(self) -> None:
+        self._assert_reported(
+            _plant(self.server, "GetManagerState",
+                   'self.service.acknowledge_failure("g", confirm=True)'),
+            "outside AcknowledgeFailure")
+
+    def test_a_second_acknowledge_failure_call_is_reported(self) -> None:
+        self._assert_reported(
+            _plant(self.server, "AcknowledgeFailure",
+                   'self.service.acknowledge_failure("g", confirm=True)\n'
+                   'self.service.acknowledge_failure("g", confirm=True)'),
+            "exactly one call site")
+
+    def test_one_acknowledge_failure_call_inside_its_handler_is_allowed(self) -> None:
+        self._assert_clean(
+            _plant(self.server, "AcknowledgeFailure",
+                   'self.service.acknowledge_failure("g", confirm=True)'))
+
+    def test_the_call_site_count_spans_every_stack_module(self) -> None:
+        trees = dict(self.trees)
+        trees["ledger.py"] = _plant(self.trees["ledger.py"], None, "service.execute_transfer(p)")
+        self._assert_trees_reported(trees, "exactly one call site")
+
+    def test_wait_transfer_in_a_loop_is_not_reported(self) -> None:
+        self._assert_clean(_plant(
+            self.server, "_run_fresh",
+            'for _ in range(3):\n    service.wait_transfer("g", timeout_s=1.0)'))
+
+    def test_the_fresh_path_and_transfer_are_required_functions(self) -> None:
+        for required in ("_run_fresh", "Transfer"):
+            with self.subTest(required=required):
+                self.assertIn(required, _REQUIRED_FUNCTIONS)
+                tree = copy.deepcopy(self.server)
+                for node in ast.walk(tree):
+                    if isinstance(node, ast.FunctionDef) and node.name == required:
+                        node.name = required + "_renamed"
+                self._assert_reported(tree, f"{required}() is missing")
 
 
 def _struct(d: dict) -> Struct:
