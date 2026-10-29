@@ -34,6 +34,7 @@ import threading
 import time
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Iterator, Optional, cast
 
 import grpc
@@ -169,6 +170,13 @@ _ACK_NOT_YES_MESSAGE = (
 # operator, and this one is worth seeing: it is transient and the controller
 # should retry.
 _RECONFIGURING_MESSAGE = "stack: reconfiguring"
+
+# CR-01: the step ledger is the only guard against a second send of a step key,
+# and it is found by directory. A directory the ledger has been used from is
+# therefore fixed for the life of this tool server.
+_LEDGER_DIR_PINNED = (
+    "stack: Config.ledger_dir cannot change after a Transfer has used the step "
+    "ledger; restart the tool server to move it")
 
 # D-12: a second Transfer while one is running is refused, not queued.
 _BUSY_MESSAGE = (
@@ -597,6 +605,11 @@ class StackServer(ToolServer):
         self.service: Optional[StackService] = None
         self._transfer_timeout_s: float = 0.0
         self._ledger_dir: str = ""
+        # CR-01: the resolved ledger directory a Transfer has used, or None
+        # before the first Transfer. Read and written under _state, together
+        # with _ledger_dir, so a Configure can never move the ledger out from
+        # under a step key that has already run.
+        self._ledger_pinned: Optional[Path] = None
         # WR-02: the status a refused Configure must leave standing, per thread
         # (base Configure sets FAILED on the same thread right after _configure).
         self._refused = threading.local()
@@ -664,7 +677,9 @@ class StackServer(ToolServer):
         can never keep answering from a previously configured STACK while
         GetStatus says the tool is not configured. The one exception is a busy
         refusal (_ConfigureBusy): nothing was changed, so a healthy owner is
-        kept rather than dropped for the sake of a retry."""
+        kept rather than dropped for the sake of a retry. A refusal that
+        leaves the ledger_dir where it is (CR-01) is the same kind: nothing is
+        applied, so the settings and the owner stay as they were."""
         with self._configure_lock:
             self._refused.status = None
             try:
@@ -769,16 +784,20 @@ class StackServer(ToolServer):
         ledger_dir = config.ledger_dir
         if ledger_dir.strip() and not os.path.isabs(ledger_dir.strip()):
             raise ValueError("stack: Config.ledger_dir must be an absolute path")
-        self._transfer_timeout_s = timeout
-        # Recorded only: resolved lazily at Transfer time, nothing is created here.
-        self._ledger_dir = config.ledger_dir
         key = endpoint_key(host, port)
+        # CR-01: no setting is applied until the Configure is committed. An
+        # unchanged endpoint commits at once; a swap commits after the drain and
+        # the open, so a refusal or a failed open changes nothing.
         # Only Configures change _owned, and they are serialised, so this read
         # needs no lock. An unchanged endpoint changes nothing, so it must not
         # drain (or refuse as busy) while commands are running.
         if self._owned is not None and self._owned.endpoint == key:
+            self._commit_settings(timeout, ledger_dir)
             return
         with self._exclusive():
+            # The drain is over: no Transfer can start or pin the ledger now.
+            # A ledger move is refused here, before the owner is touched.
+            self._commit_settings(None, ledger_dir, check_only=True)
             # Close-first: release the old owner lock before opening the new
             # endpoint, so a failed open leaves this tool holding no lock and
             # no service.
@@ -787,7 +806,33 @@ class StackServer(ToolServer):
             with self._state:
                 self._owned = owned
                 self.service = owned.service
+            self._commit_settings(timeout, ledger_dir)
         logging.warning(_RESTART_WARNING)
+
+    def _commit_settings(self, timeout: Optional[float], ledger_dir: str,
+                         check_only: bool = False) -> None:
+        """CR-01: apply the Config settings, or with ``check_only`` only check
+        them. A ledger_dir that resolves somewhere other than the directory a
+        Transfer has already used is refused (_ConfigureRefused) with nothing
+        applied, because a step key recorded there would read as new in the
+        other directory and be sent twice. Taken under _state, the lock a
+        Transfer pins the directory under, so the check and the assignment can
+        never straddle a pin. Recorded only: the directory is resolved lazily at
+        Transfer time and nothing is created here."""
+        with self._state:
+            pinned = self._ledger_pinned
+            if pinned is not None:
+                try:
+                    same = resolve_ledger_dir(ledger_dir) == pinned
+                except (RuntimeError, ValueError):
+                    same = False
+                if not same:
+                    raise _ConfigureRefused(_LEDGER_DIR_PINNED)
+            if check_only:
+                return
+            if timeout is not None:
+                self._transfer_timeout_s = timeout
+            self._ledger_dir = ledger_dir
 
     def ExecuteCommand(
         self, request: ToolCommand, context: grpc.ServicerContext
@@ -930,7 +975,12 @@ class StackServer(ToolServer):
             fp = fingerprint(self._endpoint(), request)
             budget = self._wait_budget(params)
             try:
-                ledger = Ledger(resolve_ledger_dir(self._ledger_dir))
+                # CR-01: read the configured directory and pin it in one step,
+                # so a Configure can never move the ledger afterwards.
+                with self._state:
+                    directory = resolve_ledger_dir(self._ledger_dir)
+                    self._ledger_pinned = directory
+                ledger = Ledger(directory)
                 existing = ledger.get(key)
             except (LedgerError, ValueError) as exc:
                 return _ledger_error_reply(exc, self._ledger_dir)

@@ -871,6 +871,30 @@ class TestConfigureBusy(_StackTestCase):
             self.assertNotEqual(ack.response, NOT_READY)
             self.assertEqual(stub.GetStatus(empty_pb2.Empty()).status, READY)
 
+    def test_a_busy_refusal_changes_no_setting(self) -> None:
+        """CR-01: a Configure refused as busy has applied nothing, whatever its
+        ledger_dir and transfer_timeout_s said."""
+        port_a, port_b = self._two_ports()
+        transport = _fake_transport()
+        opener = MagicMock(side_effect=_fake_open_service(transport))
+        ledger = os.path.join(self.lock_dir, "ledger-a")
+        with patch("tools.stack.server.open_service", opener), \
+                patch("tools.stack.server.CONFIGURE_DRAIN_TIMEOUT_S", 0.05):
+            server = StackServer()
+            stub = _serve_in_process(self, server)
+            first = _real_config("127.0.0.1", port_a, ledger_dir=ledger, transfer_timeout_s=10.0)
+            self.assertEqual(stub.Configure(first).response, SUCCESS)
+            parked = self._park_a_read(stub, transport)
+            moved = _real_config("127.0.0.1", port_b, ledger_dir=os.path.join(
+                self.lock_dir, "ledger-b"), transfer_timeout_s=99.0)
+            reply = stub.Configure(moved)
+            self.assertEqual(reply.response, NOT_READY)
+            self.assertIn("stack: busy", reply.error_message)
+            self.assertEqual(server._ledger_dir, ledger)
+            self.assertEqual(server._transfer_timeout_s, 10.0)
+            parked["release"].set()
+            parked["thread"].join(10)
+
     def test_same_endpoint_configure_does_not_drain(self) -> None:
         port_a, _ = self._two_ports()
         transport = _fake_transport()
@@ -2898,6 +2922,91 @@ class TestRestart(_LedgerCase):
         reply = self._transfer()
         self.assertEqual(reply.response, SUCCESS)
         self.assertNotIn("reattachedAfterRestart", reply.meta_data)
+
+
+class TestLedgerDirPinned(_LedgerCase):
+    """CR-01: the ledger is found by directory, so once a Transfer has used a
+    directory a Configure must not move it (a step key that already ran would
+    read as new in the other directory and be sent twice), and a Configure that
+    is refused must not have changed any setting."""
+
+    def _configure(self, ledger_dir: str, port: int, **fields: Any) -> Any:
+        opener = MagicMock(side_effect=_fake_open_service(_fake_transport()))
+        with patch("tools.stack.server.open_service", opener):
+            reply = self.stub.Configure(
+                _real_config("127.0.0.1", port, ledger_dir=ledger_dir, **fields))
+        # The fake core stands in for the service the Configure opened.
+        self.server.service = self.core  # type: ignore[assignment]
+        return reply
+
+    def test_a_completed_step_key_is_not_re_sent_after_a_same_endpoint_ledger_dir_change(
+            self) -> None:
+        port = _free_tcp_port()
+        self.assertEqual(self._configure(self.ledger_dir, port).response, SUCCESS)
+        self.assertEqual(self._transfer().response, SUCCESS)
+        self.assertEqual(self.core.execute_calls, 1)
+        self.core.calls.clear()
+        elsewhere = os.path.join(self._tmpdir.name, "another-ledger")
+        reply = self._configure(elsewhere, port)
+        self.assertEqual(reply.response, NOT_READY)
+        self.assertIn("ledger_dir", reply.error_message)
+        self.assertEqual(self.server._ledger_dir, self.ledger_dir)
+        # The tool keeps working and the step key is still known: no second send.
+        self.assertEqual(self._health().status, READY)
+        self.assertEqual(self._transfer().response, SUCCESS)
+        self.assertEqual(self.core.execute_calls, 0)
+        self.assertFalse(os.path.exists(elsewhere))
+
+    def test_a_ledger_dir_change_is_refused_for_an_endpoint_change_without_closing_the_owner(
+            self) -> None:
+        port = _free_tcp_port()
+        self.assertEqual(self._configure(self.ledger_dir, port).response, SUCCESS)
+        owned = self.server._owned
+        self.assertEqual(self._transfer().response, SUCCESS)
+        other_port = _free_tcp_port()
+        while other_port == port:
+            other_port = _free_tcp_port()
+        elsewhere = os.path.join(self._tmpdir.name, "another-ledger")
+        reply = self._configure(elsewhere, other_port)
+        self.assertEqual(reply.response, NOT_READY)
+        self.assertIs(self.server._owned, owned)
+        assert owned is not None
+        self.assertFalse(owned._closed)
+        self.assertEqual(self.server._ledger_dir, self.ledger_dir)
+
+    def test_the_same_directory_is_accepted_after_a_transfer(self) -> None:
+        port = _free_tcp_port()
+        self.assertEqual(self._configure(self.ledger_dir, port).response, SUCCESS)
+        self.assertEqual(self._transfer().response, SUCCESS)
+        reply = self._configure(self.ledger_dir + "/", port, transfer_timeout_s=42.0)
+        self.assertEqual(reply.response, SUCCESS, reply.error_message)
+        self.assertEqual(self.server._transfer_timeout_s, 42.0)
+
+    def test_a_blank_ledger_dir_that_resolves_to_the_used_directory_is_accepted(self) -> None:
+        port = _free_tcp_port()
+        self.assertEqual(self._configure("", port).response, SUCCESS)
+        self.assertEqual(self._transfer().response, SUCCESS)
+        default = os.path.join(self.xdg_state_home, "galago-tools", "stack")
+        self.assertEqual(self._configure(default, port).response, SUCCESS)
+        self.assertEqual(self._configure("  ", port).response, SUCCESS)
+
+    def test_the_directory_can_change_until_a_transfer_has_used_it(self) -> None:
+        port = _free_tcp_port()
+        self.assertEqual(self._configure(self.ledger_dir, port).response, SUCCESS)
+        elsewhere = os.path.join(self._tmpdir.name, "another-ledger")
+        self.assertEqual(self._configure(elsewhere, port).response, SUCCESS)
+        self.assertEqual(self.server._ledger_dir, elsewhere)
+        self.assertEqual(self._transfer().response, SUCCESS)
+        self.assertTrue(os.path.isfile(os.path.join(elsewhere, "stack-ledger.json")))
+
+    def test_a_refused_ledger_dir_change_applies_no_other_setting(self) -> None:
+        port = _free_tcp_port()
+        self.assertEqual(self._configure(self.ledger_dir, port).response, SUCCESS)
+        self.assertEqual(self._transfer().response, SUCCESS)
+        elsewhere = os.path.join(self._tmpdir.name, "another-ledger")
+        reply = self._configure(elsewhere, port, transfer_timeout_s=999.0)
+        self.assertEqual(reply.response, NOT_READY)
+        self.assertEqual(self.server._transfer_timeout_s, 0.0)
 
 
 _ALLOWED_CORE_CALLS = frozenset(
