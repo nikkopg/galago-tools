@@ -2731,6 +2731,145 @@ class TestTimedOutReattach(_LedgerCase):
         self.assertNotIn("reattachedAfterRestart", reply.meta_data)
 
 
+class TestRestart(_LedgerCase):
+    """XFR-03 / D-09 as kept by 05-SPIKE.md OQ1: after a tool-server restart a
+    started record is re-attached read-only. A live ran is SUCCESS flagged
+    reattachedAfterRestart; every other outcome carries the arm-inspection
+    clause (the core may not own the guid, so a failure may never have latched)
+    plus the current latch clause. A submitting record from the old instance is
+    refused with the same wording, and a done record is never re-observed."""
+
+    _RESTART = "tool restarted mid-transfer"
+
+    def _started_by_old_instance(self) -> None:
+        self._seed(state="started", instance="old-instance",
+                   handle=TaskHandle(guid=_GUID, robot="R1", estimated_s=30.0).to_dict())
+
+    def test_a_real_restart_re_attaches_to_ran_and_flags_it(self) -> None:
+        self.core.wait_result = TimedOut(handle=TaskHandle(guid=_GUID))
+        self.assertEqual(self._transfer().response, ERROR_FROM_TOOL)
+        restarted = StackServer()
+        core = _FakeCore()
+        core.wait_transfer_results = [Ran(task=_ran_snapshot())]
+        restarted.service = core  # type: ignore[assignment]
+        restarted.config = stack_pb2.Config(host="127.0.0.1")
+        restarted.status = READY
+        restarted._ledger_dir = self.ledger_dir
+        self.assertNotEqual(restarted._instance, self.server._instance)
+        stub = _serve_in_process(self, restarted)
+        fields: dict[str, Any] = dict(_ESTIMATE_FIELDS)
+        reply = stub.ExecuteCommand(self._stack(
+            transfer=stack_pb2.Command.Transfer(step_key=_STEP_KEY, **fields)))
+        self.assertEqual(reply.response, SUCCESS)
+        self.assertEqual(reply.error_message, "")
+        self.assertEqual(reply.meta_data, _struct(
+            {**Ran(task=_ran_snapshot()).to_dict(), "reattachedAfterRestart": True}))
+        self.assertEqual(core.call_names, ["wait_transfer"])
+        self.assertEqual(core.execute_calls, 0)
+        self.assertEqual(self._records()[_STEP_KEY]["state"], "done")
+
+    def test_a_planted_old_instance_record_re_attaches_to_ran_with_the_flag(self) -> None:
+        self._started_by_old_instance()
+        self.core.wait_transfer_results = [Ran(task=_ran_snapshot())]
+        reply = self._transfer()
+        self.assertEqual(reply.response, SUCCESS)
+        self.assertEqual(reply.meta_data["reattachedAfterRestart"], True)
+        for key in Ran(task=_ran_snapshot()).to_dict():
+            self.assertIn(key, reply.meta_data)
+        self.assertEqual(self.core.call_names, ["wait_transfer"])
+        self.assertEqual(self.core.execute_calls, 0)
+
+    def test_a_failure_after_a_restart_says_to_inspect_the_arm_when_nothing_is_latched(self) -> None:
+        self._started_by_old_instance()
+        self.core.latch_result = LatchStatus(latched=False)
+        self.core.wait_transfer_results = [Failed(task=_snapshot(_GUID))]
+        reply = self._transfer()
+        self.assertEqual(reply.response, ERROR_FROM_TOOL)
+        for fragment in (self._RESTART, "inspect the arm", "may not have latched"):
+            self.assertIn(fragment, reply.error_message)
+        self.assertLessEqual(len(reply.error_message), 300)
+        self.assertEqual(self._records()[_STEP_KEY]["state"], "done")
+        self.assertEqual(self.core.execute_calls, 0)
+
+    def test_a_failure_after_a_restart_names_the_latched_guid_too(self) -> None:
+        self._started_by_old_instance()
+        self.core.latch_result = LatchStatus(latched=True, guid=_GUID, result_kind="failed")
+        self.core.wait_transfer_results = [Failed(task=_snapshot(_GUID))]
+        reply = self._transfer()
+        self.assertEqual(reply.response, ERROR_FROM_TOOL)
+        self.assertIn(f"latched guid {_GUID}", reply.error_message)
+        self.assertIn(self._RESTART, reply.error_message)
+        self.assertLessEqual(len(reply.error_message), 300)
+
+    def test_every_non_ran_outcome_after_a_restart_carries_the_clause(self) -> None:
+        results = (
+            ("aborted", Aborted(task=_snapshot(_GUID))),
+            ("lost-taskNotFound", Lost(reason="taskNotFound", handle=TaskHandle(guid=_GUID))),
+            ("lost-pollFailed", Lost(reason="pollFailed", handle=TaskHandle(guid=_GUID))),
+            ("cancelled", Cancelled(handle=TaskHandle(guid=_GUID))),
+        )
+        for label, result in results:
+            with self.subTest(label):
+                key = f"run-1:{label}"
+                self._seed(key, state="started", instance="old-instance",
+                           handle=TaskHandle(guid=_GUID).to_dict())
+                self.core.calls.clear()
+                self.core.latch_result = LatchStatus(
+                    latched=True, guid=_SUBMIT_GUID, result_kind="lost")
+                self.core.wait_transfer_results = [result]
+                reply = self._transfer(key)
+                self.assertEqual(reply.response, ERROR_FROM_TOOL)
+                self.assertIn(self._RESTART, reply.error_message)
+                self.assertIn(f"latched guid {_SUBMIT_GUID}", reply.error_message)
+                self.assertLessEqual(len(reply.error_message), 300)
+                self.assertEqual(self.core.execute_calls, 0)
+
+    def test_a_still_running_re_attach_after_a_restart_carries_the_clause(self) -> None:
+        self._started_by_old_instance()
+        self.core.latch_result = LatchStatus(latched=False)
+        clock = [1000.0]
+
+        def _wait_transfer(guid: str, *, timeout_s: float) -> Any:
+            clock[0] += timeout_s
+            return TimedOut(handle=TaskHandle(guid=guid))
+
+        self.core.wait_result = _wait_transfer
+        with patch.object(stack_server, "_monotonic", side_effect=lambda: clock[0]):
+            reply = self._transfer()
+        self.assertEqual(reply.response, ERROR_FROM_TOOL)
+        self.assertIn("still running", reply.error_message)
+        self.assertIn(self._RESTART, reply.error_message)
+        self.assertIn("inspect the arm", reply.error_message)
+        self.assertEqual(self._records()[_STEP_KEY]["state"], "started")
+
+    def test_a_submitting_record_from_the_old_instance_is_refused_with_the_clause(self) -> None:
+        self._seed(state="submitting", instance="old-instance")
+        reply = self._transfer()
+        self.assertEqual(reply.response, ERROR_FROM_TOOL)
+        self.assertIn("inspect the arm", reply.error_message)
+        self.assertIn(self._RESTART, reply.error_message)
+        self.assertIn("will not be re-sent", reply.error_message)
+        self._assert_no_motion_calls()
+
+    def test_a_done_ran_record_from_the_old_instance_is_replayed_not_re_observed(self) -> None:
+        ran = Ran(task=_ran_snapshot()).to_dict()
+        self._seed(state="done", instance="old-instance", result=ran,
+                   handle=TaskHandle(guid=_GUID).to_dict(), updatedAt=self._at(_NOW, 10))
+        with patch.object(stack_server, "_utcnow", return_value=_NOW):
+            reply = self._transfer()
+        self.assertEqual(reply.response, SUCCESS)
+        self.assertEqual(reply.meta_data["replayed"], True)
+        self.assertNotIn("reattachedAfterRestart", reply.meta_data)
+        self.assertEqual(self.core.calls, [])
+
+    def test_a_same_instance_re_attach_to_ran_has_no_restart_flag(self) -> None:
+        self._seed(state="started", handle=TaskHandle(guid=_GUID).to_dict())
+        self.core.wait_transfer_results = [Ran(task=_ran_snapshot())]
+        reply = self._transfer()
+        self.assertEqual(reply.response, SUCCESS)
+        self.assertNotIn("reattachedAfterRestart", reply.meta_data)
+
+
 class TestTransferEstimate(_RealModeGrpcTestCase):
     """STK-04: GetTransferEstimate -> estimate_transfer, once, nothing else."""
 
