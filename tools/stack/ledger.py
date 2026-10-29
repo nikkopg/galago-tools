@@ -50,6 +50,20 @@ STATES = ("submitting", "started", "done", "outcomeUnknown")
 LOCK_TIMEOUT_S = 5.0
 _LOCK_POLL_S = 0.01
 
+# D-07 as amended by 05-SPIKE.md section 6b: a recorded ``ran`` is replayed
+# only while 0 <= age < REPLAY_WINDOW_S.
+REPLAY_WINDOW_S = 600.0
+
+# What decide() can answer, one per row of the repeat-key table.
+FRESH = "fresh"
+MISMATCH = "mismatch"
+REFUSE_SUBMITTING = "refuseSubmitting"
+REFUSE_OUTCOME_UNKNOWN = "refuseOutcomeUnknown"
+REATTACH = "reattach"
+REPLAY = "replay"
+REFUSE_COMPLETED = "refuseCompleted"
+REFUSE_FAILED = "refuseFailed"
+
 # Results of a wait that end a task for the core's own bookkeeping (A-1).
 _TERMINAL_KINDS = frozenset({"ran", "failed", "aborted"})
 
@@ -108,6 +122,67 @@ def is_terminal(result: Mapping[str, Any]) -> bool:
     if kind in _TERMINAL_KINDS:
         return True
     return kind == "lost" and result.get("reason") == "taskNotFound"
+
+
+@dataclasses.dataclass(frozen=True)
+class Decision:
+    """What to do with a repeated step key. ``restarted`` is True exactly when
+    the record was written by a different tool-server instance than the
+    caller's; ``record`` is the record decided on (None for ``fresh``)."""
+
+    action: str
+    restarted: bool
+    record: Optional[dict[str, Any]]
+
+
+def _age_s(record: Mapping[str, Any], now: datetime) -> Optional[float]:
+    """Seconds from the record's ``updatedAt`` to ``now``, or None when
+    ``updatedAt`` is missing, unparseable or naive (the caller fails closed)."""
+    value = record.get("updatedAt")
+    if not isinstance(value, str):
+        return None
+    try:
+        updated = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if updated.tzinfo is None:
+        return None
+    return (now - updated).total_seconds()
+
+
+def decide(
+    record: Optional[Mapping[str, Any]], *, fingerprint: str, instance: str, now: datetime
+) -> Decision:
+    """The pure repeat-key state machine (05-SPIKE.md section 6b). It reads no
+    file, calls no core and never mutates ``record``. The fingerprint check
+    runs first, for every state; then the state decides. A replay needs a
+    ``done`` ``ran`` record with ``0 <= age < REPLAY_WINDOW_S``: an age of
+    exactly the window, a negative age (clock skew) or an unreadable
+    ``updatedAt`` all refuse, so replay fails closed."""
+    if now.tzinfo is None:
+        raise ValueError("decide needs a timezone-aware now")
+    if record is None:
+        return Decision(FRESH, False, None)
+    held = dict(record) if not isinstance(record, dict) else record
+    restarted = held.get("instance") != instance
+    if held.get("fingerprint") != fingerprint:
+        return Decision(MISMATCH, restarted, held)
+    state = held.get("state")
+    if state == "submitting":
+        return Decision(REFUSE_SUBMITTING, restarted, held)
+    if state == "started":
+        return Decision(REATTACH, restarted, held)
+    if state == "done":
+        result = held.get("result")
+        kind = result.get("kind") if isinstance(result, Mapping) else None
+        if kind != "ran":
+            return Decision(REFUSE_FAILED, restarted, held)
+        age = _age_s(held, now)
+        if age is not None and 0.0 <= age < REPLAY_WINDOW_S:
+            return Decision(REPLAY, restarted, held)
+        return Decision(REFUSE_COMPLETED, restarted, held)
+    # outcomeUnknown, and any state this version does not know: never re-send.
+    return Decision(REFUSE_OUTCOME_UNKNOWN, restarted, held)
 
 
 def _fsync_dir(directory: Path) -> None:
