@@ -110,8 +110,9 @@ can never send a second transfer.
 **Depends on**: Phase 4 **and** cross-repo **DEP-01** (stack-automation-layer G1-G3, one bundled
 `/gsd-quick`: restart-surviving latch/ownership/in-flight guard with a re-attached guid adopted,
 latch-status read, latch set before the explanation build; new core SHA and contract-version
-decision). This phase re-pins the core to DEP-01's SHA and cannot start building the motion path or
-ACK-02 until DEP-01 lands.
+decision). **DEP-01 landed 2026-10-29 as core `934a621`** (contract still v1, `latchStatus` additive);
+the fork already pins it (`237268c`), so this phase starts on that pin. Remaining core limits and the
+re-checked research: `.planning/research/SUMMARY.md` § Addendum (2026-10-29).
 **Requirements**: XFR-01, XFR-02, XFR-03, XFR-04, XFR-05, XFR-06, ACK-01, ACK-02
 **Success Criteria** (what must be TRUE):
   1. A workflow step `Transfer` runs `plan_transfer` -> `execute_transfer` -> wait to a terminal
@@ -122,21 +123,26 @@ ACK-02 until DEP-01 lands.
      (`wait_transfer`), with a recorded `ran` it replays SUCCESS, after an ambiguous submit it
      refuses; the same key with a different request is `INVALID_ARGUMENTS`; this holds after a
      tool-server restart because the ledger (key + request fingerprint, write-ahead `submitting`
-     record, then guid, then terminal outcome) is persisted atomically.
+     record, then guid, then terminal outcome) is persisted atomically. A restart during a transfer
+     is reported as needing arm inspection, never replayed as SUCCESS (core `934a621` can lose that
+     task's ownership if it died between the POST and its state save).
   3. An outcome that proves nothing was sent (`refused`/`rejected`/`needsInput`/`readFailed`)
      releases the key so the operator can fix the cause and re-run the step; a `TimedOut` leaves the
      arm running and is reported as an error, and re-running the same step re-attaches and finishes it.
   4. An AST invariant with planted violations fails if the adapter calls `start_transfer`,
      `cancel_transfer` or `go_to_safe_position`, or calls `execute_transfer` more than once per key,
      so no adapter path retries motion.
-  5. An operator can see the latched guid (in the error message and via the latch-status read,
-     including the `submit-<hex>` case after an ambiguous submit) and clear the latch with
+  5. An operator can see the latched guid (in the error message and via `GetFailureLatch`, bound
+     1:1 to the core's `latch_status()`, including the `submit-<hex>` case after an ambiguous submit
+     and the `state-<hex>` case after an unreadable or unsaved core state file) and clear the latch with
      `AcknowledgeFailure(guid, arm_inspected)`: only the exact string `"yes"` reaches
      `acknowledge_failure(guid, confirm=True)`, anything else is `INVALID_ARGUMENTS` with no core
      call, and no adapter path acknowledges on its own.
 **Plans**: TBD
-**Notes**: Highest-risk phase; open with a short design spike on ledger semantics and the DEP-01
-(G1/G2) decision before planning. Settle at plan time: replay-window value, default ledger path
+**Notes**: Highest-risk phase; open with a short design spike on ledger semantics against core
+`934a621` before planning — in particular how a re-attach after a mid-transfer restart (core limit 1:
+the task may have become foreign, so its failure would not latch) is reported. `GetFailureLatch`
+binds to `latch_status()` and `latchStatus` joins `_SUCCESS_KINDS`. Settle at plan time: replay-window value, default ledger path
 (per-user state dir, not tmp), retention, and whether `ListTransferProfiles`-style extras are needed.
 Carry-over check: re-prove STK-05 (reads answer while a real `Transfer` is in flight) on the real
 motion path. All tests use a fake or mocked core; no motion.
@@ -199,7 +205,7 @@ phase as requirements.
 
 | Gate | Built in | What it delivers | Gates | Status |
 |------|----------|------------------|-------|--------|
-| DEP-01 | stack-automation-layer (one bundled `/gsd-quick`) | G1 latch/ownership/in-flight guard survive a restart and a re-attached guid is adopted; G2 latch-status read; G3 latch set before the explanation build; new SHA and a contract-version decision | Phase 5 (XFR-*, ACK-*) — hard gate | Not started |
+| DEP-01 | stack-automation-layer (one bundled `/gsd-quick`) | G1 latch/ownership/in-flight guard survive a restart and a re-attached guid is adopted; G2 latch-status read; G3 latch set before the explanation build; new SHA and a contract-version decision | Phase 5 (XFR-*, ACK-*) — hard gate | **Done** 2026-10-29: `934a621ece116a8b263897c1e9b62b57374f4ef3`, contract v1 kept; pinned in the fork (`237268c`) |
 | DEP-02 | galago-core milestone | Submodule bump, ts-proto 1.151.1 regen, `commandFields.stack` without acknowledge; consumes Phase 4's `stack.proto` | Phase 6 (FLOW-02..04) and Phase 7 (LIVE-*) — hard gate | Not started |
 | DEP-03 | galago-core milestone | Operator AcknowledgeFailure control (D-20 pattern), F3 tool-error display, F5 root cause | Phase 7 — recommended, not a hard gate | Not started |
 
@@ -209,7 +215,7 @@ A core gap found while building here stops the work and is fixed in stack-automa
 ## Progress
 
 **Execution Order:**
-Phases execute in numeric order: 4 → 5 → 6 → 7 (Phase 5 waits on DEP-01; Phases 6-7 wait on DEP-02)
+Phases execute in numeric order: 4 → 5 → 6 → 7 (DEP-01 is met, so Phase 5 can start; Phases 6-7 wait on DEP-02)
 
 | Phase | Milestone | Plans Complete | Status | Completed |
 |-------|-----------|----------------|--------|-----------|

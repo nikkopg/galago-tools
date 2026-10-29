@@ -33,7 +33,7 @@ milestone; stack-automation-layer core gaps are fixed there via `/gsd-quick`. Re
   an empty message; every other core kind → `ERROR_FROM_TOOL` with a one-line message carrying reason
   and guid; adapter argument errors → `INVALID_ARGUMENTS`; a core rejection never becomes SUCCESS
 
-### F5-safe Transfer (GAL-01, gated on the DEP-01 core SHA)
+### F5-safe Transfer (GAL-01, on the DEP-01 core: `934a621`)
 
 - [ ] **XFR-01**: A workflow step can move a plate with `Transfer`: `plan_transfer` → `execute_transfer`
   → wait to a terminal result in one command; starting the Galago run is the approval
@@ -42,7 +42,10 @@ milestone; stack-automation-layer core gaps are fixed there via `/gsd-quick`. Re
   the guid, then the terminal outcome
 - [ ] **XFR-03**: A repeated `step_key` (F5 re-dispatch, retry after failure, tool restart) never
   submits: it re-attaches to the recorded guid, replays a recorded `ran`, or refuses (`submitting`
-  without a guid, `outcomeUnknown`); the same key with a different request → `INVALID_ARGUMENTS`
+  without a guid, `outcomeUnknown`); the same key with a different request → `INVALID_ARGUMENTS`.
+  A tool-server restart during a transfer is reported as needing arm inspection, never replayed as
+  SUCCESS: the core can lose that task's ownership if it died between the POST and its state save
+  (`934a621` limit 1)
 - [ ] **XFR-04**: An outcome that proves nothing was sent (`refused`/`rejected`/`needsInput`/
   `readFailed`) releases the key so the operator can fix the cause and re-run the step
 - [ ] **XFR-05**: The adapter never retries motion — an AST invariant with planted violations proves it
@@ -56,8 +59,9 @@ milestone; stack-automation-layer core gaps are fixed there via `/gsd-quick`. Re
 - [ ] **ACK-01**: Operator can clear a core failure latch with `AcknowledgeFailure(guid, arm_inspected)`;
   only the exact string `"yes"` reaches `acknowledge_failure(guid, confirm=True)`, anything else →
   `INVALID_ARGUMENTS` with no core call; no adapter path sends it on its own
-- [ ] **ACK-02**: Operator can see the latched guid — in the error message and via a latch-status read
-  (DEP-01's new core read), including the `submit-<hex>` case after an ambiguous submit
+- [ ] **ACK-02**: Operator can see the latched guid — in the error message and via `GetFailureLatch`,
+  bound 1:1 to the core's `latch_status()` (`latchStatus` kind, zero I/O), including the `submit-<hex>`
+  case after an ambiguous submit and the `state-<hex>` case after an unreadable or unsaved core state file
 
 ### Simulated workcell & handoff workflow (GAL-02)
 
@@ -75,8 +79,9 @@ milestone; stack-automation-layer core gaps are fixed there via `/gsd-quick`. Re
 ### Deploy & supervised live
 
 - [ ] **LIVE-08**: Deployed in the safe order (core → service `.venv` → restart `galago-tools` → rebuild
-  `galago-web`); stack-mcp closed during Galago runs; both front ends use the identical host string and
-  lock dir
+  `galago-web`); stack-mcp closed during Galago runs; both front ends use the identical host string,
+  lock dir and core state dir (same OS user, or the same `STACK_STATE_DIR`), so a galago <-> mcp hand-over
+  shares the persisted failure latch; the state file is never deleted
 - [ ] **LIVE-09**: A supervised, runbook-gated live STACK Transfer reaches `ran` on `stack2-6` with the
   user present
 - [ ] **LIVE-10**: A supervised live GAL-02 handoff runs STACK → F.A.S.T. → STACK to SUCCESS on hardware
@@ -85,7 +90,10 @@ milestone; stack-automation-layer core gaps are fixed there via `/gsd-quick`. Re
 
 - **DEP-01** (stack-automation-layer, one bundled `/gsd-quick`): G1 latch/ownership/in-flight guard
   survive a restart and a re-attached guid is adopted; G2 latch-status read; G3 latch set before the
-  explanation build; new SHA and a contract-version decision. Gates XFR-*/ACK-*.
+  explanation build; new SHA and a contract-version decision. Gates XFR-*/ACK-*. **Landed 2026-10-29 as
+  `934a621ece116a8b263897c1e9b62b57374f4ef3`**, contract still v1 (`latchStatus` additive); pinned in the
+  fork (`237268c`). Re-checked conclusions and the two remaining restart limits:
+  `.planning/research/SUMMARY.md` § Addendum (2026-10-29).
 - **DEP-02** (galago-core milestone): submodule bump, ts-proto 1.151.1 regen, `commandFields.stack`
   without acknowledge. Gates FLOW-02..04 and LIVE-*.
 - **DEP-03** (galago-core milestone): operator AcknowledgeFailure control (D-20 pattern), F3 tool-error
@@ -139,7 +147,7 @@ milestone; stack-automation-layer core gaps are fixed there via `/gsd-quick`. Re
 
 | Gate | Gates phase(s) | Strength |
 |------|----------------|----------|
-| DEP-01 | Phase 5 (XFR-*, ACK-*) | Hard; Phase 5 also re-pins the core to DEP-01's SHA |
+| DEP-01 | Phase 5 (XFR-*, ACK-*) | Hard — **met** 2026-10-29 (`934a621`, already pinned in the fork) |
 | DEP-02 | Phase 6 (FLOW-02..04), Phase 7 (LIVE-*) | Hard; consumes Phase 4's `stack.proto` |
 | DEP-03 | Phase 7 | Recommended, not a hard adapter gate |
 
@@ -155,4 +163,4 @@ real `Transfer` path as a carry-over check, not a second mapping.
 
 ---
 *Requirements defined: 2026-10-28*
-*Last updated: 2026-10-28 after roadmap creation (traceability filled)*
+*Last updated: 2026-10-29 after DEP-01 landed (core `934a621`): XFR-03, ACK-02, LIVE-08 updated*

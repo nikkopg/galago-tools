@@ -149,7 +149,9 @@ v2 requirements in `.planning/REQUIREMENTS.md` (v1 traceability:
     push only to the `nikkopg` fork remote.
 
 - **STACK core (v2):** stack-automation-layer (GitLab `nikkopg/stack-automation-layer`, branch
-  `feat/initial-layer`, local clone `~/data/nikko/stack-automation-layer`). Result contract v1 is
+  `feat/initial-layer`, local clone `~/data/nikko/stack-automation-layer`). **Pinned at
+  `934a621ece116a8b263897c1e9b62b57374f4ef3`** (DEP-01, 2026-10-29; `tools/stack/requirements.txt` and
+  the pin test's `_PINNED_CORE_SHA`); Phase 4 was built on `ed8ce47`. Result contract v1 is
   frozen (`CONTRACT_VERSION = 1`, 2026-10-28, after the supervised hardware run); any key/type change
   is a version bump plus an adapter migration. Its `.planning/PROJECT.md` is gitignored and was not
   available on forb01 when v2 was scoped — CLAUDE.md, `docs/runbooks/stack-validation.md` and the
@@ -160,9 +162,15 @@ v2 requirements in `.planning/REQUIREMENTS.md` (v1 traceability:
   **accepted and queued**, not refused — only the core's in-flight and robot-idle gates stop a
   double-queued motion, and those cover only a task still in flight (hence the step-key ledger).
 - **STACK core semantics the adapter depends on:** plan ids are in-memory, single-use, TTL-bound;
-  the post-failure latch lives in the serving process (a restart clears it, which the runbook
-  forbids as a way to clear a failure); the owner lock is per host string + per-user lock dir
-  (`STACK_MCP_LOCK_DIR`), owners `mcp` | `galago`.
+  the owner lock is per host string + per-user lock dir (`STACK_MCP_LOCK_DIR`), owners `mcp` |
+  `galago`. Since `934a621` the failure latch, acknowledged guids, owned tasks and in-flight guard are
+  persisted per manager endpoint (not per owner) in `$STACK_STATE_DIR` or
+  `~/.local/state/stack-automation-layer`, so they survive a restart and a galago <-> mcp hand-over;
+  a bad state file or failed save fails closed on a `state-<hex>` latch; `latch_status()` is a
+  zero-I/O read of the latch. Two limits remain: a process death between STACK accepting a POST and
+  the state save loses that task's ownership (its failure will not latch), and a task that finished
+  without a latch is foreign after a restart — so a restart mid-transfer means "inspect the arm".
+  Never delete the state file (missing reads as a clean start).
 
 ## Constraints
 

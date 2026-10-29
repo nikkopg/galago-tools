@@ -130,8 +130,9 @@ None yet.
   status can render stale after a reconnect.
 - Branches on both repos are not pushed (deferred D-02) — pushing is the user's own action; push
   only to the `nikkopg` fork remote.
-- v2 Phase 5 is gated on DEP-01 (stack-automation-layer G1-G3 `/gsd-quick`); a G1/G2 decision is needed
-  before planning it. Phase 6 and Phase 7 are gated on DEP-02 (galago-core codegen +
+- DEP-01 is met (2026-10-29): core `934a621` closes G1-G3, contract still v1; pinned in the fork
+  (`237268c`), D-09 restart warning corrected (`fe8aee8`). Phase 5 can start; its design spike must
+  cover a re-attach after a mid-transfer restart (core limit 1). Phase 6 and Phase 7 are gated on DEP-02 (galago-core codegen +
   `commandFields.stack`); DEP-02 consumes Phase 4's `stack.proto`, so keep that proto complete.
 - v2 Phase 6: confirm Docker + the PAC simulator can run on the galago-tools host (loopback only).
 - v2 hard constraint: no STACK motion in default tests; live motion only in Phase 7, supervised and
@@ -154,4 +155,6 @@ Resume file: None
 ## Operator Next Steps
 
 - Plan Phase 4 with /gsd-plan-phase 4 (or /gsd-discuss-phase 4 first); Phase 4 has no cross-repo gate
-- Start DEP-01 (stack-automation-layer `/gsd-quick`) in parallel so Phase 5 is not blocked
+- DEP-01 done (core `934a621` pinned); next: /gsd-discuss-phase 5
+- On forb01, run galago-tools and stack-mcp as the same OS user (or share `STACK_STATE_DIR`) so the
+  persisted failure latch is shared across a hand-over (LIVE-08)

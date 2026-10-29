@@ -424,6 +424,60 @@ stack-automation-layer.
 
 ---
 
+## Addendum (2026-10-29): conclusions re-checked against core `934a621`
+
+DEP-01 landed as `934a621ece116a8b263897c1e9b62b57374f4ef3` (`origin/feat/initial-layer`, pushed;
+local clone `~/data/nikko/stack-automation-layer` on that commit). The claims below were checked against
+`service.py`, `results.py`, `composition.py` and the new `state_store.py` at that SHA; the offline
+870-test result is the core author's report, not re-run here. The fork pins it (`tools/stack/requirements.txt`,
+`_PINNED_CORE_SHA` in `tools/tests/stack_test.py`, commit `237268c`) and the 3.10 venv runs it (gate: 267 passed).
+
+| Gap | Status at `934a621` | What changed for the adapter |
+|-----|--------------------|------------------------------|
+| G1 | **Resolved, with two limits** | The latch, acknowledged guids, owned tasks (`_started`), the in-flight guard and cancel reservations are saved per manager endpoint (`StateStore(lock.key)`, the same key as `owner_lock.endpoint_key`, not per owner), so they survive a tool-server restart and a galago <-> mcp hand-over. `open_service` wires it with no new argument; the adapter's call is unchanged. A started guid still running after a restart stays in-flight-guarded and its failure latches when waited on. **Limit 1:** a process death after STACK accepts the POST but before the save loses that task's ownership: after restart it is foreign and its failure does not latch. **Limit 2:** a task that finished without a latch is foreign after a restart. |
+| G2 | **Resolved** | `StackService.latch_status() -> LatchStatus`: zero STACK I/O, no disk access. `to_dict()` = `{"kind": "latchStatus", "latched", "guid", "resultKind", "reason", "explanation"}`. `guid` is what `acknowledge_failure` must name: a task guid, `submit-<hex>` (ambiguous submit), or `state-<hex>` (state file). The `plan_transfer(TransferRequest())` workaround is no longer needed. |
+| G3 | **Resolved** | An ambiguous submit latches before it builds its explanation, so it can never be left unlatched. |
+| G4 | **Resolved** | `wait_transfer` is annotated `Ran \| Failed \| Aborted \| TimedOut \| Lost \| NeedsInput`. |
+| G5 | Unchanged | Explanations are still agent-worded; the adapter keeps composing its own one-line message (D-11). |
+| G6 | **Resolved** | The `FailureAcknowledged` docstring now says `acknowledge_failure` reads manager state and can refuse `recoveryPending`. |
+| G7 | Unchanged | Still no runtime sim/hardware guard in the shipped core. |
+
+**New core behaviour the adapter and runbooks must respect:**
+- **Fail closed on state.** An unreadable, corrupt or unknown-version state file starts the service
+  latched (`resultKind` `stateUnreadable`, guid `state-<hex>`); a failed save leaves it latched
+  (`stateUnsaved`). Only `acknowledge_failure(state-<hex>, confirm=True)` clears it. Loading never creates a
+  file; saving is atomic (temp file, fsync, `os.replace`; dir 0700, file 0600).
+- **Never delete the state file**: a missing file reads as a clean start, which would silently clear a latch.
+- **Shared state needs a shared directory.** `$STACK_STATE_DIR`, else `$XDG_STATE_HOME/stack-automation-layer`
+  (absolute only), else `~/.local/state/stack-automation-layer`. On forb01 the `galago-tools` service user
+  and the stack-mcp user must be the same OS user, or both set the same `STACK_STATE_DIR`, or a hand-over
+  does not share the latch. A hostname and an IP for the same manager are different keys (as with the lock).
+- **Contract stays v1.** `latchStatus` is an additive kind with its own golden; `FROZEN_SHAPE_DIGEST` was
+  re-pinned and every original shape still hashes to the frozen digest. No existing `to_dict()` changed.
+
+**Conclusions that change:**
+- Q2 "Tool-server restart" table: `_started`, `_inflight`, `_latch` and `_acknowledged` now **survive** a
+  restart (persisted per endpoint). `_plans` are still lost (fine), and the owner lock is still released
+  when the process dies.
+- Pitfall 3 ("a restart clears the latch and ownership") is closed in the core. What remains is narrower: a
+  restart **during** a transfer can lose that one task's ownership. Galago must treat a tool-server restart
+  mid-transfer as "inspect the arm", never as a clean slate.
+- Pitfall 4 (operator can't see the guid) is closed by `latch_status()`; `GetFailureLatch` binds 1:1 to it.
+- `Lost(submitOutcomeUnknown)`: its `submit-<hex>` latch id is now readable via `latch_status().guid`.
+- The adapter's Configure restart warning (D-09) said a restart clears the latch; it was corrected in
+  `fe8aee8` to name the remaining limits.
+
+**Phase 5 design inputs (to settle at plan time):**
+- Add `latchStatus` to `_SUCCESS_KINDS` (it is a read) when `GetFailureLatch` is bound; extend the
+  result-mapping test with it.
+- Ledger re-attach after a restart: with persisted ownership, re-attaching to a recorded guid latches on
+  failure as before — except under limit 1 (crash between POST acceptance and the core's save). The ledger's
+  write-ahead `submitting` record covers the same window from the adapter side; whether a re-attach can tell
+  a "foreign" guid apart (and should refuse SUCCESS-replay or force an arm-inspection message) is the open
+  question for the Phase 5 design spike.
+- `stateUnreadable` / `stateUnsaved` latches surface through the same `Refused(failureLatched)` path and
+  `latch_status()`; the operator acknowledges them with the `state-<hex>` guid like any other.
+
 ## Implications for Roadmap
 
 Phases continue at 4; GAL-01 first, GAL-02 after.
