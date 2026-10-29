@@ -5,16 +5,16 @@ milestone_name: STACK Tool & STACK↔F.A.S.T. Handoff
 current_phase: 5
 current_phase_name: F5-safe Transfer & Operator Acknowledge
 status: executing
-stopped_at: Completed 05-05-PLAN.md
-last_updated: "2026-10-29T09:07:34.782Z"
+stopped_at: Completed 05-06-PLAN.md
+last_updated: "2026-10-29T13:28:10.208Z"
 last_activity: 2026-10-29
 last_activity_desc: Phase 5 execution started
-state_head: 848b2041c859bb3625991bbc72853510ce615d4f
+state_head: 3e92125bd59f14e2f1baf2d2c6782b5b5f73fec4
 progress:
   total_phases: 4
   completed_phases: 1
   total_plans: 12
-  completed_plans: 10
+  completed_plans: 11
   percent: 25
 ---
 
@@ -32,7 +32,7 @@ acknowledges on its own. For the STACK: a step never sends a second transfer.
 ## Current Position
 
 Phase: 5 (F5-safe Transfer & Operator Acknowledge) — EXECUTING
-Plan: 6 of 7
+Plan: 7 of 7
 Status: Ready to execute
 Last activity: 2026-10-29 — Phase 5 execution started
 
@@ -91,6 +91,7 @@ Progress: [███░░░░░░░] 25%
 | Phase 5 P03 | 3 min | 3 tasks | 2 files |
 | Phase 5 P04 | 14min | 3 tasks | 2 files |
 | Phase 05 P05 | 25min | 2 tasks | 2 files |
+| Phase 05 P06 | 40min | 3 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -131,6 +132,8 @@ v2 roadmap-level decisions (2026-10-28, detail in PROJECT.md Key Decisions):
 - [Phase 5]: Later ledger-write-failure message carries the latch clause for latching results only (ran makes no latch_status call)
 - [Phase 05]: 05-05: mark_done skipped after a failed mark_started so the record stays submitting
 - [Phase 05]: 05-05: step key released only by isinstance whitelist (Refused/Rejected/NeedsInput/ReadFailed); unknown shapes become outcomeUnknown
+- [Phase 05]: 05-06: D-09 kept (user-confirmed): a ran re-attached after a restart is SUCCESS flagged reattachedAfterRestart; any non-ran outcome adds the arm-inspection clause plus the current latch clause
+- [Phase 05]: 05-06: re-attach loop is read-only (wait_transfer only), first slice exactly min(budget,300), clock read only after a timedOut slice
 
 ### Pending Todos
 
@@ -164,8 +167,8 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-29T09:07:34.745Z
-Stopped at: Completed 05-05-PLAN.md
+Last session: 2026-10-29T13:28:10.165Z
+Stopped at: Completed 05-06-PLAN.md
 Resume file: None
 
 ## Operator Next Steps

@@ -40,7 +40,7 @@ milestone; stack-automation-layer core gaps are fixed there via `/gsd-quick`. Re
 - [x] **XFR-02**: `Transfer` requires a non-blank `step_key`; a persisted, atomically written ledger
   records key + request fingerprint, a write-ahead `submitting` record before `execute_transfer`, then
   the guid, then the terminal outcome
-- [ ] **XFR-03**: A repeated `step_key` (F5 re-dispatch, retry after failure, tool restart) never
+- [x] **XFR-03**: A repeated `step_key` (F5 re-dispatch, retry after failure, tool restart) never
   submits: it re-attaches to the recorded guid, replays a recorded `ran`, or refuses (`submitting`
   without a guid, `outcomeUnknown`); the same key with a different request → `INVALID_ARGUMENTS`.
   A tool-server restart during a transfer is reported as needing arm inspection, never replayed as
@@ -51,7 +51,7 @@ milestone; stack-automation-layer core gaps are fixed there via `/gsd-quick`. Re
 - [x] **XFR-05**: The adapter never retries motion — an AST invariant with planted violations proves it
   never calls `start_transfer`, `cancel_transfer` or `go_to_safe_position`, and calls
   `execute_transfer` at most once per key
-- [ ] **XFR-06**: A Transfer `TimedOut` leaves the arm running and is reported as an error; re-running
+- [x] **XFR-06**: A Transfer `TimedOut` leaves the arm running and is reported as an error; re-running
   the same step re-attaches and finishes it
 
 ### Operator acknowledge (GAL-01)
@@ -129,10 +129,10 @@ milestone; stack-automation-layer core gaps are fixed there via `/gsd-quick`. Re
 | STK-07 | Phase 4 | Complete |
 | XFR-01 | Phase 5 | Complete |
 | XFR-02 | Phase 5 | Complete |
-| XFR-03 | Phase 5 | Pending |
+| XFR-03 | Phase 5 | Complete |
 | XFR-04 | Phase 5 | Complete |
 | XFR-05 | Phase 5 | Complete |
-| XFR-06 | Phase 5 | Pending |
+| XFR-06 | Phase 5 | Complete |
 | ACK-01 | Phase 5 | Complete |
 | ACK-02 | Phase 5 | Complete |
 | FLOW-01 | Phase 6 | Pending |
