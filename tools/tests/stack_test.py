@@ -501,6 +501,68 @@ class TestConfigureFails(_StackTestCase):
             self.assertNotIn(sentinel, str(record.args))
 
 
+class TestConfigureHostValidation(_StackTestCase):
+    """WR-05: the host is interpolated into a URL that receives the STACK
+    credentials, so URL metacharacters are refused before any open. Real host
+    forms are accepted; these strings are only ever handed to a mocked
+    open_service, never connected to."""
+
+    ACCEPTED = (
+        "127.0.0.1", "localhost", "LOCALHOST", "stack-server", "stack_server",
+        "stack.example.com", "10.150.1.125", "[::1]", "[fe80::1]", "  127.0.0.1  ",
+    )
+    REJECTED = (
+        "good-host@attacker", "user:pw@host", "host/path", "host/", "host?x=",
+        "host#frag", "host\\evil", "http://host", "https://host", "ho st",
+        "host\tname", "host:80", "::1", "[::1", "[]", "[g::1]", "[::1]:80",
+        "host\nname",
+    )
+
+    def test_bare_hosts_are_accepted(self) -> None:
+        for host in self.ACCEPTED:
+            with self.subTest(host=host):
+                opener = MagicMock(side_effect=_fake_open_service(_fake_transport()))
+                with patch("tools.stack.server.open_service", opener):
+                    server = StackServer()
+                    stub = _serve_in_process(self, server)
+                    reply = stub.Configure(_real_config(host, _free_tcp_port()))
+                self.assertEqual(reply.response, SUCCESS, reply.error_message)
+                self.assertEqual(opener.call_count, 1)
+
+    def test_url_metacharacters_are_refused_before_any_open(self) -> None:
+        for host in self.REJECTED:
+            with self.subTest(host=host):
+                opener = MagicMock()
+                with patch("tools.stack.server.open_service", opener):
+                    server = StackServer()
+                    stub = _serve_in_process(self, server)
+                    reply = stub.Configure(_real_config(host, _free_tcp_port()))
+                self.assertEqual(reply.response, NOT_READY)
+                self.assertIn("Config.host must be a bare hostname", reply.error_message)
+                self.assertEqual(stub.GetStatus(empty_pb2.Empty()).status, FAILED)
+                self.assertIsNone(server.service)
+                opener.assert_not_called()
+
+    def test_port_outside_1_to_65535_is_refused_before_any_open(self) -> None:
+        for port in (-1, 65536, 100000):
+            with self.subTest(port=port):
+                opener = MagicMock()
+                with patch("tools.stack.server.open_service", opener):
+                    stub = _serve_in_process(self, StackServer())
+                    reply = stub.Configure(_real_config("127.0.0.1", port))
+                self.assertEqual(reply.response, NOT_READY)
+                self.assertIn("Config.port must be in 1..65535", reply.error_message)
+                opener.assert_not_called()
+
+    def test_port_zero_means_the_default_port(self) -> None:
+        opener = MagicMock(side_effect=_fake_open_service(_fake_transport()))
+        with patch("tools.stack.server.open_service", opener):
+            stub = _serve_in_process(self, StackServer())
+            reply = stub.Configure(_real_config("127.0.0.1", 0))
+        self.assertEqual(reply.response, SUCCESS, reply.error_message)
+        self.assertEqual(opener.call_args.args[1], 5005)
+
+
 class TestConfigureCloseFails(_StackTestCase):
     """WR-01: the core's OwnedService.close() marks itself closed before it
     closes the transport, so a raising close skips the lock release. The

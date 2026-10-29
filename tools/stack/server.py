@@ -16,6 +16,7 @@ import argparse
 import contextlib
 import logging
 import math
+import re
 import threading
 from typing import Any, Iterator, Optional, cast
 
@@ -80,6 +81,12 @@ READ_COMMANDS = frozenset({
     "get_transfer_estimate",
     "get_failure_latch",
 })
+
+# WR-05: the core builds "http://{host}:{port}" and sends the STACK credentials
+# to it, so a host must be a bare name or address: hostname / IPv4 characters,
+# or a bracketed IPv6 literal. Anything that could rewrite the URL (@ / ? # \
+# whitespace, a scheme prefix, a stray colon) fails the match.
+_HOST_RE = re.compile(r"[A-Za-z0-9._\-]+|\[[0-9A-Fa-f:.]+\]")
 
 # D-14: real mode with no service yet.
 _NOT_CONFIGURED_MESSAGE = "stack: not configured"
@@ -378,7 +385,13 @@ class StackServer(ToolServer):
         host = config.host.strip()
         if not host:
             raise ValueError("stack: Config.host is required")
+        if not _HOST_RE.fullmatch(host):
+            raise ValueError(
+                "stack: Config.host must be a bare hostname or IP address "
+                "(no scheme, path, credentials, port or whitespace)")
         port = config.port or DEFAULT_PORT
+        if not 1 <= port <= 65535:
+            raise ValueError(f"stack: Config.port must be in 1..65535, got {port}")
         timeout = config.transfer_timeout_s
         if not math.isfinite(timeout) or timeout < 0:
             raise ValueError(
