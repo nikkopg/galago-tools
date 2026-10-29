@@ -82,6 +82,7 @@ except ModuleNotFoundError as exc:
 
 from tools.grpc_interfaces import controller_pb2, fast_pb2, stack_pb2, tool_base_pb2
 from tools.grpc_interfaces.tool_base_pb2 import (
+    DRIVER_ERROR,
     ERROR_FROM_TOOL,
     FAILED,
     NOT_READY,
@@ -1040,6 +1041,37 @@ class TestConfigureLedgerDir(_StackTestCase):
         self.assertEqual(reply.response, SUCCESS)
         self.assertEqual(server._ledger_dir, ledger)
         self.assertFalse(os.path.exists(ledger))
+
+    def test_a_relative_ledger_dir_fails_before_open(self) -> None:
+        for value in ("relative/ledger", "ledger", "./ledger", "  rel  "):
+            with self.subTest(value=value):
+                opener = MagicMock()
+                server = StackServer()
+                with patch("tools.stack.server.open_service", opener):
+                    stub = _serve_in_process(self, server)
+                    reply = stub.Configure(
+                        _real_config("127.0.0.1", _free_tcp_port(), ledger_dir=value))
+                    status = stub.GetStatus(empty_pb2.Empty()).status
+                self.assertEqual(reply.response, NOT_READY)
+                self.assertIn("ledger_dir", reply.error_message)
+                self.assertEqual(status, FAILED)
+                opener.assert_not_called()
+                self.assertIsNone(server.service)
+
+    def test_an_absolute_or_blank_ledger_dir_is_accepted_and_nothing_is_created(self) -> None:
+        absolute = os.path.join(self.lock_dir, "abs", "ledger")
+        for value in (absolute, "", "   "):
+            with self.subTest(value=value):
+                server = StackServer()
+                with patch("tools.stack.server.open_service",
+                           MagicMock(side_effect=_fake_open_service(_fake_transport()))):
+                    stub = _serve_in_process(self, server)
+                    reply = stub.Configure(
+                        _real_config("127.0.0.1", _free_tcp_port(), ledger_dir=value))
+                self.assertEqual(reply.response, SUCCESS)
+                self.assertEqual(server._ledger_dir, value)
+        self.assertFalse(os.path.exists(os.path.dirname(absolute)))
+        self.assertFalse(os.path.exists(os.path.join(self.xdg_state_home, "galago-tools")))
 
     def test_port_zero_means_5005(self) -> None:
         opener = MagicMock(side_effect=_fake_open_service(_fake_transport()))
@@ -2207,6 +2239,140 @@ class TestKeyRelease(_TransferTestCase):
         self.assertLessEqual(len(reply.error_message), 300)
         self.assertIn(_SUBMIT_GUID, reply.error_message)
         self.assertTrue(reply.error_message.endswith("will not be re-sent"))
+
+
+class TestLedgerFailClosed(_TransferTestCase):
+    """D-04: a ledger that cannot be trusted refuses the Transfer before any
+    core call; a failed write-ahead sends nothing; a failed later write is
+    reported even for a ran result."""
+
+    def _record(self, **override: Any) -> dict[str, Any]:
+        stamp = datetime.now(timezone.utc).isoformat()
+        record: dict[str, Any] = {
+            "fingerprint": "a" * 64, "state": "submitting", "instance": "x",
+            "handle": None, "result": None, "createdAt": stamp, "updatedAt": stamp}
+        record.update(override)
+        return record
+
+    def test_every_malformed_ledger_refuses_with_zero_core_calls(self) -> None:
+        cases = (
+            ("bad-utf8", b"\xff\xfe"),
+            ("bad-json", b"{not json"),
+            ("version-2", json.dumps({"version": 2, "records": {}}).encode()),
+            ("version-true", json.dumps({"version": True, "records": {}}).encode()),
+            ("records-list", json.dumps({"version": 1, "records": []}).encode()),
+            ("unknown-state", json.dumps(
+                {"version": 1, "records": {"k": self._record(state="weird")}}).encode()),
+            ("directory", None),
+        )
+        for label, content in cases:
+            with self.subTest(label):
+                directory = os.path.join(self._tmpdir.name, f"ledger-{label}")
+                path = os.path.join(directory, "stack-ledger.json")
+                self.server._ledger_dir = directory
+                self.core.calls.clear()
+                if content is None:
+                    os.makedirs(path)
+                else:
+                    os.makedirs(directory, mode=0o700)
+                    with open(path, "wb") as handle:
+                        handle.write(content)
+                reply = self._transfer()
+                self.assertEqual(reply.response, ERROR_FROM_TOOL)
+                self.assertIn(path, reply.error_message)
+                self.assertIn("do not delete it", reply.error_message)
+                self.assertIn("no transfer was sent", reply.error_message)
+                self.assertEqual(self.core.calls, [])
+                if content is None:
+                    self.assertTrue(os.path.isdir(path))
+                else:
+                    with open(path, "rb") as handle:
+                        self.assertEqual(handle.read(), content)
+
+    def test_a_failed_write_ahead_claim_sends_nothing(self) -> None:
+        with patch.object(Ledger, "claim", side_effect=LedgerError("unwritable", "p")):
+            reply = self._transfer()
+        self.assertEqual(reply.response, ERROR_FROM_TOOL)
+        self.assertIn("no transfer was sent", reply.error_message)
+        self.assertEqual(self.core.call_names, ["plan_transfer"])
+
+    def test_a_failed_mark_started_still_waits_once_and_reports_it(self) -> None:
+        with patch.object(Ledger, "mark_started", side_effect=LedgerError("unwritable", "p")):
+            reply = self._transfer()
+        self.assertEqual(reply.response, ERROR_FROM_TOOL)
+        self.assertIn("but the ledger could not record it", reply.error_message)
+        self.assertEqual(self.core.call_names.count("wait"), 1)
+        self.assertEqual(self._records()[_STEP_KEY]["state"], "submitting")
+        self._transfer()
+        self.assertEqual(self.core.execute_calls, 1)
+
+    def test_a_failed_mark_done_reports_it_even_for_a_ran_result(self) -> None:
+        self.assertIsInstance(self.core.wait_result, Ran)
+        with patch.object(Ledger, "mark_done", side_effect=LedgerError("unwritable", "p")):
+            reply = self._transfer()
+        self.assertEqual(reply.response, ERROR_FROM_TOOL)
+        self.assertIn("but the ledger could not record it", reply.error_message)
+        self.assertEqual(self.core.call_names.count("wait"), 1)
+        self.assertEqual(self._records()[_STEP_KEY]["state"], "started")
+        self._transfer()
+        self.assertEqual(self.core.execute_calls, 1)
+
+
+class TestWaitBudget(_TransferTestCase):
+    """D-11: Transfer.timeout_s, else Config.transfer_timeout_s, else 300,
+    clamped to 3600; zero means unset."""
+
+    def _wait_timeout(self, key: str, **fields: Any) -> float:
+        self.core.calls.clear()
+        self.assertEqual(self._transfer(key, **fields).response, SUCCESS)
+        waits = [kwargs for name, _a, kwargs in self.core.calls if name == "wait"]
+        self.assertEqual(len(waits), 1)
+        return float(waits[0]["timeout_s"])
+
+    def test_the_budget_rules(self) -> None:
+        cases = (
+            ("request", 0.0, {"timeout_s": 42.0}, 42.0),
+            ("config", 120.0, {}, 120.0),
+            ("default", 0.0, {}, 300.0),
+            ("zero-falls-through", 120.0, {"timeout_s": 0.0}, 120.0),
+            ("zero-and-unset", 0.0, {"timeout_s": 0.0}, 300.0),
+            ("request-clamped", 0.0, {"timeout_s": 1e9}, 3600.0),
+            ("config-clamped", 1e6, {}, 3600.0),
+            ("request-beats-config", 120.0, {"timeout_s": 42.0}, 42.0),
+        )
+        for label, config_s, fields, expected in cases:
+            with self.subTest(label):
+                self.server._transfer_timeout_s = config_s
+                self.assertEqual(self._wait_timeout(f"run-{label}:k", **fields), expected)
+
+
+class TestMotionLock(_TransferTestCase):
+    """D-12: the process-wide motion lock is a backstop behind the BUSY status."""
+
+    def test_a_direct_transfer_is_refused_while_the_lock_is_held(self) -> None:
+        self.assertTrue(stack_server._MOTION_LOCK.acquire(blocking=False))
+        self.addCleanup(stack_server._MOTION_LOCK.release)
+        reply = self.server.Transfer(stack_pb2.Command.Transfer(step_key="k"))
+        self.assertEqual(reply.response, ERROR_FROM_TOOL)
+        self.assertIn("busy", reply.error_message)
+        self.assertEqual(self.core.calls, [])
+        self.assertFalse(os.path.exists(self.ledger_path))
+
+    def test_the_lock_is_released_after_every_outcome(self) -> None:
+        self.assertEqual(self._transfer("run-ok:k").response, SUCCESS)
+        self.assertFalse(stack_server._MOTION_LOCK.locked())
+        self.core.execute_result = Refused(reason="stackBusy")
+        self.assertEqual(self._transfer("run-refused:k").response, ERROR_FROM_TOOL)
+        self.assertFalse(stack_server._MOTION_LOCK.locked())
+
+    def test_an_exception_from_plan_transfer_propagates_and_releases_the_lock(self) -> None:
+        self.core.plan_result = RuntimeError("boom")
+        with self.assertRaises(RuntimeError):
+            self.server.Transfer(stack_pb2.Command.Transfer(step_key="k", **_ESTIMATE_FIELDS))
+        self.assertFalse(stack_server._MOTION_LOCK.locked())
+        reply = self._transfer("run-after:k")
+        self.assertEqual(reply.response, DRIVER_ERROR)
+        self.assertFalse(stack_server._MOTION_LOCK.locked())
 
 
 class TestTransferEstimate(_RealModeGrpcTestCase):
