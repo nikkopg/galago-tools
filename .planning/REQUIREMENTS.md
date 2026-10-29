@@ -46,7 +46,7 @@ milestone; stack-automation-layer core gaps are fixed there via `/gsd-quick`. Re
   A tool-server restart during a transfer is reported as needing arm inspection, never replayed as
   SUCCESS: the core can lose that task's ownership if it died between the POST and its state save
   (`934a621` limit 1)
-- [ ] **XFR-04**: An outcome that proves nothing was sent (`refused`/`rejected`/`needsInput`/
+- [x] **XFR-04**: An outcome that proves nothing was sent (`refused`/`rejected`/`needsInput`/
   `readFailed`) releases the key so the operator can fix the cause and re-run the step
 - [x] **XFR-05**: The adapter never retries motion — an AST invariant with planted violations proves it
   never calls `start_transfer`, `cancel_transfer` or `go_to_safe_position`, and calls
@@ -130,7 +130,7 @@ milestone; stack-automation-layer core gaps are fixed there via `/gsd-quick`. Re
 | XFR-01 | Phase 5 | Complete |
 | XFR-02 | Phase 5 | Complete |
 | XFR-03 | Phase 5 | Pending |
-| XFR-04 | Phase 5 | Pending |
+| XFR-04 | Phase 5 | Complete |
 | XFR-05 | Phase 5 | Complete |
 | XFR-06 | Phase 5 | Pending |
 | ACK-01 | Phase 5 | Complete |

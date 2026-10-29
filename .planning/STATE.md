@@ -5,16 +5,16 @@ milestone_name: STACK Tool & STACK↔F.A.S.T. Handoff
 current_phase: 5
 current_phase_name: F5-safe Transfer & Operator Acknowledge
 status: executing
-stopped_at: Completed 05-04-PLAN.md
-last_updated: "2026-10-29T09:02:08.765Z"
+stopped_at: Completed 05-05-PLAN.md
+last_updated: "2026-10-29T09:07:34.782Z"
 last_activity: 2026-10-29
 last_activity_desc: Phase 5 execution started
-state_head: 67a670dec4e19dd8fa8b8a798aea182a926eead3
+state_head: 848b2041c859bb3625991bbc72853510ce615d4f
 progress:
   total_phases: 4
   completed_phases: 1
   total_plans: 12
-  completed_plans: 9
+  completed_plans: 10
   percent: 25
 ---
 
@@ -32,7 +32,7 @@ acknowledges on its own. For the STACK: a step never sends a second transfer.
 ## Current Position
 
 Phase: 5 (F5-safe Transfer & Operator Acknowledge) — EXECUTING
-Plan: 5 of 7
+Plan: 6 of 7
 Status: Ready to execute
 Last activity: 2026-10-29 — Phase 5 execution started
 
@@ -90,6 +90,7 @@ Progress: [███░░░░░░░] 25%
 | Phase 5 P02 | 25min | 3 tasks | 3 files |
 | Phase 5 P03 | 3 min | 3 tasks | 2 files |
 | Phase 5 P04 | 14min | 3 tasks | 2 files |
+| Phase 05 P05 | 25min | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -128,6 +129,8 @@ v2 roadmap-level decisions (2026-10-28, detail in PROJECT.md Key Decisions):
 - [Phase 5]: 05-03: ledger retention prunes done records older than 7 days only inside a mutation that wrote; load never prunes
 - [Phase 5]: GetFailureLatch is latch_status() 1:1; the yes gate sits in _dispatchCommand before admission and again in the AcknowledgeFailure handler
 - [Phase 5]: Later ledger-write-failure message carries the latch clause for latching results only (ran makes no latch_status call)
+- [Phase 05]: 05-05: mark_done skipped after a failed mark_started so the record stays submitting
+- [Phase 05]: 05-05: step key released only by isinstance whitelist (Refused/Rejected/NeedsInput/ReadFailed); unknown shapes become outcomeUnknown
 
 ### Pending Todos
 
@@ -161,8 +164,8 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-29T09:02:08.729Z
-Stopped at: Completed 05-04-PLAN.md
+Last session: 2026-10-29T09:07:34.745Z
+Stopped at: Completed 05-05-PLAN.md
 Resume file: None
 
 ## Operator Next Steps
