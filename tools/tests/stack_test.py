@@ -998,7 +998,7 @@ class TestReconfiguringAdmission(_StackTestCase):
 
 
 class TestConfigureWarning(_StackTestCase):
-    """D-09: a fresh open warns once that a restart clears the core's latch."""
+    """D-09: a fresh open warns once about what a restart can still lose."""
 
     def test_fresh_open_warns_once_and_reuse_is_silent(self) -> None:
         port = _free_tcp_port()

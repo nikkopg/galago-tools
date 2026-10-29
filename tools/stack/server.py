@@ -110,9 +110,11 @@ _RECONFIGURING_MESSAGE = "stack: reconfiguring"
 # D-09: logged once per fresh open. A restart of this tool server silently
 # drops the core's in-process failure latch and in-flight guard.
 _RESTART_WARNING = (
-    "stack: restarting this tool server clears the STACK core's failure latch "
-    "and in-flight guard (core gap G1); a STACK failure must be acknowledged "
-    "by the operator, not cleared by a restart"
+    "stack: the STACK core keeps its failure latch across a restart, but a "
+    "restart during a transfer can lose that task's ownership so its failure "
+    "never latches; inspect the arm after any mid-transfer restart, never "
+    "delete the core's state file, and acknowledge a failure, never restart "
+    "it away"
 )
 
 # D-10: the explicit, case-sensitive allowlist of result kinds that are SUCCESS.
