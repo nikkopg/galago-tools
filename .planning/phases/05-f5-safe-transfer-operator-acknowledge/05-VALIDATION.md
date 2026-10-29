@@ -38,20 +38,25 @@ created: "2026-10-29"
 
 ## Per-Task Verification Map
 
-The planner fills in task IDs. Each requirement is mapped to its test target below.
+Task IDs from plans 05-01..05-07. Verify blocks that run stack_test.py first run `bin/make proto` (see the plans). The ledger tests and the spike checks do not need it. The per-wave gate is `bin/make proto test`.
 
-| Requirement | Behavior | Test Type | Automated Command | File Exists | Status |
-|-------------|----------|-----------|-------------------|-------------|--------|
-| XFR-01 | Plan, execute and wait run as one command. `ran` → SUCCESS. Any other kind → `ERROR_FROM_TOOL`. A blank `step_key` is INVALID before any I/O. | integration | `pytest tools/tests/stack_test.py -k TestTransfer` | ❌ W0 | ⬜ pending |
-| XFR-02 | Atomic write-ahead ledger. Fails closed. Modes 0700/0600. | unit + integration | `pytest tools/tests/stack_ledger_test.py` | ❌ W0 | ⬜ pending |
-| XFR-03 | Each D-07 row, fingerprint mismatch, restart, and `lost(pollFailed)` stays `started` (A-1). | unit + integration | `pytest tools/tests/stack_test.py -k "TestRepeatKey or TestRestart"` | ❌ W0 | ⬜ pending |
-| XFR-04 | Whitelisted release. An exception leaves `submitting`. | integration | `pytest tools/tests/stack_test.py -k TestKeyRelease` | ❌ W0 | ⬜ pending |
-| XFR-05 | AST invariant with planted violations, plus a behavioural submit count of 1. | AST + integration | `pytest tools/tests/stack_test.py -k "TestAdapterInvariant or TestNeverResends"` | partial | ⬜ pending |
-| XFR-06 | `timedOut`, then re-attach, then `ran`. 300 s slices. Budget precedence. | integration | `pytest tools/tests/stack_test.py -k "TestTimedOutReattach or TestWaitBudget"` | ❌ W0 | ⬜ pending |
-| ACK-01 | Only `"yes"` reaches the core. Exactly one call site. | integration + AST | `pytest tools/tests/stack_test.py -k TestAcknowledge` | partial | ⬜ pending |
-| ACK-02 | `GetFailureLatch` → `latch_status()`. Messages name the latch guid first (A-2). | integration | `pytest tools/tests/stack_test.py -k "TestFailureLatch or TestLatchGuidInMessage"` | ❌ W0 | ⬜ pending |
-| STK-05 | Reads answer during a real Transfer. | integration | `pytest tools/tests/stack_test.py -k TestBusyReads` | rewrite | ⬜ pending |
-| STK-06/07 | Simulated mode never writes the ledger. `latchStatus` is SUCCESS. | integration/unit | `pytest tools/tests/stack_test.py -k "TestSimulated or TestResultMapping"` | ✅ extend | ⬜ pending |
+| Task ID | Requirement | Behavior | Test Type | Automated Command | File Exists | Status |
+|---------|-------------|----------|-----------|-------------------|-------------|--------|
+| 05-01-T1/T2 | XFR-03, XFR-04, ACK-02 | 05-SPIKE.md answers the D-01 questions and core citations hold at 934a621 | doc + git grep | the grep / `git show 934a621` checks in 05-01 verify | ❌ W0 (spike) | ⬜ pending |
+| 05-02-T1 | XFR-01, XFR-02 | Fresh path plan → write-ahead → execute → started → wait → done. `ran` → SUCCESS. Corrupt ledger refuses | integration | `pytest tools/tests/stack_test.py -k TestTransferFreshPath` | ❌ W0 | ⬜ pending |
+| 05-02-T2 | XFR-05 | Call-site AST rules with planted violations | AST | `pytest tools/tests/stack_test.py -k TestAdapterInvariant` | partial (rewrite) | ⬜ pending |
+| 05-03-T1 | XFR-02 | Atomic write-ahead ledger. Fails closed. Modes 0700/0600. flock. Path resolution. Fingerprint | unit | `pytest tools/tests/stack_ledger_test.py -k "TestLedgerStorage or TestResolveLedgerDir or TestFingerprint"` | ❌ W0 | ⬜ pending |
+| 05-03-T2 | XFR-03 | `decide()` per D-07 row, incl. the replay-window edges | unit | `pytest tools/tests/stack_ledger_test.py -k TestDecide` | ❌ W0 | ⬜ pending |
+| 05-03-T3 | XFR-03, XFR-04 | release / outcomeUnknown / `is_terminal` (A-1) / retention | unit | `pytest tools/tests/stack_ledger_test.py` | ❌ W0 | ⬜ pending |
+| 05-04-T1 | ACK-02 | `GetFailureLatch` → `latch_status()` 1:1. `latchStatus` is SUCCESS | integration | `pytest tools/tests/stack_test.py -k "TestFailureLatch or TestResultMapping"` | ❌ W0 | ⬜ pending |
+| 05-04-T2 | ACK-01, XFR-05 | Only `"yes"` reaches the core. Exactly one call site | integration + AST | `pytest tools/tests/stack_test.py -k "TestAcknowledge or TestAdapterInvariant"` | partial | ⬜ pending |
+| 05-04-T3 | ACK-02 | Messages name the latch guid first (A-2) and keep it under truncation | integration | `pytest tools/tests/stack_test.py -k TestLatchGuidInMessage` | ❌ W0 | ⬜ pending |
+| 05-05-T1 | XFR-04 | Whitelisted release. Unknown / exception / submitOutcomeUnknown keep the key | integration | `pytest tools/tests/stack_test.py -k TestKeyRelease` | ❌ W0 | ⬜ pending |
+| 05-05-T2 | XFR-02, XFR-06 | Configure ledger_dir, fail-closed Transfer, budget precedence, motion lock | integration | `pytest tools/tests/stack_test.py -k "TestLedgerFailClosed or TestWaitBudget or TestMotionLock or TestConfigureLedgerDir"` | ❌ W0 | ⬜ pending |
+| 05-06-T1 | XFR-03 | Each D-07 row wired into Transfer. Fingerprint mismatch | integration | `pytest tools/tests/stack_test.py -k TestRepeatKey` | ❌ W0 | ⬜ pending |
+| 05-06-T2 | XFR-06, XFR-03 | `timedOut` → re-attach → `ran`. 300 s slices. `lost(pollFailed)` stays `started`. Restart | integration | `pytest tools/tests/stack_test.py -k "TestTimedOutReattach or TestRestart"` | ❌ W0 | ⬜ pending |
+| 05-07-T1 | XFR-05 | Behavioural submit count of 1 across the D-16 matrix. No auto-ack | integration | `pytest tools/tests/stack_test.py -k TestNeverResends` | ❌ W0 | ⬜ pending |
+| 05-07-T2 | STK-05, STK-06 | Reads answer during a real Transfer. Simulated mode never writes the ledger | integration | `pytest tools/tests/stack_test.py -k "TestBusyReads or TestSimulated"` | rewrite | ⬜ pending |
 
 *Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
 

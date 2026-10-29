@@ -138,7 +138,28 @@ re-checked research: `.planning/research/SUMMARY.md` § Addendum (2026-10-29).
      `AcknowledgeFailure(guid, arm_inspected)`: only the exact string `"yes"` reaches
      `acknowledge_failure(guid, confirm=True)`, anything else is `INVALID_ARGUMENTS` with no core
      call, and no adapter path acknowledges on its own.
-**Plans**: TBD
+**Plans:** 7 plans (waves 1-6; 05-03 and 05-04 run in parallel in wave 3, every other plan is sequential on `tools/stack/server.py` / `tools/tests/stack_test.py`)
+
+Plans:
+**Wave 1**
+- [ ] 05-01-PLAN.md — D-01 design spike `05-SPIKE.md` against core 934a621: answers, amendments A-1/A-2, resolved open questions, binding ledger contract (XFR-03, XFR-04, ACK-02)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [ ] 05-02-PLAN.md — Tracer: fresh-path Transfer through a write-ahead step ledger (`tools/stack/ledger.py`), plus the XFR-05 call-site AST rules (XFR-01, XFR-02, XFR-05)
+
+**Wave 3** *(blocked on Wave 2 completion; the two plans share no files)*
+- [ ] 05-03-PLAN.md — Pure ledger: storage contract tests, `decide()` state machine and transitions, test first (XFR-02, XFR-03, XFR-04)
+- [ ] 05-04-PLAN.md — `GetFailureLatch` 1:1 `latch_status()`, operator-only `AcknowledgeFailure` behind an exact "yes", latch guid in Transfer errors (ACK-01, ACK-02, XFR-05)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+- [ ] 05-05-PLAN.md — Release a key only when nothing was sent, outcomeUnknown with the latch guid, Transfer hardening (D-03/D-04/D-11/D-12) (XFR-04, XFR-02, ACK-02)
+
+**Wave 5** *(blocked on Wave 4 completion)*
+- [ ] 05-06-PLAN.md — `decide()` wired into Transfer: replay, refusals, mismatch, read-only re-attach, timedOut, restart (XFR-03, XFR-06)
+
+**Wave 6** *(blocked on Wave 5 completion)*
+- [ ] 05-07-PLAN.md — Never-resend behavioural matrix, STK-05 re-proven on the real Transfer, final gate (XFR-05, XFR-03, ACK-01)
+
 **Notes**: Highest-risk phase; open with a short design spike on ledger semantics against core
 `934a621` before planning — in particular how a re-attach after a mid-transfer restart (core limit 1:
 the task may have become foreign, so its failure would not latch) is reported. `GetFailureLatch`
@@ -220,7 +241,7 @@ Phases execute in numeric order: 4 → 5 → 6 → 7 (DEP-01 is met, so Phase 5 
 | Phase | Milestone | Plans Complete | Status | Completed |
 |-------|-----------|----------------|--------|-----------|
 | 4. STACK Tool Registration, Reads & Estimate | v2 | 5/5 | Complete    | 2026-10-29 |
-| 5. F5-safe Transfer & Operator Acknowledge | v2 | 0/TBD | Not started | - |
+| 5. F5-safe Transfer & Operator Acknowledge | v2 | 0/7 | Planned | - |
 | 6. GAL-02 Workflow, Simulated Workcell & PAC-Simulator Run | v2 | 0/TBD | Not started | - |
 | 7. Deploy & Supervised Live STACK + Handoff | v2 | 0/TBD | Not started | - |
 
