@@ -63,8 +63,18 @@ from tools.grpc_interfaces.tool_base_pb2 import (
 )
 from tools.grpc_interfaces.tool_base_pb2 import Command as ToolCommand
 from tools.stack.ledger import (
+    FRESH,
+    MISMATCH,
+    REATTACH,
+    REFUSE_COMPLETED,
+    REFUSE_FAILED,
+    REFUSE_OUTCOME_UNKNOWN,
+    REFUSE_SUBMITTING,
+    REPLAY,
+    Decision,
     Ledger,
     LedgerError,
+    decide,
     fingerprint,
     is_terminal,
     resolve_ledger_dir,
@@ -182,6 +192,32 @@ _LATCH_UNAVAILABLE = "latch status unavailable; read GetFailureLatch"
 _RELEASE_TYPES = (Refused, Rejected, NeedsInput, ReadFailed)
 _NOT_RE_SENT = "this step key will not be re-sent"
 _IN_FLIGHT_OWNER = "step key {key} is still running; re-run that step to re-attach"
+
+# D-07 (05-SPIKE.md 6b, 6f): the repeat-key replies. In every line the guid and
+# the next action come before the step key, so a long key is what gets cut.
+_MISMATCH = (
+    "stack: this step key was used for a different request or STACK; "
+    "mint a new step key; step key {key}")
+# D-09 as kept by 05-SPIKE.md OQ1: after a restart the core may not own the
+# guid, so a non-ran outcome may never have latched.
+_RESTART_CLAUSE = (
+    "tool restarted mid-transfer; inspect the arm; the core may not have latched "
+    "this failure")
+_REFUSE_SUBMITTING = (
+    "stack: {restart}outcome unknown for this step key; check the STACK Manager "
+    "and GetFailureLatch; this step key will not be re-sent; step key {key}")
+_REFUSE_OUTCOME_UNKNOWN = (
+    "stack: outcome unknown; latched guid {guid}; inspect the arm, then "
+    "AcknowledgeFailure; this step key will not be re-sent; step key {key}")
+_REFUSE_OUTCOME_UNKNOWN_NO_GUID = (
+    "stack: outcome unknown; no latch guid was recorded; read GetFailureLatch; "
+    "this step key will not be re-sent; step key {key}")
+_REFUSE_COMPLETED = (
+    "stack: step key already completed at {at}; the protocol must mint a new "
+    "step key per run; nothing was sent; step key {key}")
+_REFUSE_FAILED = (
+    "stack: {kind}{reason} is recorded for this step key; {latch}; then run the "
+    "step under a new step key{task}; step key {key}")
 
 # Result kinds whose cause can latch in the core (failed, aborted and lost
 # results, and a refusal because a latch is already held).
@@ -470,6 +506,12 @@ def _in_flight_owner_clause(ledger: Ledger, d: dict[str, Any], own_key: str) -> 
     if owner is None or owner == own_key:
         return ""
     return "; " + _IN_FLIGHT_OWNER.format(key=owner)
+
+
+def _ledger_meta(key: str, record: dict[str, Any], **extra: Any) -> dict[str, Any]:
+    """D-10: the meta of every ledger-generated reply, {stepKey, ledgerState}
+    plus whatever the reply adds (a replay adds result and replayed)."""
+    return {"stepKey": key, "ledgerState": record.get("state"), **extra}
 
 
 def _result_reply(result: Any) -> ExecuteCommandReply:
@@ -807,18 +849,71 @@ class StackServer(ToolServer):
                 existing = ledger.get(key)
             except (LedgerError, ValueError) as exc:
                 return _ledger_error_reply(exc, self._ledger_dir)
-            if existing is not None:
-                # Interim rule until the repeat-key decision table is wired: a
-                # step key that already has a record sends nothing.
+            decision = decide(existing, fingerprint=fp, instance=self._instance, now=_utcnow())
+            if decision.action == FRESH:
+                return self._run_fresh(service, ledger, key, fp, request, budget)
+            if decision.action == REPLAY and decision.record is not None:
+                return _reply(SUCCESS, meta=_ledger_meta(
+                    key, decision.record, result=decision.record.get("result"), replayed=True))
+            if decision.action == REATTACH and decision.record is not None:
+                # Interim: the read-only re-attach is wired in the next commit.
                 return _reply(
                     ERROR_FROM_TOOL,
                     message=_one_line(
                         "stack: this step key already has a ledger record "
-                        f"({existing['state']}); nothing was sent; step key {key}", 300),
-                    meta={"stepKey": key, "ledgerState": existing["state"]})
-            return self._run_fresh(service, ledger, key, fp, request, budget)
+                        f"({decision.record['state']}); nothing was sent; step key {key}", 300),
+                    meta=_ledger_meta(key, decision.record))
+            return self._ledger_reply(decision, key, service)
         finally:
             _MOTION_LOCK.release()
+
+    def _ledger_reply(self, decision: Decision, key: str,
+                      service: StackService) -> ExecuteCommandReply:
+        """The reply for a repeated step key that is not replayed or re-attached:
+        a fingerprint mismatch (INVALID_ARGUMENTS) or a refusal (ERROR_FROM_TOOL).
+        No branch calls plan_transfer, execute_transfer, wait or wait_transfer
+        (A-6); only the refuseFailed row reads latch_status() (zero I/O, once).
+        Each line puts the guid and the next action before the step key and is
+        cut at 300 characters. Meta is {stepKey, ledgerState} (D-10)."""
+        record = decision.record if decision.record is not None else {}
+        meta = _ledger_meta(key, record)
+        action = decision.action
+        if action == MISMATCH:
+            return _reply(INVALID_ARGUMENTS, message=_one_line(
+                _MISMATCH.format(key=key), 300), meta=meta)
+        if action == REFUSE_SUBMITTING:
+            restart = f"{_RESTART_CLAUSE}; " if decision.restarted else ""
+            line = _REFUSE_SUBMITTING.format(restart=restart, key=key)
+        elif action == REFUSE_OUTCOME_UNKNOWN:
+            guid = record.get("latchGuid")
+            if isinstance(guid, str) and guid.strip():
+                line = _REFUSE_OUTCOME_UNKNOWN.format(guid=guid.strip(), key=key)
+            else:
+                line = _REFUSE_OUTCOME_UNKNOWN_NO_GUID.format(key=key)
+        elif action == REFUSE_COMPLETED:
+            line = _REFUSE_COMPLETED.format(at=record.get("updatedAt"), key=key)
+        elif action == REFUSE_FAILED:
+            line = self._refuse_failed_line(service, key, record)
+        else:
+            line = f"stack: unrecognised ledger decision; nothing was sent; step key {key}"
+        return _reply(ERROR_FROM_TOOL, message=_one_line(line, 300), meta=meta)
+
+    @staticmethod
+    def _refuse_failed_line(service: StackService, key: str, record: dict[str, Any]) -> str:
+        """A done record that is not a ran: repeat the recorded kind, reason and
+        task guid, name the latch from latch_status() first (A-2), and say to
+        run the step under a new step key."""
+        result = record.get("result")
+        d = result if isinstance(result, dict) else {}
+        kind = d.get("kind")
+        reason = d.get("reason")
+        guid = _find_guid(d)
+        return _REFUSE_FAILED.format(
+            kind=kind if isinstance(kind, str) and kind else "unrecognised result",
+            reason=f" ({_one_line(reason, 60)})" if isinstance(reason, str) and reason else "",
+            latch=_latch_clause(service),
+            task=f"; task guid {guid}" if guid else "",
+            key=key)
 
     def _run_fresh(self, service: StackService, ledger: Ledger, key: str, fp: str,
                    request: TransferRequest, budget: float) -> ExecuteCommandReply:

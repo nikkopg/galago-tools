@@ -2402,7 +2402,8 @@ class _LedgerCase(_TransferTestCase):
     Transfer computes, a planted record, and a call-name tally."""
 
     def _fp(self) -> str:
-        request = stack_server._transfer_request(stack_pb2.Command.Transfer(**_ESTIMATE_FIELDS))
+        fields: dict[str, Any] = dict(_ESTIMATE_FIELDS)
+        request = stack_server._transfer_request(stack_pb2.Command.Transfer(**fields))
         return fingerprint(self.server._endpoint(), request)
 
     def _seed(self, key: str = _STEP_KEY, **fields: Any) -> None:
