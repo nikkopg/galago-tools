@@ -2,9 +2,9 @@
 phase: 05-f5-safe-transfer-operator-acknowledge
 fixed_at: 2026-10-30T00:00:00Z
 review_path: .planning/phases/05-f5-safe-transfer-operator-acknowledge/05-REVIEW.md
-iteration: 2
-findings_in_scope: 10
-fixed: 8
+iteration: 3
+findings_in_scope: 12
+fixed: 10
 skipped: 2
 status: partial
 ---
@@ -214,3 +214,10 @@ _Iteration: 2_
 ## Orchestrator follow-up (iteration 2, user decision)
 
 - **Corrupt-ledger pin** (`ba9fe65`): the user chose to keep the ledger directory pinned when `ledger.get` raises `unreadable`, `corrupt` or `unknownVersion`. A file is there that may hold step keys, so a Configure cannot steer the tool onto an empty ledger. Covered by `test_an_untrusted_ledger_file_pins_the_directory`, which fails without the fix. The full gate passes with 508 tests.
+
+## Iteration 3 (orchestrator-applied at the iteration cap)
+
+- **WR-01 (second-send path)** (`1de1590`): any existing ledger file now keeps the pin (`existing is not None or ledger.path.exists()`). `test_a_ledger_holding_other_keys_stays_pinned_after_a_transfer_that_wrote_nothing` fails without the fix.
+- **WR-02 (restore line untested)** (`1de1590`): `test_a_transfer_that_wrote_nothing_keeps_an_earlier_pin` is an end-to-end guard: the pin is kept and a re-run sends nothing. After the WR-01 fix the restore-to-previous branch is reachable only when no ledger file exists, so this test does not isolate that line. Accepted.
+- IN-01 (misleading "restart the tool server" during a not-yet-written Transfer) and IN-02 (unreachable `_fit` room<0 branch) remain open as info.
+- Full gate: 510 passed.

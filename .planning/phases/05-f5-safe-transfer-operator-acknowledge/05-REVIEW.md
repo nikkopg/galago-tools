@@ -2,7 +2,7 @@
 phase: 05-f5-safe-transfer-operator-acknowledge
 reviewed: 2026-10-30T00:00:00Z
 depth: standard
-iteration: 2
+iteration: 3
 files_reviewed: 4
 files_reviewed_list:
   - tools/stack/ledger.py
@@ -12,12 +12,12 @@ files_reviewed_list:
 findings:
   critical: 0
   warning: 2
-  info: 1
-  total: 3
+  info: 2
+  total: 4
 status: issues_found
 ---
 
-# Phase 5: Code Review Report (iteration 2)
+# Phase 5: Code Review Report (iteration 3)
 
 **Reviewed:** 2026-10-30
 **Depth:** standard
@@ -26,76 +26,104 @@ status: issues_found
 
 ## Summary
 
-Re-review of the fix commits `5571cc9..ff56c2d` against the iteration-1 findings. The core `934a621` was exported with `git archive` from the local `stack-automation-layer` checkout into the scratchpad and put on `PYTHONPATH` (the machine has no pip-installed core). With the repo's `.venv` python, `unittest tools.tests.stack_test tools.tests.stack_ledger_test` ran 353 tests. The only error is `test_installed_core_is_the_pinned_commit`, which needs pip metadata (same as iteration 1). No source file was modified; mutations were run on a copy under the scratchpad.
+Scope: `git diff f25e340..ba9fe65 -- tools/` (server.py and stack_test.py; ledger.py and stack_ledger_test.py are
+unchanged since iteration 2). Accepted items (WR-06, the CR-01 default-dir-after-restart residual, iteration-2 IN-01)
+are not re-raised.
 
-Disposition of iteration-1 findings:
+Verified resolved:
 
-| ID | Result |
-|----|--------|
-| CR-01 | Resolved. The pin, the deferred commit, and the refusal all hold. Regression tests are not vacuous (mutations below). One side effect is raised as WR-01. |
-| WR-01 (ack vs motion lock) | Resolved. The lock in the handler and the `setStatus` BUSY mapping are each covered by a test that fails when only that half is removed. |
-| WR-02 (busy refusal leaves FAILED) | Resolved. Mutation test fails when the restore is removed. |
-| WR-03 (message cap) | Mostly resolved: guids are no longer dropped and the cap holds. The re-attach action is still cut in one combination, raised as WR-02. |
-| WR-04 (ledger state transitions) | Resolved. All server call orders still satisfy the new checks. |
-| WR-05 (`claim() == False`) | Resolved. Behavioural tests and the `_claim_gates` AST rule both fail when the guard is deleted. |
-| WR-06 (typed 5xx releases the key) | Accepted by the user (XFR-04 kept as written; Phase 7 runbook). Not a finding. |
-| CR-01 residual (a different default `ledger_dir` after a restart or a different launcher) | Accepted and documented for the Phase 7 runbook (an explicit absolute `ledger_dir`). Not a new finding. |
+- **Iteration-2 WR-02 (`_fit` keeps the re-attach clause whole):** resolved. The clause that ends the free text is moved
+  into the protected suffix, and only variable text (latch kind label, reason, a duplicated "inspect the arm") is shed
+  before the head is cut. I traced the shed arithmetic (`over` is decremented by what leaves the suffix as well, and
+  `room - len(rest)` cannot go negative because `rest` was cut against the older, smaller room). The new tests assert
+  the re-attach text, the latch action and the whole restart clause, and `assertNotIn("...")`. They are non-vacuous.
+- **Pin/restore races with Configure:** none found. The pin is taken together with the `_ledger_dir` read under
+  `_state`; every Configure path that can change `_ledger_dir` re-checks the pin under the same lock
+  (`_commit_settings`), and the swap path runs it again after the drain with `_reconfiguring` set, which keeps a new
+  Transfer out (a Transfer is a "reader"). Pin writers are serialised by `_MOTION_LOCK`, so the `finally` restore cannot
+  overwrite another Transfer's pin, and `previous` always equals the directory being pinned when it is not None (a
+  Configure to a different directory is refused once a pin exists).
+- **Untrusted-ledger-file pin (`ba9fe65`):** works for the three reasons raised by `ledger.get`; the test fails without
+  the fix.
 
-Mutation checks I ran on a scratch copy (each mutation shown with the tests that caught it):
-- Remove the pin refusal (`if not same: raise`): 3 `TestLedgerDirPinned` tests fail.
-- Remove the `_ledger_pinned` assignment: the same 3 tests fail.
-- Remove the ack motion lock: `test_the_handler_is_refused_busy_while_a_transfer_holds_the_motion_lock` fails.
-- Remove the `setStatus` READY-to-BUSY mapping: `test_a_same_endpoint_configure_neither_resets_busy_nor_admits_an_acknowledge` fails.
-- Remove the WR-02 status restore: `test_a_busy_refusal_leaves_the_tool_ready_and_able_to_transfer` and the CR-01 re-send test fail.
-- Remove the `release` state check: the transition-matrix test fails for `started`, `done` and `outcomeUnknown`.
-- Remove the `if not claimed` guard: `TestClaimedElsewhere`, `test_a_send_that_does_not_test_the_claim_result_is_reported` and `test_real_sources_are_clean` fail.
-
-Traced and found sound: `_commit_settings` (the check runs under `_state`, the same lock Transfer pins under; for an endpoint swap the check runs after the drain and before the owner is touched, and the final commit cannot see a new pin because commands are held off). The refusal path through `_configure` and base `Configure` restores BUSY or READY correctly, including when a Transfer holds the lock. `Ledger._existing` raises before any mutation or save, so a refused transition writes nothing. The legal write order (`claim`, `mark_started`, `mark_done` or `release` or `mark_outcome_unknown`) is never refused, and a failed `mark_started` skips `mark_done` as before.
+Two problems remain. The first (WR-01) is a narrowing of the iteration-2 pin condition that lets a second
+`execute_transfer` through for a step key in a reachable sequence. I reproduced it with a probe test (see below). The
+second (WR-02) is a test gap on the line that protects the pin.
 
 ## Warnings
 
-### WR-01: The ledger directory is pinned by any Transfer, including one that never touched the ledger, and a failed Transfer then makes the operator's fix impossible without a restart
+### WR-01: A Transfer that read a populated ledger but wrote nothing releases the pin, so the operator is invited to move `ledger_dir` and a recorded step key reads as new
 
-**File:** `tools/stack/server.py:1026-1031` (pin), `tools/stack/server.py:866-880` (refusal), message at `tools/stack/server.py:175-179`
-**Issue:** `Transfer` sets `self._ledger_pinned = directory` before `Ledger(directory)` and `ledger.get(key)` run, so the pin is set on every Transfer call, including these cases where no record was ever written to that directory:
-- `ledger.get` fails (unreadable, corrupt, unknownVersion).
-- The write-ahead `claim` fails (`unwritable`, `busy`).
-- The plan is `NeedsInput`, `Refused` or `Rejected` (these `get` before `plan_transfer`, and no claim happens for `NeedsInput`).
+**File:** `tools/stack/server.py:1097-1105, 1116-1120` (with `tools/stack/server.py:1182-1188`)
+**Issue:** `_ledger_used` ("a record can exist here") is set only when `ledger.get(key)` returned a record for *this* key,
+when the claim returned, or when the file was untrusted. A ledger file that exists and holds other steps' records
+(`done`, `started`, `outcomeUnknown`) but not this key does not count. If that Transfer then ends without a claim
+(a `claim` that raises `unwritable`/`busy` or a race-corrupted file, a `NeedsInput`/`Refused`/`Rejected` plan), the
+`finally` puts the pin back to `None`, and a Configure to another `ledger_dir` is accepted. Every record in the old
+directory is then invisible, and a repeat of any of those step keys is FRESH and calls `execute_transfer` a second time.
+The write-ahead-failure reply says "fix the ledger directory", which is exactly the prompt to do it. Before the
+iteration-2 fix this Transfer pinned the directory, so this is a regression of the CR-01 guard, not the accepted
+"different default after restart" residual. The only way in is a pin that is `None` (first Transfer since the tool
+server started) with an already populated ledger, which is the normal state after any restart, and a disk-full or
+read-only ledger is the very case the reply tells the operator to repair.
 
-I reproduced this on a scratch copy. A Configure points `ledger_dir` at an unwritable path. The Transfer returns `no transfer was sent; the step ledger could not record the step (unwritable); fix the ledger directory, then re-run this step`. The follow-up Configure to a good directory returns `NOT_READY: stack: Config.ledger_dir cannot change after a Transfer has used the step ledger; restart the tool server to move it`.
+Reproduced in a copy of the tree with a probe test (`TestLedgerDirPinned` subclass; fake core): configure, seed a `done`
+record for `other-step`, patch `Ledger.claim` to raise `LedgerError("unwritable")`, Transfer a different key, then
+Configure with another directory. Result: `_ledger_pinned` is `None` and the Configure returns SUCCESS.
 
-The pin exists to stop a step key that already has a record from reading as new in another directory. A directory in which nothing was ever recorded has no such key. The consequence is operational, not a double-send, and it fails closed. But the tool's own message tells the operator to "fix the ledger directory" and the Configure that does so is refused, with a message ("after a Transfer has used the step ledger") that is untrue for these cases. An operator with a typo in `ledger_dir` gets a tool server restart as the only way out.
-**Fix:** Pin only once a record can exist in that directory: after a successful `claim` (True) and also when `ledger.get` returned a record. `get` returning `None` on an empty or absent ledger should not pin. For example:
+**Fix:** the pin condition should be "the ledger file exists", not "this key exists":
+
 ```python
-directory = resolve_ledger_dir(self._ledger_dir)       # under _state, no pin yet
 ledger = Ledger(directory)
 existing = ledger.get(key)
-if existing is not None:
-    with self._state:
-        self._ledger_pinned = directory
+if existing is not None or ledger.path.exists():
+    self._ledger_used = True
 ```
-and set the pin in `_run_fresh` immediately after `claimed` is True (it is the first moment a record exists). The check and assignment must remain under `_state`, and a pin race with a concurrent same-endpoint Configure must be re-checked (commit the pin only if `self._ledger_dir` still resolves to `directory`). Add a test that a Transfer failing with `unwritable` leaves a Configure to another directory accepted.
 
-### WR-02: The WR-03 truncation fix still cuts the re-attach instruction when a restart clause is stacked on a timedOut or lost line
+(`get` has already proved the file readable, so `exists()` is the cheap, race-free-enough check; a claim failure then
+no longer matters because the file is already there. A missing file in an unwritable directory still leaves the pin
+unset, which is what iteration-2 WR-01 wanted.) Add a test: seed another key, make the claim raise `unwritable`, assert
+a Configure to another directory is refused.
 
-**File:** `tools/stack/server.py:359-383` (`_fit`), `tools/stack/server.py:595-607` and `tools/stack/server.py:620-628` (callers)
-**Issue:** `_fit` keeps the suffix and the front's `; task guid <g>` segment whole and cuts the front's head. After a restart, `_non_terminal_reply` builds the front (kind, latch clause, "re-run this step to re-attach") and `_with_restart_clause` then appends about 190 characters. The head is what gets cut, and the head is exactly where the operator action sits. Actual output on a scratch run (latch held, `cancelRequested`):
-- timedOut after a restart: `stack: still running (timedOut); re-run this ste...; task guid aaaaaaaa-...; latched guid cccccccc-... (cancelRequested); inspect the arm, then AcknowledgeFailure; tool restarted mid-transfer; ...`
-- lost(pollFailed) after a restart: `stack: lost (pollFailed); latched guid cccccccc-... (cancelRequested); inspect the arm, then AcknowledgeFailure; the transfer may still...; task guid aaaaaaaa-...; tool restarted mid-transfer; ...`
+### WR-02: Nothing tests that the restore puts back the previous pin; restoring `None` passes the whole suite
 
-Both guids and the cap now hold, which is what the review asked for. But for the lost case "re-run this step to re-attach" is gone, replaced by "...", and in the timedOut case it ends "re-run this ste...". This is the one instruction that says the transfer is still running and the key will re-attach. `TestMessageCap` asserts the guids and `tool restarted mid-transfer`, never the re-attach text, so this regression of the action is not pinned.
-**Fix:** Keep both fixed clauses whole and let only variable text (the reason, the latch `kind`, the step key) be cut. For example make `_fit` take the front as `(variable_head, fixed_clause)` for the re-attach lines, or shorten the fixed wording after a restart (drop the duplicate "inspect the arm" that appears in both the latch clause and the restart clause). Add an assertion in `test_a_timed_out_re_attach_after_a_restart_keeps_both_guids` and the lost test that `re-run this step to re-attach` is in the message.
+**File:** `tools/tests/stack_test.py:3190-3277` (the iteration-2 WR-01 tests), source `tools/stack/server.py:1116-1119`
+**Issue:** All three "does not pin" tests and the "held while running" test start from `_ledger_pinned is None`. The
+`finally` restores `previous`, and the case where `previous` is a real directory (an earlier Transfer used the ledger,
+a later one writes nothing) is the one that guards CR-01 within a process. I mutated the line to
+`self._ledger_pinned = None` in a copy and ran `unittest tools.tests.stack_test` (269 tests): every ledger test
+still passed (the only error is `TestRequirementsPin`, caused by the core not being pip-installed in that copy). With
+that mutation, `Transfer(K1)` completes, `Transfer(K2)` fails at the plan or the claim, a Configure to another
+directory is accepted, and `Transfer(K1)` sends a second `execute_transfer`.
+**Fix:** add a test: Transfer succeeds (pin A), then a Transfer that returns `NeedsInput` (and one whose claim raises
+`unwritable`), assert `server._ledger_pinned == Path(ledger_dir)` and a Configure to another directory is
+refused (NOT_READY) and a repeat of the first key sends no `execute_transfer`.
 
 ## Info
 
-### IN-01: A Transfer refused because an AcknowledgeFailure holds the motion lock says "another Transfer is running"
+### IN-01: A Configure during a Transfer that has not written yet is refused with "after a Transfer has used the step ledger; restart the tool server"
 
-**File:** `tools/stack/server.py:179-181`, `tools/stack/server.py:1011-1013`, `tools/stack/server.py:1241-1248`
-**Issue:** The ack handler now takes `_MOTION_LOCK` for the duration of the core call. A Transfer that loses the lock to a concurrent acknowledge (both pass the status check in the check-then-set window) gets `_BUSY_MESSAGE`, "another Transfer is running in this tool", which is wrong for that case. The refusal is correct and safe; only the wording misleads. The window is short, so it is low impact.
-**Fix:** Word the Transfer busy message neutrally ("a Transfer or an AcknowledgeFailure is running in this tool"), or leave as is and document it.
+**File:** `tools/stack/server.py:179-181, 1091-1095`
+**Issue:** The pin is deliberately taken before the ledger is read (this closes the Configure race), so a Configure that
+lands while a Transfer is planning or waiting on the core is refused with the restart-the-server message, even when that
+Transfer later ends without writing and the pin is released. Restarting the tool server is wrong advice there (retrying
+after the Transfer ends works). The refusal is safe; the wording is misleading.
+**Fix:** none required; optionally a distinct message when `_MOTION_LOCK.locked()` ("a Transfer is running; retry
+Configure when it ends").
+
+### IN-02: `_fit` pathological branch duplicates the re-attach clause
+
+**File:** `tools/stack/server.py:419-426`
+**Issue:** The clause is moved from `rest` into `suffix` before the `room < 0` branch, which then returns
+`_one_line(front + suffix, limit)` with the original `front` (still ending in the clause) and the modified `suffix`
+(starting with it). The clause would appear twice in the (cut) line. Only reachable when suffix plus the task guid
+segment alone exceed the limit, which no caller produces; noted only because the iteration-2 change introduced it.
+**Fix:** in that branch, build the line from the stripped `head`/`rest` (`head + keep + rest + suffix`) instead of
+`front + suffix`.
 
 ---
 
 _Reviewed: 2026-10-30_
 _Reviewer: Claude (gsd-code-reviewer)_
-_Depth: standard (iteration 2)_
+_Depth: standard_
+_Iteration: 3_
