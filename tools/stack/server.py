@@ -43,6 +43,12 @@ from tools.grpc_interfaces.tool_base_pb2 import Command as ToolCommand
 
 DEFAULT_PORT = 5005
 
+# WR-01: the longest a Configure waits for in-flight commands to finish before
+# it refuses with "busy". A read ends within the core's transport timeouts; a
+# Phase 5 Transfer can run for minutes, and a Configure must not park a gRPC
+# worker (serve() has 10) behind it, so it is refused instead of queued.
+CONFIGURE_DRAIN_TIMEOUT_S = 5.0
+
 # D-01: every handler maps 1:1 onto one StackService method. The Phase 5
 # commands (Transfer, AcknowledgeFailure, GetFailureLatch) are not wired here.
 COMMAND_TO_SERVICE_METHOD = {
@@ -113,6 +119,11 @@ _SUCCESS_KINDS = frozenset({
     "failureAcknowledged",
     "ran",
 })
+
+
+class _ConfigureBusy(RuntimeError):
+    """A Configure that could not drain the in-flight commands in time. Unlike
+    every other Configure failure it leaves the current owner in place."""
 
 
 def _text_or_none(cmd: Any, field: str) -> Optional[str]:
@@ -321,13 +332,16 @@ class StackServer(ToolServer):
 
     def _teardown(self) -> None:
         """Drop the current owner, if any, so "no service" always holds after
-        this returns or raises (WR-01). The references are cleared before the
-        close: the core's OwnedService.close() marks itself closed before it
-        closes the transport, so a transport close that raises would otherwise
-        skip the lock release and leave a dead service looking usable. The
-        owner lock is therefore released in a finally (OwnerLock.release() is
-        idempotent), which is a no-op after a clean close."""
-        owned, self._owned, self.service = self._owned, None, None
+        this returns or raises (WR-01). The references are cleared first, under
+        _state so a command admitted later sees them change together, and the
+        close runs after, outside _state: the core's OwnedService.close() marks
+        itself closed before it closes the transport, so a transport close that
+        raises would otherwise skip the lock release and leave a dead service
+        looking usable. The owner lock is therefore released in a finally
+        (OwnerLock.release() is idempotent), which is a no-op after a clean
+        close. Callers hold _exclusive(), so no command is using the owner."""
+        with self._state:
+            owned, self._owned, self.service = self._owned, None, None
         if owned is None:
             return
         try:
@@ -342,27 +356,46 @@ class StackServer(ToolServer):
         as a failed open -- drops the current owner (WR-02), so the FAILED
         status base Configure then reports always means "no service": a read
         can never keep answering from a previously configured STACK while
-        GetStatus says the tool is not configured."""
-        with self._configure_lock, self._exclusive():
+        GetStatus says the tool is not configured. The one exception is a busy
+        refusal (_ConfigureBusy): nothing was changed, so a healthy owner is
+        kept rather than dropped for the sake of a retry."""
+        with self._configure_lock:
             try:
                 self._apply_config(config)
-            except BaseException:
-                self._teardown()
+            except _ConfigureBusy:
+                raise
+            except BaseException as exc:
+                if self._owned is not None:
+                    # Validation failed before the swap: the owner is still
+                    # there. Dropping it needs the same drain as a swap.
+                    try:
+                        with self._exclusive():
+                            self._teardown()
+                    except _ConfigureBusy as busy:
+                        raise busy from exc
                 raise
 
     @contextlib.contextmanager
     def _exclusive(self) -> Iterator[None]:
-        """WR-03: hold off new real-mode commands, wait for the in-flight ones
-        to finish, then run the body with no command touching the owner, so a
-        bypassed read never talks to a transport Configure just closed and
-        _owned/service change together. Waits for the in-flight commands
-        indefinitely: each is bounded by the core's transport timeouts."""
+        """WR-01/WR-03: hold off new real-mode commands and wait, for at most
+        CONFIGURE_DRAIN_TIMEOUT_S, for the in-flight ones to finish. On timeout
+        raise _ConfigureBusy having changed nothing. Otherwise run the body
+        with no command touching the owner, so a read never meets a transport
+        Configure just closed. _state is held only for the wait and the flag
+        flips, never across the body's I/O (open_service)."""
         with self._state:
             self._reconfiguring = True
-            try:
-                self._state.wait_for(lambda: not self._readers)
-                yield
-            finally:
+            if not self._state.wait_for(
+                    lambda: not self._readers, timeout=CONFIGURE_DRAIN_TIMEOUT_S):
+                self._reconfiguring = False
+                self._state.notify_all()
+                raise _ConfigureBusy(
+                    "stack: busy, a command is still running; "
+                    "retry Configure when it ends")
+        try:
+            yield
+        finally:
+            with self._state:
                 self._reconfiguring = False
                 self._state.notify_all()
 
@@ -400,14 +433,20 @@ class StackServer(ToolServer):
         # Recorded only: nothing touches this path here (Phase 5 owns the ledger).
         self._ledger_dir = config.ledger_dir
         key = endpoint_key(host, port)
+        # Only Configures change _owned, and they are serialised, so this read
+        # needs no lock. An unchanged endpoint changes nothing, so it must not
+        # drain (or refuse as busy) while commands are running.
         if self._owned is not None and self._owned.endpoint == key:
             return
-        # Close-first: release the old owner lock before opening the new
-        # endpoint, so a failed open leaves this tool holding no lock and no
-        # service.
-        self._teardown()
-        self._owned = open_service(host, port, owner="galago")
-        self.service = self._owned.service
+        with self._exclusive():
+            # Close-first: release the old owner lock before opening the new
+            # endpoint, so a failed open leaves this tool holding no lock and
+            # no service.
+            self._teardown()
+            owned = open_service(host, port, owner="galago")
+            with self._state:
+                self._owned = owned
+                self.service = owned.service
         logging.warning(_RESTART_WARNING)
 
     def ExecuteCommand(

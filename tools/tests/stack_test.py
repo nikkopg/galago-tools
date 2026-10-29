@@ -749,6 +749,133 @@ class TestConfigureConcurrency(_StackTestCase):
             acquire_owner_lock("127.0.0.1", final, owner="mcp", lock_dir=self.lock_dir)
 
 
+class TestConfigureBusy(_StackTestCase):
+    """WR-01: Configure's drain of in-flight commands is bounded and refuses
+    with "busy" without dropping a healthy owner; an unchanged endpoint never
+    drains; the I/O-heavy open runs outside _state."""
+
+    def _two_ports(self) -> tuple[int, int]:
+        port_a, port_b = _free_tcp_port(), _free_tcp_port()
+        while port_b == port_a:
+            port_b = _free_tcp_port()
+        return port_a, port_b
+
+    def _read(self, stub: ToolDriverStub) -> tool_base_pb2.ExecuteCommandReply:
+        return stub.ExecuteCommand(tool_base_pb2.Command(  # type: ignore[no-any-return]
+            stack=stack_pb2.Command(get_manager_state=stack_pb2.Command.GetManagerState())))
+
+    def _park_a_read(self, stub: ToolDriverStub, transport: MagicMock) -> dict[str, Any]:
+        """Start a read that stays in flight until the returned release()."""
+        entered, release = threading.Event(), threading.Event()
+        results: dict[str, Any] = {}
+
+        def _slow_read() -> dict[str, str]:
+            entered.set()
+            release.wait(timeout=10)
+            return {"managerState": "Idle"}
+
+        transport.get_manager_state.side_effect = _slow_read
+        thread = threading.Thread(target=lambda: results.__setitem__("read", self._read(stub)))
+        thread.start()
+        self.addCleanup(thread.join, 10)
+        self.addCleanup(release.set)
+        self.assertTrue(entered.wait(timeout=5))
+        results["release"] = release
+        results["thread"] = thread
+        return results
+
+    def test_busy_configure_refuses_and_keeps_the_healthy_owner(self) -> None:
+        port_a, port_b = self._two_ports()
+        transport = _fake_transport()
+        opener = MagicMock(side_effect=_fake_open_service(transport))
+        configs = {
+            "new endpoint": _real_config("127.0.0.1", port_b),
+            "malformed": _real_config("   ", port_a),
+        }
+        with patch("tools.stack.server.open_service", opener), \
+                patch("tools.stack.server.CONFIGURE_DRAIN_TIMEOUT_S", 0.05):
+            server = StackServer()
+            stub = _serve_in_process(self, server)
+            self.assertEqual(stub.Configure(_real_config("127.0.0.1", port_a)).response, SUCCESS)
+            owned = server._owned
+            assert owned is not None
+            parked = self._park_a_read(stub, transport)
+            for label, config in configs.items():
+                with self.subTest(label):
+                    reply = stub.Configure(config)
+                    self.assertEqual(reply.response, NOT_READY)
+                    self.assertIn("stack: busy", reply.error_message)
+                    self.assertNotIn("\n", reply.error_message)
+                    self.assertEqual(opener.call_count, 1)
+                    # The healthy owner was neither closed nor dropped.
+                    self.assertIs(server._owned, owned)
+                    self.assertIs(server.service, owned.service)
+                    self.assertFalse(owned._closed)
+                    with self.assertRaises(StackOwnedError):
+                        acquire_owner_lock(
+                            "127.0.0.1", port_a, owner="mcp", lock_dir=self.lock_dir)
+            parked["release"].set()
+            parked["thread"].join(10)
+            self.assertEqual(parked["read"].response, SUCCESS)
+            # With nothing in flight the same Configure now goes through.
+            transport.get_manager_state.side_effect = None
+            self.assertEqual(stub.Configure(configs["new endpoint"]).response, SUCCESS)
+            assert server._owned is not None
+            self.assertEqual(server._owned.endpoint, f"127.0.0.1:{port_b}")
+            self.assertTrue(owned._closed)
+
+    def test_same_endpoint_configure_does_not_drain(self) -> None:
+        port_a, _ = self._two_ports()
+        transport = _fake_transport()
+        opener = MagicMock(side_effect=_fake_open_service(transport))
+        with patch("tools.stack.server.open_service", opener), \
+                patch("tools.stack.server.CONFIGURE_DRAIN_TIMEOUT_S", 0.05):
+            server = StackServer()
+            stub = _serve_in_process(self, server)
+            self.assertEqual(stub.Configure(_real_config("127.0.0.1", port_a)).response, SUCCESS)
+            owned = server._owned
+            parked = self._park_a_read(stub, transport)
+            # A drain would time out as "busy"; an unchanged endpoint returns.
+            reply = stub.Configure(_real_config("127.0.0.1", port_a))
+            self.assertEqual(reply.response, SUCCESS, reply.error_message)
+            self.assertEqual(opener.call_count, 1)
+            self.assertIs(server._owned, owned)
+            parked["release"].set()
+            parked["thread"].join(10)
+
+    def test_open_service_runs_without_holding_state(self) -> None:
+        port_a, _ = self._two_ports()
+        fake_open = _fake_open_service(_fake_transport())
+        entered, release = threading.Event(), threading.Event()
+        probe: list[bool] = []
+
+        def blocking_open(host: str, port: int, *, owner: str) -> Any:
+            entered.set()
+            release.wait(timeout=10)
+            return fake_open(host, port, owner=owner)
+
+        with patch("tools.stack.server.open_service", blocking_open):
+            server = StackServer()
+            stub = _serve_in_process(self, server)
+            results: dict[str, Any] = {}
+            thread = threading.Thread(target=lambda: results.__setitem__(
+                "configure", stub.Configure(_real_config("127.0.0.1", port_a))))
+            thread.start()
+            self.addCleanup(thread.join, 10)
+            self.addCleanup(release.set)
+            self.assertTrue(entered.wait(timeout=5))
+            # Configure is inside open_service. _state must be free: a command
+            # (or GetStatus) can take it without waiting for the network.
+            got = server._state.acquire(blocking=False)
+            probe.append(got)
+            if got:
+                server._state.release()
+            self.assertEqual(probe, [True])
+            release.set()
+            thread.join(10)
+        self.assertEqual(results["configure"].response, SUCCESS)
+
+
 class TestConfigureWarning(_StackTestCase):
     """D-09: a fresh open warns once that a restart clears the core's latch."""
 
