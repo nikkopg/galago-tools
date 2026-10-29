@@ -1108,7 +1108,8 @@ _MCP_MODULE = "stack_automation_layer.mcp"
 # stack-server host must never appear in adapter code (hard constraints).
 _FORBIDDEN_LITERALS = (_MCP_MODULE, "10.150.1.125", "stack-server")
 _REQUIRED_FUNCTIONS = (
-    "_configure", "_result_reply", "GetManagerState", "_run_fresh", "Transfer")
+    "_configure", "_result_reply", "GetManagerState", "_run_fresh", "Transfer",
+    "AcknowledgeFailure", "GetFailureLatch")
 # D-16 call-site rules: each of these has exactly one call site, in the named
 # function; execute_transfer additionally never sits in a loop and always after
 # the write-ahead claim; acknowledge_failure may appear only in its handler.
@@ -1118,6 +1119,8 @@ _LOOP_NODES = (ast.For, ast.AsyncFor, ast.While, ast.ListComp, ast.SetComp,
 _WRITE_AHEAD_CALL = "claim"
 _ACK_CALL = "acknowledge_failure"
 _ACK_HANDLER = "AcknowledgeFailure"
+# The handler must compare against this constant before its one acknowledge call.
+_ACK_YES_CONSTANT = "yes"
 
 
 def _name_of(func: ast.expr) -> Optional[str]:
@@ -1154,7 +1157,8 @@ def _stack_adapter_violations(trees: dict[str, ast.Module]) -> list[str]:
     called; execute_transfer and plan_transfer each have exactly one call site
     across all modules, inside _run_fresh; execute_transfer has no loop,
     comprehension or lambda ancestor and sits after the write-ahead claim call;
-    acknowledge_failure appears only inside AcknowledgeFailure, at most once;
+    acknowledge_failure appears exactly once, inside AcknowledgeFailure, after a
+    comparison against the constant "yes" in that function;
     none of these is reached through getattr with a string or held as an
     uncalled attribute. wait_transfer and wait are read-only and unrestricted."""
     violations: list[str] = []
@@ -1222,13 +1226,22 @@ def _stack_adapter_violations(trees: dict[str, ast.Module]) -> list[str]:
     for call_name in (*_SINGLE_SITE_CALLS, _ACK_CALL):
         found = sites.get(call_name, [])
         home = _SINGLE_SITE_CALLS.get(call_name, _ACK_HANDLER)
-        # Zero acknowledge_failure calls is allowed until the handler is wired.
-        if len(found) > 1 or (len(found) != 1 and call_name in _SINGLE_SITE_CALLS):
+        if len(found) != 1:
             violations.append(
                 f"tools/stack: {call_name}() must have exactly one call site, found {len(found)}")
         for at, enclosing, _call, _parents in found:
             if enclosing is None or enclosing.name != home:
                 violations.append(f"{at}: {call_name}() called outside {home}")
+    for at, enclosing, call, _parents in sites.get(_ACK_CALL, []):
+        if enclosing is not None and enclosing.name == _ACK_HANDLER:
+            checks = [
+                c for c in ast.walk(enclosing)
+                if isinstance(c, ast.Compare) and any(
+                    isinstance(operand, ast.Constant) and operand.value == _ACK_YES_CONSTANT
+                    for operand in (c.left, *c.comparators))]
+            if not any(c.lineno < call.lineno for c in checks):
+                violations.append(
+                    f"{at}: acknowledge_failure() without a preceding {_ACK_YES_CONSTANT!r} check")
     for at, enclosing, call, parents in sites.get("execute_transfer", []):
         ancestor = parents.get(call)
         while ancestor is not None:
@@ -1457,14 +1470,55 @@ class TestAdapterInvariant(unittest.TestCase):
     def test_a_second_acknowledge_failure_call_is_reported(self) -> None:
         self._assert_reported(
             _plant(self.server, "AcknowledgeFailure",
-                   'self.service.acknowledge_failure("g", confirm=True)\n'
                    'self.service.acknowledge_failure("g", confirm=True)'),
             "exactly one call site")
 
-    def test_one_acknowledge_failure_call_inside_its_handler_is_allowed(self) -> None:
-        self._assert_clean(
-            _plant(self.server, "AcknowledgeFailure",
-                   'self.service.acknowledge_failure("g", confirm=True)'))
+    def test_removing_the_real_acknowledge_failure_call_is_reported(self) -> None:
+        self._assert_reported(
+            self._renamed_call("acknowledge_failure", "acknowledge_failure_renamed"),
+            "acknowledge_failure() must have exactly one call site, found 0")
+
+    def test_acknowledge_failure_planted_in_transfer_is_reported(self) -> None:
+        self._assert_reported(
+            _plant(self.server, "Transfer",
+                   'self.service.acknowledge_failure("g", confirm=True)'),
+            "outside AcknowledgeFailure")
+
+    def _handler(self, tree: ast.Module) -> ast.FunctionDef:
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == _ACK_HANDLER:
+                return node
+        raise AssertionError("no AcknowledgeFailure handler")
+
+    def test_the_real_handler_has_exactly_one_call_after_a_yes_check(self) -> None:
+        handler = self._handler(self.server)
+        calls = [n for n in ast.walk(handler) if isinstance(n, ast.Call)
+                 and _name_of(n.func) == _ACK_CALL]
+        self.assertEqual(len(calls), 1)
+        self._assert_clean(self.server)
+
+    def test_deleting_the_yes_comparison_from_the_handler_is_reported(self) -> None:
+        tree = copy.deepcopy(self.server)
+        for node in ast.walk(self._handler(tree)):
+            if isinstance(node, ast.Constant) and node.value == _ACK_YES_CONSTANT:
+                node.value = "nope"
+        self._assert_reported(tree, "without a preceding 'yes' check")
+
+    def test_a_yes_comparison_after_the_call_does_not_count(self) -> None:
+        tree = copy.deepcopy(self.server)
+        handler = self._handler(tree)
+        guard = next(n for n in handler.body if any(
+            isinstance(c, ast.Compare) for c in ast.walk(n)))
+        ast.increment_lineno(guard, 1000)
+        self._assert_reported(tree, "without a preceding 'yes' check")
+
+    def test_a_yes_comparison_elsewhere_does_not_cover_the_handler(self) -> None:
+        tree = copy.deepcopy(self.server)
+        for node in ast.walk(self._handler(tree)):
+            if isinstance(node, ast.Constant) and node.value == _ACK_YES_CONSTANT:
+                node.value = "nope"
+        planted = _plant(tree, "GetManagerState", 'x = "yes" == "yes"')
+        self._assert_reported(planted, "without a preceding 'yes' check")
 
     def test_the_call_site_count_spans_every_stack_module(self) -> None:
         trees = dict(self.trees)
@@ -1477,7 +1531,7 @@ class TestAdapterInvariant(unittest.TestCase):
             'for _ in range(3):\n    service.wait_transfer("g", timeout_s=1.0)'))
 
     def test_the_fresh_path_and_transfer_are_required_functions(self) -> None:
-        for required in ("_run_fresh", "Transfer"):
+        for required in ("_run_fresh", "Transfer", "AcknowledgeFailure", "GetFailureLatch"):
             with self.subTest(required=required):
                 self.assertIn(required, _REQUIRED_FUNCTIONS)
                 tree = copy.deepcopy(self.server)
@@ -2026,12 +2080,12 @@ class TestReadCommands(_RealModeGrpcTestCase):
 
 
 class TestOneToOneSurface(_StackTestCase):
-    def test_map_has_eight_keys_matching_the_oneof_names(self) -> None:
+    def test_map_has_nine_keys_matching_the_oneof_names(self) -> None:
         mapping = stack_server.COMMAND_TO_SERVICE_METHOD
-        self.assertEqual(len(mapping), 8)
+        self.assertEqual(len(mapping), 9)
         oneof = stack_pb2.Command.DESCRIPTOR.oneofs_by_name["command"].fields
         names = {f.message_type.name for f in oneof}
-        self.assertEqual(set(mapping) | {"Transfer", "AcknowledgeFailure"}, names)
+        self.assertEqual(set(mapping) | {"Transfer"}, names)
 
     def test_every_oneof_message_has_a_handler_and_the_sets_are_disjoint(self) -> None:
         oneof = stack_pb2.Command.DESCRIPTOR.oneofs_by_name["command"].fields
@@ -2041,8 +2095,8 @@ class TestOneToOneSurface(_StackTestCase):
         for name in names:
             self.assertTrue(callable(getattr(server, name, None)), name)
         mapped = set(stack_server.COMMAND_TO_SERVICE_METHOD)
-        self.assertEqual(mapped & stack_server.UNAVAILABLE_COMMANDS, set())
-        self.assertEqual(mapped | stack_server.UNAVAILABLE_COMMANDS | {"Transfer"}, names)
+        self.assertNotIn("Transfer", mapped)
+        self.assertEqual(mapped | {"Transfer"}, names)
 
     def test_every_key_is_a_server_method_and_every_value_a_service_method(self) -> None:
         server = StackServer()
@@ -2061,6 +2115,8 @@ class TestOneToOneSurface(_StackTestCase):
             "labware_presence": LabwarePresence(robot_name="R1", has_labware=False),
             "estimate_transfer": Estimated(estimated_time="00:00:01", guid=None),
             "latch_status": LatchStatus(latched=False),
+            "acknowledge_failure": FailureAcknowledged(
+                guid="g", result_kind="failed", explanation=None),
         }
         messages = {
             "GetManagerState": stack_pb2.Command.GetManagerState(),
@@ -2071,6 +2127,8 @@ class TestOneToOneSurface(_StackTestCase):
             "GetLabwarePresence": stack_pb2.Command.GetLabwarePresence(robot="R1"),
             "GetTransferEstimate": stack_pb2.Command.GetTransferEstimate(**_ESTIMATE_FIELDS),
             "GetFailureLatch": stack_pb2.Command.GetFailureLatch(),
+            "AcknowledgeFailure": stack_pb2.Command.AcknowledgeFailure(
+                guid="g", arm_inspected="yes"),
         }
         self.assertEqual(set(messages), set(stack_server.COMMAND_TO_SERVICE_METHOD))
         for command, method in stack_server.COMMAND_TO_SERVICE_METHOD.items():
@@ -2083,6 +2141,9 @@ class TestOneToOneSurface(_StackTestCase):
                 reply = getattr(server, command)(messages[command])
                 self.assertEqual(reply.response, SUCCESS)
                 self.assertEqual([c[0] for c in service.mock_calls], [method])
+                if method == "acknowledge_failure":
+                    self.assertEqual(service.mock_calls,
+                                     [mock_call.acknowledge_failure("g", confirm=True)])
 
 
 _SENTINEL = "AGENT-WORDS-SENTINEL"
@@ -2435,45 +2496,134 @@ class TestCheckArgs(unittest.TestCase):
         self.assertEqual(self._problems("GetTransferEstimate", robot="", source_nest=" "), [])
 
 
-_REFUSALS = {
-    "AcknowledgeFailure": "stack: AcknowledgeFailure is not available in this build",
-}
+def _ack_message(guid: str = "g-1", **fields: Any) -> stack_pb2.Command.AcknowledgeFailure:
+    return stack_pb2.Command.AcknowledgeFailure(guid=guid, **fields)
 
 
-class TestRealModeRefusals(_RealModeGrpcTestCase):
-    """STK-05 / T-04-15: the two not-yet-wired Phase 5 commands are refused in
-    real mode with no service call; adapter arguments are checked before the
-    refusal. Transfer is wired (plan 05-02) and has its own test classes."""
+# Everything except the exact string "yes": the operator must state it, and
+# nothing close to it counts (T-05-13). "ｙｅｓ" is the full-width form.
+_NOT_YES = ("no", "Yes", "YES", " yes", "yes ", "yes\n", "y", "true", "ｙｅｓ", "")
 
-    def test_valid_phase_5_commands_are_refused_without_a_service_call(self) -> None:
-        commands = {
-            "AcknowledgeFailure": self._stack(
-                acknowledge_failure=stack_pb2.Command.AcknowledgeFailure(
-                    guid="g", arm_inspected="yes")),
-        }
-        for name, command in commands.items():
-            with self.subTest(name):
-                reply = self.stub.ExecuteCommand(command)
-                self.assertEqual(reply.response, ERROR_FROM_TOOL)
-                self.assertEqual(reply.error_message, _REFUSALS[name])
-        self.assertEqual(self.service.mock_calls, [])
+
+class TestAcknowledge(_RealModeGrpcTestCase):
+    """ACK-01 / D-14: AcknowledgeFailure reaches the core only with an exact
+    "yes", exactly once, with the guid stripped and confirm=True."""
+
+    def _ack(self, guid: str = "g-1", **fields: Any) -> Any:
+        return self.stub.ExecuteCommand(self._stack(
+            acknowledge_failure=_ack_message(guid, **fields)))
+
+    def test_yes_reaches_the_core_once_with_a_stripped_guid_and_confirm(self) -> None:
+        result = FailureAcknowledged(guid="g-1", result_kind="failed", explanation=_SENTINEL)
+        self.service.acknowledge_failure.return_value = result
+        reply = self._ack("  g-1 ", arm_inspected="yes")
+        self.assertEqual(reply.response, SUCCESS, reply.error_message)
+        self.assertEqual(reply.error_message, "")
+        self.assertEqual(reply.meta_data, _struct(result.to_dict()))
+        self.assertEqual(self.service.mock_calls,
+                         [mock_call.acknowledge_failure("g-1", confirm=True)])
         self.assertEqual(self._health().status, READY)
 
-    def test_bad_arguments_win_over_the_refusal(self) -> None:
-        for label, command in (
-            ("transfer", self._stack(transfer=stack_pb2.Command.Transfer())),
-            ("ack", self._stack(acknowledge_failure=stack_pb2.Command.AcknowledgeFailure(
-                guid="g", arm_inspected="Yes"))),
-        ):
-            with self.subTest(label):
-                reply = self.stub.ExecuteCommand(command)
+    def test_every_core_refusal_and_failure_is_error_from_tool(self) -> None:
+        answers = (
+            ("refused", Refused(reason="guidMismatch", state="x")),
+            ("refused", Refused(reason="nothingLatched", state="x")),
+            ("refused", Refused(reason="recoveryPending", state="x")),
+            ("refused", Refused(reason="stateUnsaved", state="x")),
+            ("needsInput", NeedsInput(missing=["guid"])),
+            ("readFailed", ReadFailed(error={"status": None, "name": "ConnectError"})),
+        )
+        for kind, answer in answers:
+            with self.subTest(kind=kind, answer=answer.to_dict().get("reason")):
+                self.service.reset_mock()
+                self.service.acknowledge_failure.return_value = answer
+                reply = self._ack(arm_inspected="yes")
+                self.assertEqual(reply.response, ERROR_FROM_TOOL)
+                self.assertTrue(reply.error_message.startswith(f"stack: {kind}"),
+                                reply.error_message)
+                self.assertEqual(reply.meta_data, _struct(answer.to_dict()))
+                self.assertEqual(len(self.service.mock_calls), 1)
+
+    def test_anything_but_an_exact_yes_is_invalid_arguments_with_no_core_call(self) -> None:
+        for bad in _NOT_YES:
+            with self.subTest(arm_inspected=bad):
+                reply = self._ack(arm_inspected=bad)
+                self.assertEqual(reply.response, tool_base_pb2.INVALID_ARGUMENTS)
+                self.assertEqual(self.service.mock_calls, [])
+        with self.subTest("unset"):
+            reply = self._ack()
+            self.assertEqual(reply.response, tool_base_pb2.INVALID_ARGUMENTS)
+            self.assertEqual(self.service.mock_calls, [])
+        self.assertEqual(self._health().status, READY)
+
+    def test_a_valid_no_says_what_to_do(self) -> None:
+        reply = self._ack(arm_inspected="no")
+        self.assertEqual(reply.response, tool_base_pb2.INVALID_ARGUMENTS)
+        self.assertIn("exactly 'yes'", reply.error_message)
+        self.assertIn("inspect the arm", reply.error_message)
+
+    def test_the_handler_called_directly_enforces_the_gate_too(self) -> None:
+        for bad in _NOT_YES:
+            with self.subTest(arm_inspected=bad):
+                reply = self.server.AcknowledgeFailure(_ack_message("g", arm_inspected=bad))
+                self.assertEqual(reply.response, tool_base_pb2.INVALID_ARGUMENTS)
+        reply = self.server.AcknowledgeFailure(_ack_message("g"))
+        self.assertEqual(reply.response, tool_base_pb2.INVALID_ARGUMENTS)
+        self.assertEqual(self.service.mock_calls, [])
+
+    def test_the_gate_wins_over_not_configured_and_makes_no_core_contact(self) -> None:
+        self.server.service = None
+        for bad in ("no", "Yes", ""):
+            with self.subTest(arm_inspected=bad):
+                reply = self._ack("g", arm_inspected=bad)
+                self.assertEqual(reply.response, tool_base_pb2.INVALID_ARGUMENTS)
+        direct = self.server.AcknowledgeFailure(_ack_message("g", arm_inspected="no"))
+        self.assertEqual(direct.response, tool_base_pb2.INVALID_ARGUMENTS)
+        self.assertEqual(self.service.mock_calls, [])
+
+    def test_a_blank_guid_never_reaches_the_core(self) -> None:
+        for guid in ("", "   "):
+            with self.subTest(guid=guid):
+                reply = self._ack(guid, arm_inspected="yes")
                 self.assertEqual(reply.response, tool_base_pb2.INVALID_ARGUMENTS)
         self.assertEqual(self.service.mock_calls, [])
 
+    def test_a_yes_acknowledge_with_no_service_is_not_ready(self) -> None:
+        self.server.service = None
+        reply = self._ack("g", arm_inspected="yes")
+        self.assertEqual(reply.response, NOT_READY)
+        self.assertEqual(reply.error_message, "stack: not configured")
 
-class TestRealModeRefusalsOrdering(_StackTestCase):
-    """D-14: with no service the not-yet-wired refusals still win over
-    not-configured; an unconfigured Transfer is NOT_READY."""
+
+class TestAcknowledgeLeavesTheLedgerAlone(_TransferTestCase):
+    """ACK-01 / D-15: an acknowledge never reads, writes or deletes a record."""
+
+    def test_the_ledger_bytes_are_identical_across_an_acknowledge(self) -> None:
+        self.core.wait_result = Failed(task=_snapshot("g-task"))
+        self.assertEqual(self._transfer().response, ERROR_FROM_TOOL)
+        with open(self.ledger_path, "rb") as handle:
+            before = handle.read()
+        mtime = os.stat(self.ledger_path).st_mtime_ns
+        reply = self.stub.ExecuteCommand(self._stack(
+            acknowledge_failure=_ack_message(_GUID, arm_inspected="yes")))
+        self.assertEqual(reply.response, SUCCESS, reply.error_message)
+        self.assertEqual(self.core.call_names[-1], "acknowledge_failure")
+        with open(self.ledger_path, "rb") as handle:
+            self.assertEqual(handle.read(), before)
+        self.assertEqual(os.stat(self.ledger_path).st_mtime_ns, mtime)
+
+    def test_an_acknowledge_with_no_ledger_directory_creates_none(self) -> None:
+        reply = self.stub.ExecuteCommand(self._stack(
+            acknowledge_failure=_ack_message(_GUID, arm_inspected="yes")))
+        self.assertEqual(reply.response, SUCCESS, reply.error_message)
+        self.assertFalse(os.path.exists(self.ledger_dir))
+        self.assertEqual(self.core.call_names, ["acknowledge_failure"])
+        self.assertEqual(self.core.calls[0][2], {"confirm": True})
+
+
+class TestUnconfiguredOrdering(_StackTestCase):
+    """D-14: with no service every real-mode command is NOT_READY (the Phase 4
+    not-yet-available refusals are gone); adapter arguments are checked first."""
 
     def setUp(self) -> None:
         super().setUp()
@@ -2484,30 +2634,26 @@ class TestRealModeRefusalsOrdering(_StackTestCase):
     def _dispatch(self, name: str, **fields: Any) -> Any:
         return self.server._dispatchCommand(getattr(stack_pb2.Command, name)(**fields))
 
-    def test_the_latch_is_not_ready_when_unconfigured(self) -> None:
-        reply = self._dispatch("GetFailureLatch")
-        self.assertEqual(reply.response, NOT_READY)
-        self.assertEqual(reply.error_message, "stack: not configured")
-
-    def test_ack_with_good_arguments_is_refused_not_unconfigured(self) -> None:
-        reply = self._dispatch("AcknowledgeFailure", guid="g", arm_inspected="no")
-        self.assertEqual(reply.error_message, _REFUSALS["AcknowledgeFailure"])
-
-    def test_an_unconfigured_transfer_with_a_step_key_is_not_ready(self) -> None:
-        reply = self._dispatch("Transfer", step_key="k")
-        self.assertEqual(reply.response, NOT_READY)
-        self.assertEqual(reply.error_message, "stack: not configured")
-
-    def test_reads_and_estimate_are_not_ready(self) -> None:
-        for name in ("GetManagerState", "GetRobotStates", "ListDevices", "ListLabwareProfiles",
-                     "ListTransferProfiles", "GetLabwarePresence", "GetTransferEstimate"):
+    def test_every_command_with_good_arguments_is_not_ready(self) -> None:
+        for name, fields in (
+            ("Transfer", {"step_key": "k"}),
+            ("AcknowledgeFailure", {"guid": "g", "arm_inspected": "yes"}),
+            ("GetFailureLatch", {}),
+            ("GetManagerState", {}), ("GetRobotStates", {}), ("ListDevices", {}),
+            ("ListLabwareProfiles", {}), ("ListTransferProfiles", {}),
+            ("GetLabwarePresence", {}), ("GetTransferEstimate", {}),
+        ):
             with self.subTest(name):
-                reply = self._dispatch(name)
+                reply = self._dispatch(name, **fields)
                 self.assertEqual(reply.response, NOT_READY)
                 self.assertEqual(reply.error_message, "stack: not configured")
 
     def test_transfer_without_step_key_is_invalid_arguments(self) -> None:
         self.assertEqual(self._dispatch("Transfer").response, tool_base_pb2.INVALID_ARGUMENTS)
+
+    def test_the_refusal_machinery_is_gone(self) -> None:
+        self.assertFalse(hasattr(stack_server, "UNAVAILABLE_COMMANDS"))
+        self.assertFalse(hasattr(stack_server, "_unavailable_reply"))
 
 
 _ESTIMATE_CONSTANTS = {
