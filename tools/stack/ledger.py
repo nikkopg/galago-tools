@@ -54,6 +54,9 @@ _LOCK_POLL_S = 0.01
 # only while 0 <= age < REPLAY_WINDOW_S.
 REPLAY_WINDOW_S = 600.0
 
+# 7 days: a write prunes ``done`` records older than this (never any other state).
+RETENTION_DONE_S = 604800.0
+
 # What decide() can answer, one per row of the repeat-key table.
 FRESH = "fresh"
 MISMATCH = "mismatch"
@@ -118,7 +121,11 @@ def is_terminal(result: Mapping[str, Any]) -> bool:
     ``failed`` or ``aborted``, or ``lost`` with reason ``taskNotFound`` -- the
     core's own ``_task_ended`` set. ``timedOut``, ``lost(pollFailed)``,
     ``cancelled`` and anything else leave the record ``started``."""
+    if not isinstance(result, Mapping):
+        return False
     kind = result.get("kind")
+    if not isinstance(kind, str):
+        return False
     if kind in _TERMINAL_KINDS:
         return True
     return kind == "lost" and result.get("reason") == "taskNotFound"
@@ -183,6 +190,21 @@ def decide(
         return Decision(REFUSE_COMPLETED, restarted, held)
     # outcomeUnknown, and any state this version does not know: never re-send.
     return Decision(REFUSE_OUTCOME_UNKNOWN, restarted, held)
+
+
+def _prune(records: dict[str, dict[str, Any]], now: datetime) -> bool:
+    """Drop ``done`` records whose ``updatedAt`` is more than RETENTION_DONE_S
+    old. Every other state is kept whatever its age, and so is a ``done``
+    record whose age cannot be computed. Returns True when anything was
+    dropped."""
+    expired = [
+        key for key, record in records.items()
+        if record.get("state") == "done"
+        and (_age_s(record, now) or 0.0) > RETENTION_DONE_S
+    ]
+    for key in expired:
+        del records[key]
+    return bool(expired)
 
 
 def _fsync_dir(directory: Path) -> None:
@@ -325,7 +347,7 @@ class Ledger:
             }
             return True, True
 
-        return self._mutate(change)
+        return self._mutate(change, now)
 
     def mark_started(self, key: str, *, handle: dict[str, Any], now: datetime) -> None:
         """Record the task handle the core returned. The record must exist."""
@@ -338,10 +360,14 @@ class Ledger:
             record["updatedAt"] = stamp
             return None, True
 
-        self._mutate(change)
+        self._mutate(change, now)
 
     def mark_done(self, key: str, *, result: dict[str, Any], now: datetime) -> None:
-        """Record the terminal outcome. The record must exist."""
+        """Record the terminal outcome. The record must exist. A-1: a result
+        that is not terminal (``is_terminal``) raises ValueError and changes
+        nothing, so the record stays ``started``."""
+        if not is_terminal(result):
+            raise ValueError("ledger: only a terminal result may be recorded as done")
         stamp = _stamp(now)
 
         def change(records: dict[str, dict[str, Any]]) -> tuple[None, bool]:
@@ -351,7 +377,48 @@ class Ledger:
             record["updatedAt"] = stamp
             return None, True
 
-        self._mutate(change)
+        self._mutate(change, now)
+
+    def mark_outcome_unknown(
+        self, key: str, *, latch_guid: Optional[str], now: datetime
+    ) -> None:
+        """A-5: the submit outcome is unknown. The record is never deleted
+        after this. ``latch_guid`` is what ``latch_status()`` named at that
+        moment (a string), or None when the core was not latched."""
+        stamp = _stamp(now)
+
+        def change(records: dict[str, dict[str, Any]]) -> tuple[None, bool]:
+            record = self._existing(records, key)
+            record["state"] = "outcomeUnknown"
+            record["latchGuid"] = latch_guid
+            record["updatedAt"] = stamp
+            return None, True
+
+        self._mutate(change, now)
+
+    def release(self, key: str, *, now: datetime) -> None:
+        """XFR-04: delete ``key`` because nothing was sent. Only that key is
+        touched, and an absent key is a no-op that writes nothing."""
+        _stamp(now)
+
+        def change(records: dict[str, dict[str, Any]]) -> tuple[None, bool]:
+            if key not in records:
+                return None, False
+            del records[key]
+            return None, True
+
+        self._mutate(change, now)
+
+    def find_by_guid(self, guid: str) -> Optional[str]:
+        """The step key whose recorded task handle has this guid, else None.
+        A read-only strict load (it never writes, prunes or creates)."""
+        if not guid:
+            return None
+        for key, record in sorted(self.load().items()):
+            handle = record.get("handle")
+            if isinstance(handle, dict) and handle.get("guid") == guid:
+                return key
+        return None
 
     def _existing(self, records: dict[str, dict[str, Any]], key: str) -> dict[str, Any]:
         record = records.get(key)
@@ -359,11 +426,14 @@ class Ledger:
             raise LedgerError("missing", str(self.path))
         return record
 
-    def _mutate(self, change: Callable[[dict[str, dict[str, Any]]], tuple[_T, bool]]) -> _T:
+    def _mutate(
+        self, change: Callable[[dict[str, dict[str, Any]]], tuple[_T, bool]], now: datetime
+    ) -> _T:
         """One read-modify-write under the flock. ``change`` edits the records
         in place and returns ``(value, changed)``; the file is saved only when
-        ``changed``. The flock is held only around this, never across a
-        transfer."""
+        ``changed``, and a save first prunes expired ``done`` records (D-08
+        retention: a write only, never a load). The flock is held only around
+        this, never across a transfer."""
         try:
             import fcntl
         except ImportError:
@@ -391,6 +461,7 @@ class Ledger:
                 records = self._parse(self._read())
                 value, changed = change(records)
                 if changed:
+                    _prune(records, now)
                     self._save(records)
                 return value
             finally:
