@@ -53,4 +53,6 @@ findings:
 
 Fix iteration 1 (2026-10-30): CR-01, WR-01..WR-05 fixed (9d6bc4d..ff56c2d, see 05-REVIEW-FIX.md). WR-06 accepted by the user (XFR-04 kept as written; residual risk for the Phase 7 runbook). Info findings open.
 
+Iteration 2 (2026-10-30): the new iteration-2 WR-01 (pin only when a record can exist) and WR-02 (keep the re-attach clause whole) were fixed in 093e681 and 8f86382. The user decided to keep the pin on an untrusted ledger file (ba9fe65). Iteration-2 IN-01 (busy wording) was skipped because the wording is a binding 05-SPIKE.md template.
+
 Residual from CR-01 for the Phase 7 runbook: the ledger-dir pin lasts one process; production Config must set an explicit absolute ledger_dir.

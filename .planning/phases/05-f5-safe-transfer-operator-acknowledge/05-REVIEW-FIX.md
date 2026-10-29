@@ -2,10 +2,10 @@
 phase: 05-f5-safe-transfer-operator-acknowledge
 fixed_at: 2026-10-30T00:00:00Z
 review_path: .planning/phases/05-f5-safe-transfer-operator-acknowledge/05-REVIEW.md
-iteration: 1
-findings_in_scope: 7
-fixed: 6
-skipped: 1
+iteration: 2
+findings_in_scope: 10
+fixed: 8
+skipped: 2
 status: partial
 ---
 
@@ -127,8 +127,90 @@ not prove STACK did not start the task) releases the step key and a re-run can s
 OQ2 and section 7 already record this as an accepted risk; the cheap mitigation (`httpStatus >= 500` becomes
 `outcomeUnknown`, no latch) is a one-branch change if the decision is revisited.
 
+
 ---
 
 _Fixed: 2026-10-30_
 _Fixer: Claude (gsd-code-fixer)_
 _Iteration: 1_
+
+---
+
+# Iteration 2
+
+**Fixed at:** 2026-10-30
+**Source review:** `.planning/phases/05-f5-safe-transfer-operator-acknowledge/05-REVIEW.md` (iteration 2)
+**Iteration:** 2
+
+**Summary:**
+- Findings in scope: 2 (WR-01, WR-02); IN-01 was considered and skipped (see below)
+- Fixed: 2
+- Skipped: 1 (IN-01, out of the requested scope because it conflicts with the 05-SPIKE.md template)
+
+**Verification:** `bin/make proto test` exited 0 in the main checkout (`/home/formulatrix/data/nikko/galago-tools`, branch
+`feat/stack-tool`, no worktree) after both fixes: ruff, mypy, `unittest discover` and pytest (507 passed). Per-fix runs
+were `pytest tools/tests/stack_test.py tools/tests/stack_ledger_test.py` (360 passed). Every new test was shown to fail
+against the pre-fix `tools/stack/server.py` (stashed, test run, restored). Tests use the fake core, a temp ledger
+directory and patched clocks; nothing contacted 10.150.1.125 and the real `~/.local/state` ledger was not touched.
+
+## Fixed Issues
+
+### WR-01: The ledger directory is pinned by any Transfer, including one that never touched the ledger
+
+**Files modified:** `tools/stack/server.py`, `tools/tests/stack_test.py`
+**Commit:** 093e681
+**Status:** fixed: requires human verification (logic change)
+**Applied fix:** The pin is still taken first, under `_state`, together with the read of `ledger_dir`, so a Configure can
+never move the directory under a running Transfer (this closes the race the review's suggested "pin after the claim" would
+have opened: a Configure landing between the read and the pin). The Transfer remembers the previous pin and, in its
+`finally`, puts it back unless a record can exist in that directory. "Used" is set when `ledger.get` returned a record or
+when `ledger.claim` returned at all (True, or False for a record another tool server wrote). A Transfer that ended with an
+unwritable or busy claim, a `get` failure, or a `NeedsInput` / `Refused` / `Rejected` plan therefore leaves no pin, and a
+Configure to a corrected directory is accepted. The message of the pin refusal is unchanged.
+**Tests:** in `TestLedgerDirPinned`: a failed write-ahead claim and a `NeedsInput` plan leave the pin unset and a Configure
+to another directory is accepted and used; a Transfer that finds an existing record and one whose claim returns False still
+pin (Configure refused); the pin is held while the Transfer runs and released after one that wrote nothing. The three
+"does not pin" tests fail without the fix.
+**Note for the reviewer:** a `get` that fails as `corrupt` / `unknownVersion` / `unreadable` also leaves no pin, as the
+review asked. In the corrupt and unknownVersion cases a ledger file does exist, so an operator who moves `ledger_dir`
+instead of repairing the file loses the step keys in it. The reply already says "do not delete it". Pinning for those two
+reasons would be a one-line change if the stricter behaviour is preferred.
+
+### WR-02: The truncation fix still cuts the re-attach instruction when a restart clause is stacked on a timedOut or lost line
+
+**Files modified:** `tools/stack/server.py`, `tools/tests/stack_test.py`
+**Commit:** 8f86382
+**Status:** fixed
+**Applied fix:** `_fit` now keeps whole the suffix, the front's `; task guid <g>` segment and a `; re-run this step to
+re-attach` clause that ends the front (it is moved into the protected suffix, so it also survives a later `_with_suffix`
+of a restart clause). When the line is still too long after the free text after the task guid is cut, only variable text
+is shed, in this order: the core's result-kind label on a held latch, the reason of the result, and finally the repeated
+"inspect the arm" of the restart clause when the latch clause already says it. Only after that is the head cut, as before.
+The worst case (lost after a restart with a latched guid, 80-character reason) is now
+`stack: lost; latched guid <g>; inspect the arm, then AcknowledgeFailure; the transfer may still be running; re-run this step to re-attach; task guid <g>; tool restarted mid-transfer; the core may not have latched this failure`
+(under 300 characters, no ellipsis). The restart clause text itself is unchanged.
+**Tests:** `TestMessageCap`: the timedOut-after-restart test now asserts the re-attach text, the latch action and the whole
+restart clause (it no longer expects the latch kind label, which is now the first thing shed); the lost test asserts the
+re-attach text; new tests for lost after a restart (the longest line) and for `_fit` with a re-attach clause that follows a
+hint. The timedOut, lost-after-restart and `_fit` tests fail without the fix.
+
+## Skipped Issues
+
+### IN-01: A Transfer refused because an AcknowledgeFailure holds the motion lock says "another Transfer is running"
+
+**File:** `tools/stack/server.py:183-185`
+**Reason:** it is a one-line change, but `_BUSY_MESSAGE` is the exact text of the "busy" row of the 05-SPIKE.md message
+table (line 386), which is the binding contract and is asserted by prefix in tests. Rewording it means amending the
+contract. Info is also outside the requested `critical_warning` scope. Not changed.
+**Original issue:** the busy refusal of a Transfer that loses the motion lock to a concurrent AcknowledgeFailure names
+"another Transfer"; correct and safe, misleading wording in a short window.
+
+---
+
+_Fixed: 2026-10-30_
+_Fixer: Claude (gsd-code-fixer)_
+_Iteration: 2_
+
+## Orchestrator follow-up (iteration 2, user decision)
+
+- **Corrupt-ledger pin** (`ba9fe65`): the user chose to keep the ledger directory pinned when `ledger.get` raises `unreadable`, `corrupt` or `unknownVersion`. A file is there that may hold step keys, so a Configure cannot steer the tool onto an empty ledger. Covered by `test_an_untrusted_ledger_file_pins_the_directory`, which fails without the fix. The full gate passes with 508 tests.
