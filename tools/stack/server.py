@@ -25,6 +25,7 @@ import math
 import os
 import re
 import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Iterator, Optional, cast
@@ -43,6 +44,7 @@ from stack_automation_layer.results import (
     Refused,
     Rejected,
     TaskHandle,
+    TimedOut,
     TransferPlan,
 )
 from stack_automation_layer.service import StackService
@@ -87,6 +89,10 @@ DEFAULT_PORT = 5005
 # result is clamped (never rejected) to the maximum.
 DEFAULT_TRANSFER_TIMEOUT_S = 300.0
 MAX_TRANSFER_TIMEOUT_S = 3600.0
+
+# D-11: one read-only wait_transfer slice of the re-attach loop. The core clamps
+# each call to its own WAIT_TRANSFER_MAX_S (300 s) anyway.
+WAIT_SLICE_S = 300.0
 
 # D-12: one Transfer at a time per tool server. Module level, taken
 # non-blocking, so a second Transfer is refused at once rather than queued.
@@ -198,6 +204,14 @@ _IN_FLIGHT_OWNER = "step key {key} is still running; re-run that step to re-atta
 _MISMATCH = (
     "stack: this step key was used for a different request or STACK; "
     "mint a new step key; step key {key}")
+# XFR-06 / A-1 (05-SPIKE.md 6f): a wait that ended without ending the task. The
+# record stays started and a re-run of the same step re-attaches.
+_STILL_RUNNING = "stack: still running (timedOut); re-run this step to re-attach"
+_NOT_ENDED = (
+    "stack: lost ({reason}); {latch}; the transfer may still be running; "
+    "re-run this step to re-attach")
+_RE_ATTACH = "re-run this step to re-attach"
+
 # D-09 as kept by 05-SPIKE.md OQ1: after a restart the core may not own the
 # guid, so a non-ran outcome may never have latched.
 _RESTART_CLAUSE = (
@@ -226,6 +240,11 @@ _LATCHING_KINDS = frozenset({"failed", "aborted", "lost"})
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _monotonic() -> float:
+    """The clock of the re-attach budget. A wrapper so a test can patch it."""
+    return time.monotonic()
 
 
 # D-09: logged once per fresh open. A restart of this tool server silently
@@ -506,6 +525,25 @@ def _in_flight_owner_clause(ledger: Ledger, d: dict[str, Any], own_key: str) -> 
     if owner is None or owner == own_key:
         return ""
     return "; " + _IN_FLIGHT_OWNER.format(key=owner)
+
+
+def _non_terminal_reply(service: Any, result: Any, d: Any) -> ExecuteCommandReply:
+    """XFR-06 / A-1: a wait result that did not end the task (timedOut,
+    lost(pollFailed), cancelled, anything else). The record stays started, so
+    every such reply tells the operator to re-run the step to re-attach. The
+    task guid comes last; a lost result names the latch first (A-2)."""
+    meta = d if isinstance(d, dict) else None
+    kind = d.get("kind") if isinstance(d, dict) else None
+    guid = _find_guid(d) if isinstance(d, dict) else None
+    task = f"; task guid {guid}" if guid else ""
+    if kind == "timedOut":
+        return _reply(ERROR_FROM_TOOL, message=_one_line(_STILL_RUNNING + task, 300), meta=meta)
+    if kind == "lost" and isinstance(d, dict):
+        reason = d.get("reason")
+        shown = _one_line(reason, 60) if isinstance(reason, str) and reason else "unknown"
+        line = _NOT_ENDED.format(reason=shown, latch=_latch_clause(service)) + task
+        return _reply(ERROR_FROM_TOOL, message=_one_line(line, 300), meta=meta)
+    return _with_suffix(_transfer_error_reply(service, result), f"; {_RE_ATTACH}")
 
 
 def _ledger_meta(key: str, record: dict[str, Any], **extra: Any) -> dict[str, Any]:
@@ -856,13 +894,8 @@ class StackServer(ToolServer):
                 return _reply(SUCCESS, meta=_ledger_meta(
                     key, decision.record, result=decision.record.get("result"), replayed=True))
             if decision.action == REATTACH and decision.record is not None:
-                # Interim: the read-only re-attach is wired in the next commit.
-                return _reply(
-                    ERROR_FROM_TOOL,
-                    message=_one_line(
-                        "stack: this step key already has a ledger record "
-                        f"({decision.record['state']}); nothing was sent; step key {key}", 300),
-                    meta=_ledger_meta(key, decision.record))
+                return self._reattach(
+                    service, ledger, key, decision.record, budget, decision.restarted)
             return self._ledger_reply(decision, key, service)
         finally:
             _MOTION_LOCK.release()
@@ -1010,7 +1043,36 @@ class StackServer(ToolServer):
                     kind=kind if isinstance(kind, str) and kind else "outcome unknown",
                     latch=latch), 300),
                 meta=d if isinstance(d, dict) else None)
+        if not (isinstance(d, dict) and is_terminal(d)):
+            return _non_terminal_reply(service, result, d)
         return _transfer_error_reply(service, result)
+
+    def _reattach(self, service: StackService, ledger: Ledger, key: str,
+                  record: dict[str, Any], budget: float, restarted: bool) -> ExecuteCommandReply:
+        """D-07 row 5 / XFR-06: a started record is finished by waiting on its
+        recorded guid, read-only. The record becomes done only for a result
+        that ends the task (A-1), exactly as on the fresh path."""
+        handle = record.get("handle")
+        guid = handle.get("guid") if isinstance(handle, dict) else None
+        result = self._reattach_loop(service, guid if isinstance(guid, str) else "", budget)
+        return self._finish(service, ledger, key, result, False)
+
+    def _reattach_loop(self, service: Any, guid: str, budget: float) -> Any:
+        """Wait on ``guid`` in slices of min(remaining, WAIT_SLICE_S) until a
+        result that is not timedOut arrives or ``budget`` seconds are spent.
+        Read-only (D-11): only wait_transfer is called, never plan, execute or
+        cancel, and never with a non-positive timeout. When the budget runs out
+        the last timedOut is returned, or a synthesised one when no call fit."""
+        started = _monotonic()
+        remaining = budget
+        last: Any = None
+        while remaining > 0:
+            result = service.wait_transfer(guid, timeout_s=min(remaining, WAIT_SLICE_S))
+            if not isinstance(result, TimedOut):
+                return result
+            last = result
+            remaining = budget - (_monotonic() - started)
+        return last if last is not None else TimedOut(handle=TaskHandle(guid=guid))
 
     def AcknowledgeFailure(self, params: "Command.AcknowledgeFailure") -> ExecuteCommandReply:
         # ACK-01: the one place the core's latch is cleared, and only for the

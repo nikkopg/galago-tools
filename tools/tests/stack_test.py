@@ -2619,30 +2619,9 @@ class TestTimedOutReattach(_LedgerCase):
         self.assertEqual(self._records()[_STEP_KEY]["state"], "done")
         self.assertEqual(self._records()[_STEP_KEY]["result"], Ran(task=_ran_snapshot()).to_dict())
 
-    def test_a_timed_out_step_is_sent_exactly_once_in_total(self) -> None:
-        self.core.wait_result = self._timed_out()
-        self._transfer()
-        self.core.wait_transfer_results = [self._timed_out(), Ran(task=_ran_snapshot())]
-        self.assertEqual(self._transfer().response, ERROR_FROM_TOOL)
-        self.assertEqual(self._transfer().response, SUCCESS)
-        replay = self._transfer()
-        self.assertEqual(replay.response, SUCCESS)
-        self.assertEqual(replay.meta_data["replayed"], True)
-        self.assertEqual(self.core.execute_calls, 1)
-        self.assertEqual(self.core.call_names.count("plan_transfer"), 1)
-        self.assertEqual(self.core.call_names.count("wait_transfer"), 2)
-
-    def test_the_re_attach_never_plans_executes_or_waits_on_a_handle(self) -> None:
-        self._start_then_time_out()
-        self.core.wait_transfer_results = [self._timed_out()]
-        reply = self._transfer()
-        self.assertEqual(reply.response, ERROR_FROM_TOOL)
-        for name in ("plan_transfer", "execute_transfer", "wait"):
-            self.assertNotIn(name, self.core.call_names)
-
-    def test_the_budget_is_spent_in_slices_and_never_called_with_nothing_left(self) -> None:
-        self._start_then_time_out()
-        clock = [1000.0]
+    def _time_out_every_slice(self, clock: list[float]) -> list[float]:
+        """Make every wait_transfer slice time out after consuming its whole
+        timeout on the fake clock. Returns the list the timeouts are logged to."""
         timeouts: list[float] = []
 
         def _wait_transfer(guid: str, *, timeout_s: float) -> Any:
@@ -2651,6 +2630,37 @@ class TestTimedOutReattach(_LedgerCase):
             return self._timed_out()
 
         self.core.wait_result = _wait_transfer
+        return timeouts
+
+    def test_a_timed_out_step_is_sent_exactly_once_in_total(self) -> None:
+        self.core.wait_result = self._timed_out()
+        self._transfer()
+        clock = [1000.0]
+        self._time_out_every_slice(clock)
+        with patch.object(stack_server, "_monotonic", side_effect=lambda: clock[0]):
+            self.assertEqual(self._transfer().response, ERROR_FROM_TOOL)
+        self.core.wait_transfer_results = [Ran(task=_ran_snapshot())]
+        self.assertEqual(self._transfer().response, SUCCESS)
+        replay = self._transfer()
+        self.assertEqual(replay.response, SUCCESS)
+        self.assertEqual(replay.meta_data["replayed"], True)
+        self.assertEqual(self.core.execute_calls, 1)
+        self.assertEqual(self.core.call_names.count("plan_transfer"), 1)
+
+    def test_the_re_attach_never_plans_executes_or_waits_on_a_handle(self) -> None:
+        self._start_then_time_out()
+        clock = [1000.0]
+        self._time_out_every_slice(clock)
+        with patch.object(stack_server, "_monotonic", side_effect=lambda: clock[0]):
+            reply = self._transfer()
+        self.assertEqual(reply.response, ERROR_FROM_TOOL)
+        self.assertIn("still running", reply.error_message)
+        self.assertEqual(set(self.core.call_names), {"wait_transfer"})
+
+    def test_the_budget_is_spent_in_slices_and_never_called_with_nothing_left(self) -> None:
+        self._start_then_time_out()
+        clock = [1000.0]
+        timeouts = self._time_out_every_slice(clock)
         with patch.object(stack_server, "_monotonic", side_effect=lambda: clock[0]):
             reply = self._transfer(timeout_s=650)
         self.assertEqual(timeouts, [300.0, 300.0, 50.0])
