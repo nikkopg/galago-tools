@@ -5,8 +5,14 @@ policy of its own -- every decision (identity probe, session, validation,
 failure latch, transfer sequencing) lives in the stack-automation-layer core.
 The core is obtained only through composition.open_service with owner
 "galago", so galago and the core's own MCP front end contend on the same owner
-lock. This module never imports the core's MCP adapter subpackage, and it has
-no real-mode motion path in this phase: only reads are wired.
+lock. This module never imports the core's MCP adapter subpackage.
+
+Transfer is the one motion path and the one multi-call command (D-12): a fresh
+step key runs plan_transfer, a write-ahead ledger record, execute_transfer,
+one wait and the terminal ledger record in a single command (_run_fresh, the
+only place either core call is made). The step ledger (tools/stack/ledger.py)
+is what guarantees a step key is never submitted twice; a step key that already
+has a record sends nothing.
 
 A result is turned into a reply by its ``kind``: only the explicit allowlist
 in _SUCCESS_KINDS yields SUCCESS; every other result (a refusal, a failed
@@ -18,6 +24,8 @@ import logging
 import math
 import re
 import threading
+import uuid
+from datetime import datetime, timezone
 from typing import Any, Iterator, Optional, cast
 
 import grpc
@@ -26,6 +34,7 @@ from google.protobuf.struct_pb2 import Struct
 from stack_automation_layer.composition import OwnedService, open_service
 from stack_automation_layer.model import Location, TransferRequest
 from stack_automation_layer.owner_lock import endpoint_key
+from stack_automation_layer.results import TaskHandle, TransferPlan
 from stack_automation_layer.service import StackService
 
 from tools.base_server import ToolServer, serve
@@ -43,8 +52,25 @@ from tools.grpc_interfaces.tool_base_pb2 import (
     ToolStatus,
 )
 from tools.grpc_interfaces.tool_base_pb2 import Command as ToolCommand
+from tools.stack.ledger import (
+    Ledger,
+    LedgerError,
+    fingerprint,
+    is_terminal,
+    resolve_ledger_dir,
+)
 
 DEFAULT_PORT = 5005
+
+# D-11: the wait budget of one Transfer, in seconds. Transfer.timeout_s wins
+# when > 0, then Config.transfer_timeout_s when > 0, then the default; the
+# result is clamped (never rejected) to the maximum.
+DEFAULT_TRANSFER_TIMEOUT_S = 300.0
+MAX_TRANSFER_TIMEOUT_S = 3600.0
+
+# D-12: one Transfer at a time per tool server. Module level, taken
+# non-blocking, so a second Transfer is refused at once rather than queued.
+_MOTION_LOCK = threading.Lock()
 
 # WR-01: the longest a Configure waits for in-flight commands to finish before
 # it refuses with "busy". A read ends within the core's transport timeouts; a
@@ -52,8 +78,9 @@ DEFAULT_PORT = 5005
 # worker (serve() has 10) behind it, so it is refused instead of queued.
 CONFIGURE_DRAIN_TIMEOUT_S = 5.0
 
-# D-01: every handler maps 1:1 onto one StackService method. The Phase 5
-# commands (Transfer, AcknowledgeFailure, GetFailureLatch) are not wired here.
+# D-01: every handler maps 1:1 onto one StackService method, except Transfer:
+# it is the one motion path and the one multi-call command (D-12), so it has no
+# single mapped method. AcknowledgeFailure and GetFailureLatch are wired later.
 COMMAND_TO_SERVICE_METHOD = {
     "GetManagerState": "manager_state",
     "GetRobotStates": "robot_states",
@@ -74,7 +101,7 @@ EST_ACK_S = 2
 
 # D-18: commands the real-mode adapter refuses without touching the service
 # (Phase 5 wires them). They win over the not-configured check (D-14).
-UNAVAILABLE_COMMANDS = frozenset({"Transfer", "AcknowledgeFailure", "GetFailureLatch"})
+UNAVAILABLE_COMMANDS = frozenset({"AcknowledgeFailure", "GetFailureLatch"})
 
 # D-13: the eight read-only commands (oneof field names) that bypass the BUSY
 # gate so an operator can read STACK state while a motion command holds the
@@ -106,6 +133,33 @@ _NOT_CONFIGURED_MESSAGE = "stack: not configured"
 # operator (see _unavailable_reply), and this one is worth seeing: it is
 # transient and the controller should retry.
 _RECONFIGURING_MESSAGE = "stack: reconfiguring"
+
+# D-12: a second Transfer while one is running is refused, not queued.
+_BUSY_MESSAGE = (
+    "stack: busy; another Transfer is running in this tool; "
+    "wait for it to finish, then re-run this step")
+
+# D-04: operator-visible ledger messages (05-SPIKE.md section 6f).
+_LEDGER_UNREADABLE = (
+    "stack: step ledger unreadable ({reason}) at {path}; do not delete it; "
+    "no transfer was sent")
+_WRITE_AHEAD_FAILED = (
+    "stack: no transfer was sent; the step ledger could not record the step "
+    "({reason}); fix the ledger directory, then re-run this step")
+_CLAIMED_ELSEWHERE = (
+    "stack: this step key is claimed by another tool server sharing the ledger; "
+    "no transfer was sent; re-run this step to see its state")
+_EXECUTE_RAISED = (
+    "stack: execute failed ({name}); outcome unknown; check the STACK Manager "
+    "and GetFailureLatch; this step key will not be re-sent")
+_LATER_WRITE_FAILED = (
+    "stack: transfer {kind}, but the ledger could not record it; "
+    "re-running this step key will not send a second transfer")
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
 
 # D-09: logged once per fresh open. A restart of this tool server silently
 # drops the core's in-process failure latch and in-flight guard.
@@ -154,9 +208,10 @@ def _flag(cmd: Any, field: str) -> bool:
 
 
 def _transfer_request(cmd: Any) -> TransferRequest:
-    """Build the core's TransferRequest from a GetTransferEstimate command,
-    blank or unset fields as None (the core's missing_fields, not this
-    adapter, decides what is incomplete)."""
+    """Build the core's TransferRequest from a GetTransferEstimate or Transfer
+    command (they share the ten instrument field names), blank or unset fields
+    as None (the core's missing_fields, not this adapter, decides what is
+    incomplete)."""
     return TransferRequest(
         robot=_text_or_none(cmd, "robot"),
         labware_profile=_text_or_none(cmd, "labware_profile"),
@@ -289,6 +344,16 @@ def _error_line(d: dict) -> str:
     return _one_line(line, 300)
 
 
+def _ledger_error_reply(exc: Exception, path: str) -> ExecuteCommandReply:
+    """D-04: the ledger cannot be trusted, so nothing was sent. A ValueError
+    (a relative Config.ledger_dir) is reported as "invalid". Built from the
+    structured reason only, never str(exc)."""
+    reason = exc.reason if isinstance(exc, LedgerError) else "invalid"
+    shown = exc.path if isinstance(exc, LedgerError) else path
+    return _reply(ERROR_FROM_TOOL, message=_one_line(
+        _LEDGER_UNREADABLE.format(reason=reason, path=shown), 300))
+
+
 def _result_reply(result: Any) -> ExecuteCommandReply:
     """Map a core result onto a reply (D-10, D-12): meta is to_dict()
     unchanged; SUCCESS only for a kind in the allowlist."""
@@ -313,6 +378,9 @@ class StackServer(ToolServer):
         self.service: Optional[StackService] = None
         self._transfer_timeout_s: float = 0.0
         self._ledger_dir: str = ""
+        # D-05: minted once per server; a ledger record carries it so a later
+        # plan can tell a record of this process from one left by a restart.
+        self._instance: str = uuid.uuid4().hex
         # WR-03: serve() runs commands on a thread pool. _configure_lock
         # serialises Configures; _state guards _readers/_reconfiguring so a
         # Configure waits (bounded) for in-flight commands to finish before it
@@ -460,7 +528,7 @@ class StackServer(ToolServer):
             raise ValueError(
                 f"stack: Config.transfer_timeout_s must be finite and >= 0, got {timeout!r}")
         self._transfer_timeout_s = timeout
-        # Recorded only: nothing touches this path here (Phase 5 owns the ledger).
+        # Recorded only: resolved lazily at Transfer time, nothing is created here.
         self._ledger_dir = config.ledger_dir
         key = endpoint_key(host, port)
         # Only Configures change _owned, and they are serialised, so this read
@@ -579,9 +647,108 @@ class StackServer(ToolServer):
         service = self._require_service()
         return _result_reply(service.estimate_transfer(_transfer_request(params)))
 
+    def _endpoint(self) -> str:
+        """The normalised STACK endpoint this tool serves (part of the request
+        fingerprint)."""
+        if self._owned is not None:
+            return str(self._owned.endpoint)
+        return str(endpoint_key(self.config.host.strip(), self.config.port or DEFAULT_PORT))
+
+    def _wait_budget(self, params: Any) -> float:
+        """D-11: Transfer.timeout_s when set and > 0, else Config.transfer_timeout_s
+        when > 0, else the default, clamped to MAX_TRANSFER_TIMEOUT_S."""
+        if params.HasField("timeout_s") and params.timeout_s > 0:
+            budget = float(params.timeout_s)
+        elif self._transfer_timeout_s > 0:
+            budget = self._transfer_timeout_s
+        else:
+            budget = DEFAULT_TRANSFER_TIMEOUT_S
+        return min(budget, MAX_TRANSFER_TIMEOUT_S)
+
     def Transfer(self, params: "Command.Transfer") -> ExecuteCommandReply:
-        # D-18: no real-mode motion path in this phase; never touches the service.
-        return _unavailable_reply("Transfer")
+        service = self._require_service()
+        if not _MOTION_LOCK.acquire(blocking=False):
+            return _reply(ERROR_FROM_TOOL, message=_BUSY_MESSAGE)
+        try:
+            # The key is used byte-exact: no strip, no case folding (D-06).
+            key = params.step_key
+            request = _transfer_request(params)
+            fp = fingerprint(self._endpoint(), request)
+            budget = self._wait_budget(params)
+            try:
+                ledger = Ledger(resolve_ledger_dir(self._ledger_dir))
+                existing = ledger.get(key)
+            except (LedgerError, ValueError) as exc:
+                return _ledger_error_reply(exc, self._ledger_dir)
+            if existing is not None:
+                # Interim rule until the repeat-key decision table is wired: a
+                # step key that already has a record sends nothing.
+                return _reply(
+                    ERROR_FROM_TOOL,
+                    message=_one_line(
+                        "stack: this step key already has a ledger record "
+                        f"({existing['state']}); nothing was sent; step key {key}", 300),
+                    meta={"stepKey": key, "ledgerState": existing["state"]})
+            return self._run_fresh(service, ledger, key, fp, request, budget)
+        finally:
+            _MOTION_LOCK.release()
+
+    def _run_fresh(self, service: StackService, ledger: Ledger, key: str, fp: str,
+                   request: TransferRequest, budget: float) -> ExecuteCommandReply:
+        """The fresh path: plan, write-ahead, execute, started, wait, done. The
+        only place plan_transfer and execute_transfer are called, and
+        execute_transfer is called exactly once, after the write-ahead claim
+        and never in a loop (XFR-05, enforced by the AST invariant tests). Once
+        the claim returned, any failure leaves the record at submitting or later
+        (never absent), so a repeat of the key cannot reach execute_transfer."""
+        plan = service.plan_transfer(request)
+        if not isinstance(plan, TransferPlan):
+            return _result_reply(plan)
+        try:
+            claimed = ledger.claim(key, fingerprint=fp, instance=self._instance, now=_utcnow())
+        except LedgerError as exc:
+            return _reply(ERROR_FROM_TOOL, message=_one_line(
+                _WRITE_AHEAD_FAILED.format(reason=exc.reason), 300))
+        if not claimed:
+            return _reply(ERROR_FROM_TOOL, message=_CLAIMED_ELSEWHERE)
+        try:
+            outcome = service.execute_transfer(plan.plan_id)
+        except Exception as exc:
+            # The record stays submitting: the submit may have reached STACK.
+            # Only the exception's type is reported, never str(exc).
+            return _reply(ERROR_FROM_TOOL, message=_one_line(
+                _EXECUTE_RAISED.format(name=type(exc).__name__), 300))
+        if not isinstance(outcome, TaskHandle):
+            # Interim fail-safe: any other answer keeps the record submitting.
+            return _result_reply(outcome)
+        write_failed = False
+        try:
+            ledger.mark_started(key, handle=outcome.to_dict(), now=_utcnow())
+        except LedgerError:
+            write_failed = True
+        result = service.wait(outcome, timeout_s=budget)
+        return self._finish(ledger, key, result, write_failed)
+
+    def _finish(self, ledger: Ledger, key: str, result: Any,
+                write_failed: bool) -> ExecuteCommandReply:
+        """Record a terminal wait result and map it to the reply. A ledger write
+        failure never stops the wait (the transfer already ran), but it turns
+        the reply into an error (D-04)."""
+        to_dict = getattr(result, "to_dict", None)
+        d = to_dict() if callable(to_dict) else None
+        if isinstance(d, dict) and is_terminal(d):
+            try:
+                ledger.mark_done(key, result=d, now=_utcnow())
+            except LedgerError:
+                write_failed = True
+        if write_failed:
+            kind = d.get("kind") if isinstance(d, dict) else None
+            return _reply(
+                ERROR_FROM_TOOL,
+                message=_one_line(_LATER_WRITE_FAILED.format(
+                    kind=kind if isinstance(kind, str) and kind else "outcome unknown"), 300),
+                meta=d if isinstance(d, dict) else None)
+        return _result_reply(result)
 
     def AcknowledgeFailure(self, params: "Command.AcknowledgeFailure") -> ExecuteCommandReply:
         # D-18: refused in real mode; never touches the service.
