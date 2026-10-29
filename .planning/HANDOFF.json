@@ -1,0 +1,36 @@
+{
+  "version": "1.0",
+  "timestamp": "2026-10-29T09:08:18.869Z",
+  "phase": "5",
+  "phase_name": "F5-safe Transfer & Operator Acknowledge",
+  "phase_dir": ".planning/phases/05-f5-safe-transfer-operator-acknowledge",
+  "plan": 6,
+  "task": 1,
+  "total_tasks": 7,
+  "status": "paused",
+  "completed_tasks": [
+    {"id": 1, "name": "05-01 design spike (05-SPIKE.md)", "status": "done", "commit": "9134f74"},
+    {"id": 2, "name": "05-02 fresh-path Transfer tracer + ledger.py + XFR-05 AST rules", "status": "done", "commit": "770588a"},
+    {"id": 3, "name": "05-03 pure ledger decide()/release/outcomeUnknown/retention", "status": "done", "commit": "5b1eee8"},
+    {"id": 4, "name": "05-04 GetFailureLatch, AcknowledgeFailure exact yes, latch guid in errors", "status": "done", "commit": "ed9c398"},
+    {"id": 5, "name": "05-05 release whitelist, outcomeUnknown, Transfer hardening", "status": "done", "commit": "5290d6f"}
+  ],
+  "remaining_tasks": [
+    {"id": 6, "name": "05-06 wire decide() into Transfer: mismatch, replay window, refusals, re-attach loop, timedOut, restart rule (wave 5)", "status": "not_started"},
+    {"id": 7, "name": "05-07 never-resend matrix, STK-05 re-proof on real Transfer, full gate (wave 6)", "status": "not_started"}
+  ],
+  "blockers": [],
+  "async_jobs": [],
+  "human_actions_pending": [
+    {"action": "Confirm D-09 resolution: an observed `ran` after a mid-transfer restart is SUCCESS flagged reattachedAfterRestart (auto-chosen; XFR-03 strict reading would make it an error — one-line change in 05-06)", "context": "Research Open Question 1, resolved by --auto, recorded in 05-SPIKE.md §5", "blocking": false}
+  ],
+  "decisions": [
+    {"decision": "Keep D-09: live `ran` after restart is SUCCESS with reattachedAfterRestart: true", "rationale": "ran is STACK's own observation, not a replay", "phase": "5"},
+    {"decision": "Accept research amendments A-1..A-6 (05-SPIKE.md §4); A-1: done set mirrors core _task_ended, lost(pollFailed) stays started; A-2: operator guid from latch_status() first", "rationale": "verified against core 934a621", "phase": "5"},
+    {"decision": "XFR-04 releases on Rejected/Refused(stackBusy) after one typed-refused POST; residual risk carried to Phase 7 runbook", "rationale": "requirement as written", "phase": "5"},
+    {"decision": "Execute sequentially on the main working tree (ISOLATION=none)", "rationale": "worktree base-check degrades: HEAD unpushed vs origin/HEAD; plans share server.py/stack_test.py", "phase": "5"}
+  ],
+  "uncommitted_files": [" M .planning/config.json", "?? .planning/milestone.lock", "?? .planning/state.json"],
+  "next_action": "Run /gsd-execute-phase 5 --auto --no-transition (resumes at wave 5, plan 05-06); before each executor dispatch re-run `node ~/.claude/gsd-core/bin/gsd-tools.cjs query dispatch-isolation --raw --phase 5 --force-isolation none`",
+  "context_notes": "Auto chain discuss->plan->execute for Phase 5. Plans 01-05 done, each spot-checked by the orchestrator (stack_test.py + stack_ledger_test.py: 287 passed; executor-reported full gate bin/make proto test 434 passed at 05-05). Interim rule still in Transfer: any existing step-key record is refused with no core call — 05-06 replaces it with ledger.decide(). Plans' no-edit guards diff against e1bf845. After 05-07: post-merge gate, then phase verification (verify_phase_goal), code review, regression gate."
+}
