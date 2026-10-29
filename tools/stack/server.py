@@ -22,6 +22,7 @@ import argparse
 import contextlib
 import logging
 import math
+import os
 import re
 import threading
 import uuid
@@ -644,6 +645,12 @@ class StackServer(ToolServer):
         if not math.isfinite(timeout) or timeout < 0:
             raise ValueError(
                 f"stack: Config.transfer_timeout_s must be finite and >= 0, got {timeout!r}")
+        # D-03: a relative path would resolve against whatever the working
+        # directory happens to be, so it is refused here, before any owner swap.
+        # The raw value is still what is recorded; nothing is created.
+        ledger_dir = config.ledger_dir
+        if ledger_dir.strip() and not os.path.isabs(ledger_dir.strip()):
+            raise ValueError("stack: Config.ledger_dir must be an absolute path")
         self._transfer_timeout_s = timeout
         # Recorded only: resolved lazily at Transfer time, nothing is created here.
         self._ledger_dir = config.ledger_dir
@@ -890,7 +897,9 @@ class StackServer(ToolServer):
         the reply into an error (D-04)."""
         to_dict = getattr(result, "to_dict", None)
         d = to_dict() if callable(to_dict) else None
-        if isinstance(d, dict) and is_terminal(d):
+        # No terminal write after a failed started write: the ledger is not
+        # trusted, and the record stays submitting so a re-run never re-sends.
+        if isinstance(d, dict) and is_terminal(d) and not write_failed:
             try:
                 ledger.mark_done(key, result=d, now=_utcnow())
             except LedgerError:

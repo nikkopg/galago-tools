@@ -2367,8 +2367,9 @@ class TestMotionLock(_TransferTestCase):
 
     def test_an_exception_from_plan_transfer_propagates_and_releases_the_lock(self) -> None:
         self.core.plan_result = RuntimeError("boom")
+        fields: dict[str, Any] = dict(_ESTIMATE_FIELDS)
         with self.assertRaises(RuntimeError):
-            self.server.Transfer(stack_pb2.Command.Transfer(step_key="k", **_ESTIMATE_FIELDS))
+            self.server.Transfer(stack_pb2.Command.Transfer(step_key="k", **fields))
         self.assertFalse(stack_server._MOTION_LOCK.locked())
         reply = self._transfer("run-after:k")
         self.assertEqual(reply.response, DRIVER_ERROR)
