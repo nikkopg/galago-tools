@@ -17,7 +17,7 @@ import time
 import types
 import unittest
 from concurrent import futures
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
 from unittest.mock import MagicMock, call as mock_call, patch
@@ -92,7 +92,7 @@ from tools.grpc_interfaces.tool_driver_pb2_grpc import (
     ToolDriverStub,
     add_ToolDriverServicer_to_server,
 )
-from tools.stack.ledger import LedgerError
+from tools.stack.ledger import Ledger, LedgerError
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -2034,6 +2034,179 @@ class TestLatchGuidInMessage(_TransferTestCase):
         self.assertEqual(reply.response, ERROR_FROM_TOOL)
         self.assertIn("transfer ran, but the ledger could not record it", reply.error_message)
         self.assertNotIn("latch_status", self.core.call_names)
+
+
+class TestKeyRelease(_TransferTestCase):
+    """XFR-04 / D-08: a step key is released only when execute_transfer
+    returned one of the core's "nothing was sent" classes (by isinstance);
+    anything ambiguous or unknown keeps the key and is never deleted."""
+
+    def _ledger(self) -> Ledger:
+        return Ledger(Path(self.ledger_dir))
+
+    def _rerun_succeeds(self, key: str) -> None:
+        """The key was released: a re-run calls plan and execute again."""
+        self.core.calls.clear()
+        self.core.execute_result = TaskHandle(guid=_GUID, robot="R1", estimated_s=30.0)
+        self.core.wait_result = Ran(task=_ran_snapshot())
+        reply = self._transfer(key)
+        self.assertEqual(reply.response, SUCCESS)
+        self.assertEqual(self.core.call_names.count("plan_transfer"), 1)
+        self.assertEqual(self.core.call_names.count("execute_transfer"), 1)
+
+    def test_every_nothing_was_sent_result_releases_the_key(self) -> None:
+        results = (
+            ("planNotFound", Refused(reason="planNotFound")),
+            ("planExpired", Refused(reason="planExpired")),
+            ("failureLatched", Refused(reason="failureLatched", detail={"guid": "g-latched"})),
+            ("inFlight", Refused(reason="inFlight", detail={"guid": "g-running"})),
+            ("stackBusy", Refused(reason="stackBusy")),
+            ("managerNotAutomated", Refused(reason="managerNotAutomated")),
+            ("recoveryPending", Refused(reason="recoveryPending")),
+            ("robotNotIdle", Refused(reason="robotNotIdle")),
+            ("rejected-instrument", Rejected(stage="instrument", findings=[{"name": "x"}])),
+            ("rejected-local", Rejected(stage="local", findings=[])),
+            ("needsInput", NeedsInput(missing=["robot"])),
+            ("readFailed", ReadFailed(error={"name": "boom", "status": 500})),
+        )
+        for label, result in results:
+            with self.subTest(label):
+                key = f"run-{label}:k"
+                self.core.calls.clear()
+                self.core.execute_result = result
+                reply = self._transfer(key)
+                self.assertEqual(reply.response, ERROR_FROM_TOOL)
+                self.assertNotIn(key, self._records())
+                self.assertEqual(self.core.call_names.count("execute_transfer"), 1)
+                self._rerun_succeeds(key)
+
+    def test_a_submit_outcome_unknown_keeps_the_key_with_the_latch_guid(self) -> None:
+        self.core.execute_result = Lost(reason="submitOutcomeUnknown")
+        self.core.latch_result = LatchStatus(
+            latched=True, guid=_SUBMIT_GUID, result_kind="lost", reason="submitOutcomeUnknown")
+        reply = self._transfer()
+        self.assertEqual(reply.response, ERROR_FROM_TOOL)
+        record = self._records()[_STEP_KEY]
+        self.assertEqual(record["state"], "outcomeUnknown")
+        self.assertEqual(record["latchGuid"], _SUBMIT_GUID)
+        self.assertIn(_SUBMIT_GUID, reply.error_message)
+        self.assertIn("will not be re-sent", reply.error_message)
+        self.assertEqual(self.core.call_names.count("latch_status"), 1)
+        before = list(self.core.calls)
+        self._transfer()
+        self.assertEqual(
+            [n for n in self.core.call_names if n in ("plan_transfer", "execute_transfer")],
+            [n for n, _a, _k in before if n in ("plan_transfer", "execute_transfer")])
+
+    def test_an_unlatched_submit_outcome_unknown_records_no_guid(self) -> None:
+        self.core.execute_result = Lost(reason="submitOutcomeUnknown")
+        self.core.latch_result = LatchStatus(latched=False)
+        reply = self._transfer()
+        record = self._records()[_STEP_KEY]
+        self.assertEqual(record["state"], "outcomeUnknown")
+        self.assertIsNone(record["latchGuid"])
+        self.assertIn("did not latch", reply.error_message)
+        self.assertIn("will not be re-sent", reply.error_message)
+        self._transfer()
+        self.assertEqual(self.core.execute_calls, 1)
+        self.assertEqual(self.core.call_names.count("plan_transfer"), 1)
+
+    def test_an_unexpected_lost_or_unknown_shape_is_kept_as_outcome_unknown(self) -> None:
+        shapes = (
+            ("taskNotFound", Lost(reason="taskNotFound")),
+            ("mock", MagicMock()),
+            ("string", "garbage"),
+        )
+        for label, shape in shapes:
+            with self.subTest(label):
+                key = f"run-{label}:k"
+                self.core.calls.clear()
+                self.core.execute_result = shape
+                reply = self._transfer(key)
+                self.assertEqual(reply.response, ERROR_FROM_TOOL)
+                self.assertEqual(self._records()[key]["state"], "outcomeUnknown")
+                self._transfer(key)
+                self.assertEqual(self.core.call_names.count("execute_transfer"), 1)
+                self.assertEqual(self.core.call_names.count("plan_transfer"), 1)
+
+    def test_an_exception_from_execute_names_only_its_type(self) -> None:
+        self.core.execute_result = RuntimeError("SECRET-TEXT")
+        reply = self._transfer()
+        self.assertEqual(reply.response, ERROR_FROM_TOOL)
+        self.assertIn("RuntimeError", reply.error_message)
+        self.assertNotIn("SECRET-TEXT", reply.error_message)
+        self.assertEqual(self._records()[_STEP_KEY]["state"], "submitting")
+        self._transfer()
+        self.assertEqual(self.core.execute_calls, 1)
+
+    def test_a_plan_that_is_not_a_plan_leaves_no_ledger_file(self) -> None:
+        plans = (
+            Rejected(stage="local", findings=[]),
+            NeedsInput(missing=["robot"]),
+            ReadFailed(error={"name": "boom"}),
+            Refused(reason="failureLatched", detail={"guid": "g"}),
+        )
+        for plan in plans:
+            with self.subTest(type(plan).__name__):
+                self.core.plan_result = plan
+                reply = self._transfer()
+                self.assertEqual(reply.response, ERROR_FROM_TOOL)
+                self.assertFalse(os.path.exists(self.ledger_path))
+                self.assertNotIn("execute_transfer", self.core.call_names)
+
+    def test_an_in_flight_refusal_names_the_step_key_that_owns_the_guid(self) -> None:
+        other = Ledger(Path(self.ledger_dir))
+        now = datetime.now(timezone.utc)
+        self.assertTrue(other.claim("other-step", fingerprint="a" * 64, instance="x", now=now))
+        other.mark_started(
+            "other-step", handle=TaskHandle(guid="g-owner", robot="R1").to_dict(), now=now)
+        self.core.execute_result = Refused(reason="inFlight", detail={"guid": "g-owner"})
+        reply = self._transfer()
+        self.assertEqual(reply.response, ERROR_FROM_TOOL)
+        self.assertIn("g-owner", reply.error_message)
+        self.assertIn("step key other-step is still running", reply.error_message)
+        self.assertIn("re-run that step to re-attach", reply.error_message)
+        self.assertLess(reply.error_message.index("g-owner"),
+                        reply.error_message.index("other-step"))
+        self.assertNotIn(_STEP_KEY, self._records())
+        self.assertIn("other-step", self._records())
+
+    def test_an_in_flight_refusal_with_an_unknown_guid_names_no_step_key(self) -> None:
+        self.core.execute_result = Refused(reason="inFlight", detail={"guid": "g-nobody"})
+        reply = self._transfer()
+        self.assertIn("g-nobody", reply.error_message)
+        self.assertNotIn("is still running", reply.error_message)
+
+    def test_a_failed_release_keeps_the_record_and_says_it_will_not_be_re_sent(self) -> None:
+        self.core.execute_result = Refused(reason="stackBusy")
+        with patch.object(Ledger, "release", side_effect=LedgerError("unwritable", "p")):
+            reply = self._transfer()
+        self.assertEqual(reply.response, ERROR_FROM_TOOL)
+        self.assertIn("will not be re-sent", reply.error_message)
+        self.assertEqual(self._records()[_STEP_KEY]["state"], "submitting")
+        self._transfer()
+        self.assertEqual(self.core.execute_calls, 1)
+
+    def test_a_failed_outcome_unknown_write_still_says_it_will_not_be_re_sent(self) -> None:
+        self.core.execute_result = Lost(reason="submitOutcomeUnknown")
+        self.core.latch_result = LatchStatus(
+            latched=True, guid=_SUBMIT_GUID, result_kind="lost", reason="submitOutcomeUnknown")
+        with patch.object(
+                Ledger, "mark_outcome_unknown", side_effect=LedgerError("unwritable", "p")):
+            reply = self._transfer()
+        self.assertEqual(reply.response, ERROR_FROM_TOOL)
+        self.assertIn(_SUBMIT_GUID, reply.error_message)
+        self.assertIn("will not be re-sent", reply.error_message)
+        self.assertEqual(self._records()[_STEP_KEY]["state"], "submitting")
+
+    def test_the_message_suffix_survives_the_300_character_cap(self) -> None:
+        self.core.execute_result = Lost(reason="x" * 400)
+        self.core.latch_result = LatchStatus(
+            latched=True, guid=_SUBMIT_GUID, result_kind="lost", reason="x")
+        reply = self._transfer()
+        self.assertLessEqual(len(reply.error_message), 300)
+        self.assertIn(_SUBMIT_GUID, reply.error_message)
+        self.assertTrue(reply.error_message.endswith("will not be re-sent"))
 
 
 class TestTransferEstimate(_RealModeGrpcTestCase):
