@@ -34,7 +34,16 @@ from google.protobuf.struct_pb2 import Struct
 from stack_automation_layer.composition import OwnedService, open_service
 from stack_automation_layer.model import Location, TransferRequest
 from stack_automation_layer.owner_lock import endpoint_key
-from stack_automation_layer.results import LatchStatus, TaskHandle, TransferPlan
+from stack_automation_layer.results import (
+    LatchStatus,
+    Lost,
+    NeedsInput,
+    ReadFailed,
+    Refused,
+    Rejected,
+    TaskHandle,
+    TransferPlan,
+)
 from stack_automation_layer.service import StackService
 
 from tools.base_server import ToolServer, serve
@@ -165,6 +174,13 @@ _LATER_WRITE_FAILED = (
 _LATCH_LATCHED = "latched guid {guid}{kind}; inspect the arm, then AcknowledgeFailure"
 _LATCH_NOT_LATCHED = "the core did not latch this; inspect the arm"
 _LATCH_UNAVAILABLE = "latch status unavailable; read GetFailureLatch"
+
+# XFR-04 (05-SPIKE.md 3): the only execute_transfer results that prove nothing
+# was sent, so the step key is released. Matched by isinstance against the
+# core's real classes, never by the kind string; anything else is kept.
+_RELEASE_TYPES = (Refused, Rejected, NeedsInput, ReadFailed)
+_NOT_RE_SENT = "this step key will not be re-sent"
+_IN_FLIGHT_OWNER = "step key {key} is still running; re-run that step to re-attach"
 
 # Result kinds whose cause can latch in the core (failed, aborted and lost
 # results, and a refusal because a latch is already held).
@@ -414,6 +430,45 @@ def _transfer_error_reply(service: Any, result: Any) -> ExecuteCommandReply:
     if hint:
         line += f"; {hint}"
     return _reply(ERROR_FROM_TOOL, message=_one_line(line, 300), meta=d)
+
+
+def _latched_guid(service: Any) -> Optional[str]:
+    """The guid latch_status() names right now, or None when the core is not
+    latched or cannot say. One zero-I/O call; never raises."""
+    try:
+        status = service.latch_status()
+    except Exception:
+        return None
+    if isinstance(status, LatchStatus) and status.latched is True and isinstance(
+            status.guid, str) and status.guid.strip():
+        return status.guid.strip()
+    return None
+
+
+def _with_suffix(reply: ExecuteCommandReply, suffix: str) -> ExecuteCommandReply:
+    """Append a fixed clause to a reply's message, cutting the front part (never
+    the clause) so the line stays within 300 characters."""
+    if suffix:
+        reply.error_message = _one_line(
+            reply.error_message, 300 - len(suffix)) + suffix
+    return reply
+
+
+def _in_flight_owner_clause(ledger: Ledger, d: dict[str, Any], own_key: str) -> str:
+    """A-3: an inFlight refusal whose guid is the handle guid of another step
+    key's record names that key. Empty when there is no such record or the
+    ledger cannot be read."""
+    detail = d.get("detail")
+    guid = detail.get("guid") if isinstance(detail, dict) else None
+    if not isinstance(guid, str) or not guid:
+        return ""
+    try:
+        owner = ledger.find_by_guid(guid)
+    except LedgerError:
+        return ""
+    if owner is None or owner == own_key:
+        return ""
+    return "; " + _IN_FLIGHT_OWNER.format(key=owner)
 
 
 def _result_reply(result: Any) -> ExecuteCommandReply:
@@ -783,9 +838,10 @@ class StackServer(ToolServer):
             # Only the exception's type is reported, never str(exc).
             return _reply(ERROR_FROM_TOOL, message=_one_line(
                 _EXECUTE_RAISED.format(name=type(exc).__name__), 300))
+        if isinstance(outcome, _RELEASE_TYPES):
+            return self._release(service, ledger, key, outcome)
         if not isinstance(outcome, TaskHandle):
-            # Interim fail-safe: any other answer keeps the record submitting.
-            return _result_reply(outcome)
+            return self._keep_unknown(service, ledger, key, outcome)
         write_failed = False
         try:
             ledger.mark_started(key, handle=outcome.to_dict(), now=_utcnow())
@@ -793,6 +849,39 @@ class StackServer(ToolServer):
             write_failed = True
         result = service.wait(outcome, timeout_s=budget)
         return self._finish(service, ledger, key, result, write_failed)
+
+    def _release(self, service: StackService, ledger: Ledger, key: str,
+                 outcome: Any) -> ExecuteCommandReply:
+        """XFR-04: the core refused or rejected before anything was sent, so the
+        write-ahead record is deleted and the operator can fix the cause and
+        re-run the step. A failed delete keeps the record (the key then refuses
+        a re-run) and says so."""
+        reply = _transfer_error_reply(service, outcome)
+        suffix = ""
+        d = outcome.to_dict()
+        if isinstance(outcome, Refused) and d.get("reason") == "inFlight":
+            suffix = _in_flight_owner_clause(ledger, d, key)
+        try:
+            ledger.release(key, now=_utcnow())
+        except LedgerError:
+            suffix += f"; {_NOT_RE_SENT}"
+        return _with_suffix(reply, suffix)
+
+    def _keep_unknown(self, service: StackService, ledger: Ledger, key: str,
+                      outcome: Any) -> ExecuteCommandReply:
+        """The submit may have reached STACK (Lost(submitOutcomeUnknown)) or the
+        answer is not a result class the adapter knows: fail closed. The record
+        becomes outcomeUnknown with the guid latch_status() names right now
+        (None when the core did not latch), and is never deleted. A failed
+        ledger write leaves the record submitting, which also refuses a re-run."""
+        latch_guid: Optional[str] = None
+        if isinstance(outcome, Lost) and outcome.reason == "submitOutcomeUnknown":
+            latch_guid = _latched_guid(service)
+        try:
+            ledger.mark_outcome_unknown(key, latch_guid=latch_guid, now=_utcnow())
+        except LedgerError:
+            pass
+        return _with_suffix(_transfer_error_reply(service, outcome), f"; {_NOT_RE_SENT}")
 
     def _finish(self, service: StackService, ledger: Ledger, key: str, result: Any,
                 write_failed: bool) -> ExecuteCommandReply:
