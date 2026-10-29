@@ -10,12 +10,14 @@ import importlib.metadata
 import json
 import os
 import socket
+import stat
 import tempfile
 import threading
 import time
 import types
 import unittest
 from concurrent import futures
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Optional
 from unittest.mock import MagicMock, patch
@@ -49,6 +51,7 @@ try:
         KnowledgeRefreshed,
         LabwarePresence,
         LabwareProfiles,
+        LatchStatus,
         Lost,
         ManagerState,
         NeedsInput,
@@ -60,7 +63,9 @@ try:
         TaskHandle,
         TaskSnapshot,
         TimedOut,
+        TransferPlan,
         TransferProfiles,
+        TransferSummary,
         ValidationReport,
     )
     from stack_automation_layer.service import StackService
@@ -120,10 +125,18 @@ class _StackTestCase(unittest.TestCase):
         # (default ~/.local/state/stack-automation-layer, shared with stack-mcp);
         # tests must never read or write the real one.
         self.state_dir = os.path.join(self._tmpdir.name, "state")
+        # The adapter's own step ledger defaults to $XDG_STATE_HOME/galago-tools/stack
+        # (else ~/.local/state/...). Both are pointed at temp dirs so no test can
+        # ever read or write the real ledger (T-05-07).
+        self.xdg_state_home = os.path.join(self._tmpdir.name, "xdg-state")
+        self.fake_home = os.path.join(self._tmpdir.name, "home")
+        os.makedirs(self.fake_home)
 
         env_patcher = patch.dict(os.environ, {
             "STACK_MCP_LOCK_DIR": self.lock_dir,
             "STACK_STATE_DIR": self.state_dir,
+            "XDG_STATE_HOME": self.xdg_state_home,
+            "HOME": self.fake_home,
             "STACK_USER": "galago-test-user",
             "STACK_PASSWORD": "galago-test-password",
         })
@@ -1325,6 +1338,226 @@ _ESTIMATE_FIELDS = {
     "destination_nest": "DN",
     "destination_transfer_profile": "DTP",
 }
+
+
+_GUID = "11111111-2222-3333-4444-555555555555"
+_STEP_KEY = "run-1:stack-1"
+
+
+def _ran_snapshot(guid: str = _GUID) -> TaskSnapshot:
+    return TaskSnapshot(guid=guid, state="completed", raw_state="completed", error_code=None,
+                        error_name=None, description=None, elapsed="00:00:30")
+
+
+class _FakeCore:
+    """A stand-in for StackService built from the core's real result classes.
+
+    It implements plan_transfer, execute_transfer, wait, wait_transfer,
+    latch_status and acknowledge_failure only, so any other method access
+    raises AttributeError: a test never moves the (absent) arm by accident. An
+    attribute holding an Exception instance is raised; a callable is called
+    with the call's arguments. Every call is recorded in `calls`."""
+
+    def __init__(self) -> None:
+        request = TransferRequest(
+            robot="R1", labware_profile="plate96",
+            source=Location(device="SD", deck="SK", nest="SN", transfer_profile="STP"),
+            destination=Location(device="DD", deck="DK", nest="DN", transfer_profile="DTP"))
+        self.calls: list[tuple[str, tuple[Any, ...], dict[str, Any]]] = []
+        self.plan_result: Any = TransferPlan(
+            plan_id="plan-1", summary=TransferSummary.from_request(request),
+            estimated_time="00:00:30", estimated_s=30.0)
+        self.execute_result: Any = TaskHandle(guid=_GUID, robot="R1", estimated_s=30.0)
+        self.wait_result: Any = Ran(task=_ran_snapshot())
+        self.wait_transfer_results: list[Any] = []
+        self.latch_result: Any = LatchStatus(latched=False)
+        self.ack_result: Any = FailureAcknowledged(guid=_GUID, result_kind="failed")
+
+    @property
+    def execute_calls(self) -> int:
+        return sum(1 for name, _a, _k in self.calls if name == "execute_transfer")
+
+    @property
+    def call_names(self) -> list[str]:
+        return [name for name, _a, _k in self.calls]
+
+    def _answer(self, name: str, args: tuple[Any, ...], kwargs: dict[str, Any],
+                value: Any) -> Any:
+        self.calls.append((name, args, kwargs))
+        if isinstance(value, BaseException):
+            raise value
+        if callable(value):
+            return value(*args, **kwargs)
+        return value
+
+    def plan_transfer(self, request: Any) -> Any:
+        return self._answer("plan_transfer", (request,), {}, self.plan_result)
+
+    def execute_transfer(self, plan_id: Any) -> Any:
+        return self._answer("execute_transfer", (plan_id,), {}, self.execute_result)
+
+    def wait(self, handle: Any, *, timeout_s: float = 600.0) -> Any:
+        return self._answer("wait", (handle,), {"timeout_s": timeout_s}, self.wait_result)
+
+    def wait_transfer(self, guid: Any, *, timeout_s: float = 300.0) -> Any:
+        value = self.wait_transfer_results.pop(0) if self.wait_transfer_results else self.wait_result
+        return self._answer("wait_transfer", (guid,), {"timeout_s": timeout_s}, value)
+
+    def latch_status(self) -> Any:
+        return self._answer("latch_status", (), {}, self.latch_result)
+
+    def acknowledge_failure(self, guid: Any, *, confirm: bool = False) -> Any:
+        return self._answer("acknowledge_failure", (guid,), {"confirm": confirm}, self.ack_result)
+
+
+class _TransferTestCase(_RealModeGrpcTestCase):
+    """A real-mode Transfer fixture: a _FakeCore as the service, and the step
+    ledger in a fresh absolute temp directory."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.ledger_dir = os.path.join(self._tmpdir.name, "ledger")
+        self.server._ledger_dir = self.ledger_dir
+        self.core = _FakeCore()
+        self.server.service = self.core  # type: ignore[assignment]
+        self.addCleanup(self._assert_motion_lock_free)
+
+    @staticmethod
+    def _assert_motion_lock_free() -> None:
+        assert not stack_server._MOTION_LOCK.locked(), "the motion lock leaked"
+
+    @property
+    def ledger_path(self) -> str:
+        return os.path.join(self.ledger_dir, "stack-ledger.json")
+
+    def _transfer(self, step_key: str = _STEP_KEY, **fields: Any) -> Any:
+        for name, value in _ESTIMATE_FIELDS.items():
+            fields.setdefault(name, value)
+        return self.stub.ExecuteCommand(self._stack(
+            transfer=stack_pb2.Command.Transfer(step_key=step_key, **fields)))
+
+    def _records(self) -> dict[str, Any]:
+        with open(self.ledger_path, encoding="utf-8") as handle:
+            document = json.load(handle)
+        assert document["version"] == 1
+        return dict(document["records"])
+
+
+class TestTransferFreshPath(_TransferTestCase):
+    """XFR-01 / XFR-02 tracer: plan, write-ahead, execute, started, wait, done."""
+
+    def test_the_happy_path_is_success_with_ran_meta_and_the_ordered_calls(self) -> None:
+        reply = self._transfer()
+        self.assertEqual(reply.response, SUCCESS)
+        self.assertEqual(reply.error_message, "")
+        self.assertEqual(reply.meta_data, _struct(Ran(task=_ran_snapshot()).to_dict()))
+        self.assertEqual(self.core.call_names, ["plan_transfer", "execute_transfer", "wait"])
+        self.assertEqual(self.core.execute_calls, 1)
+        self.assertEqual(self.core.calls[1][1], ("plan-1",))
+        self.assertEqual(self.core.calls[2][2], {"timeout_s": 300.0})
+
+    def test_the_ledger_ends_with_a_done_record_carrying_handle_and_result(self) -> None:
+        self._transfer()
+        records = self._records()
+        self.assertEqual(list(records), [_STEP_KEY])
+        record = records[_STEP_KEY]
+        self.assertEqual(record["state"], "done")
+        self.assertRegex(record["fingerprint"], r"^[0-9a-f]{64}$")
+        self.assertEqual(record["instance"], self.server._instance)
+        self.assertEqual(record["handle"], self.core.execute_result.to_dict())
+        self.assertEqual(record["result"], Ran(task=_ran_snapshot()).to_dict())
+        for field in ("createdAt", "updatedAt"):
+            stamp = datetime.fromisoformat(record[field])
+            self.assertEqual(stamp.utcoffset(), timedelta(0))
+
+    def test_the_write_ahead_record_is_on_disk_when_execute_transfer_is_called(self) -> None:
+        seen: list[Any] = []
+        handle = TaskHandle(guid=_GUID, robot="R1", estimated_s=30.0)
+
+        def _execute(plan_id: str) -> Any:
+            seen.append(self._records().get(_STEP_KEY))
+            return handle
+
+        self.core.execute_result = _execute
+        self._transfer()
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(seen[0]["state"], "submitting")
+        self.assertEqual(seen[0]["instance"], self.server._instance)
+        self.assertRegex(seen[0]["fingerprint"], r"^[0-9a-f]{64}$")
+
+    def test_a_fresh_ledger_directory_is_0700_and_the_files_are_0600(self) -> None:
+        self._transfer()
+        self.assertEqual(stat.S_IMODE(os.stat(self.ledger_dir).st_mode), 0o700)
+        for name in ("stack-ledger.json", "stack-ledger.json.lock"):
+            with self.subTest(name=name):
+                mode = stat.S_IMODE(os.stat(os.path.join(self.ledger_dir, name)).st_mode)
+                self.assertEqual(mode, 0o600)
+
+    def test_a_blank_ledger_dir_lands_under_xdg_state_home(self) -> None:
+        self.server._ledger_dir = ""
+        self.assertEqual(self._transfer().response, SUCCESS)
+        expected = os.path.join(
+            os.environ["XDG_STATE_HOME"], "galago-tools", "stack", "stack-ledger.json")
+        self.assertTrue(os.path.isfile(expected))
+        self.assertFalse(os.path.exists(os.path.join(self.fake_home, ".local")))
+
+    def test_a_repeat_of_the_step_key_sends_nothing(self) -> None:
+        self._transfer()
+        self.assertEqual(self.core.execute_calls, 1)
+        before = len(self.core.calls)
+        reply = self._transfer()
+        self.assertEqual(self.core.execute_calls, 1)
+        self.assertEqual(len(self.core.calls), before)
+        self.assertEqual(self.core.call_names.count("plan_transfer"), 1)
+        self.assertEqual(reply.response, ERROR_FROM_TOOL)
+
+    def test_a_corrupt_ledger_refuses_the_transfer_and_is_left_untouched(self) -> None:
+        os.makedirs(self.ledger_dir, mode=0o700)
+        with open(self.ledger_path, "wb") as handle:
+            handle.write(b"{not json")
+        reply = self._transfer()
+        self.assertEqual(reply.response, ERROR_FROM_TOOL)
+        self.assertIn(self.ledger_path, reply.error_message)
+        self.assertIn("do not delete it", reply.error_message)
+        self.assertEqual(self.core.calls, [])
+        with open(self.ledger_path, "rb") as handle:
+            self.assertEqual(handle.read(), b"{not json")
+
+    def test_execute_raising_leaves_the_record_submitting(self) -> None:
+        self.core.execute_result = RuntimeError("secret detail")
+        reply = self._transfer()
+        self.assertEqual(reply.response, ERROR_FROM_TOOL)
+        self.assertIn("RuntimeError", reply.error_message)
+        self.assertNotIn("secret detail", reply.error_message)
+        self.assertEqual(self._records()[_STEP_KEY]["state"], "submitting")
+        self._transfer()
+        self.assertEqual(self.core.execute_calls, 1)
+
+    def test_a_plan_that_is_not_a_plan_writes_no_record(self) -> None:
+        self.core.plan_result = NeedsInput(missing=["robot"])
+        reply = self._transfer()
+        self.assertEqual(reply.response, ERROR_FROM_TOOL)
+        self.assertEqual(self.core.call_names, ["plan_transfer"])
+        self.assertFalse(os.path.exists(self.ledger_path))
+
+    def test_a_non_ran_wait_result_is_an_error_and_the_unfinished_record_is_kept(self) -> None:
+        self.core.wait_result = TimedOut(handle=self.core.execute_result)
+        reply = self._transfer()
+        self.assertEqual(reply.response, ERROR_FROM_TOOL)
+        self.assertEqual(self._records()[_STEP_KEY]["state"], "started")
+        self.assertEqual(self.core.call_names.count("wait"), 1)
+
+    def test_an_unconfigured_transfer_is_not_ready(self) -> None:
+        self.server.service = None
+        reply = self._transfer()
+        self.assertEqual(reply.response, NOT_READY)
+        self.assertEqual(reply.error_message, "stack: not configured")
+
+    def test_the_motion_lock_is_free_after_every_outcome(self) -> None:
+        self._transfer()
+        self.core.execute_result = RuntimeError("x")
+        self._transfer("run-2:stack-1")
+        self.assertFalse(stack_server._MOTION_LOCK.locked())
 
 
 class TestTransferEstimate(_RealModeGrpcTestCase):
