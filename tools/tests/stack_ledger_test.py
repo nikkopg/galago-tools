@@ -24,10 +24,21 @@ from unittest.mock import patch
 
 from tools.stack import ledger as ledger_module
 from tools.stack.ledger import (
+    FRESH,
     LEDGER_FILENAME,
     LOCK_FILENAME,
+    MISMATCH,
+    REATTACH,
+    REFUSE_COMPLETED,
+    REFUSE_FAILED,
+    REFUSE_OUTCOME_UNKNOWN,
+    REFUSE_SUBMITTING,
+    REPLAY,
+    REPLAY_WINDOW_S,
+    Decision,
     Ledger,
     LedgerError,
+    decide,
     fingerprint,
     resolve_ledger_dir,
 )
@@ -579,6 +590,159 @@ class TestFingerprint(unittest.TestCase):
         snapshot = dataclasses.asdict(request)
         fingerprint("host:80", request)
         self.assertEqual(dataclasses.asdict(request), snapshot)
+
+
+class TestDecide(unittest.TestCase):
+    """The D-07 repeat-key table as amended by 05-SPIKE.md section 6b."""
+
+    def decide(self, record: Optional[dict[str, Any]], *, fp: str = _FP,
+               instance: str = _INSTANCE, now: datetime = _NOW) -> Decision:
+        return decide(record, fingerprint=fp, instance=instance, now=now)
+
+    def done_ran(self, age_s: float, **kwargs: Any) -> dict[str, Any]:
+        return _record("done", when=_NOW - timedelta(seconds=age_s), **kwargs)
+
+    def test_the_window_is_600_seconds(self) -> None:
+        self.assertEqual(REPLAY_WINDOW_S, 600.0)
+
+    def test_no_record_is_fresh(self) -> None:
+        self.assertEqual(self.decide(None), Decision(FRESH, False, None))
+
+    def test_a_different_fingerprint_is_a_mismatch_in_every_state(self) -> None:
+        records = {
+            "submitting": _record("submitting", fp=_FP2),
+            "started": _record("started", fp=_FP2),
+            "done ran": _record("done", fp=_FP2),
+            "done failed": _record("done", fp=_FP2, result={"kind": "failed"}),
+            "outcomeUnknown": _record("outcomeUnknown", fp=_FP2, latch_guid="submit-0123456789abcdef"),
+        }
+        for name, record in records.items():
+            with self.subTest(state=name):
+                decision = self.decide(record)
+                self.assertEqual(decision.action, MISMATCH)
+                self.assertEqual(decision.record, record)
+
+    def test_a_mismatch_is_checked_before_the_age_and_restart(self) -> None:
+        old = self.done_ran(10_000, fp=_FP2, instance="another-instance")
+        self.assertEqual(self.decide(old).action, MISMATCH)
+
+    def test_submitting_is_refused(self) -> None:
+        decision = self.decide(_record("submitting"))
+        self.assertEqual(decision.action, REFUSE_SUBMITTING)
+        self.assertFalse(decision.restarted)
+
+    def test_submitting_from_another_instance_reports_the_restart(self) -> None:
+        decision = self.decide(_record("submitting", instance="older-instance"))
+        self.assertEqual(decision.action, REFUSE_SUBMITTING)
+        self.assertTrue(decision.restarted)
+
+    def test_outcome_unknown_is_refused(self) -> None:
+        record = _record("outcomeUnknown", latch_guid="submit-0123456789abcdef")
+        decision = self.decide(record)
+        self.assertEqual(decision.action, REFUSE_OUTCOME_UNKNOWN)
+        self.assertFalse(decision.restarted)
+        self.assertEqual(decision.record, record)
+
+    def test_outcome_unknown_reports_the_restart(self) -> None:
+        decision = self.decide(_record("outcomeUnknown", instance="older-instance"))
+        self.assertEqual(decision.action, REFUSE_OUTCOME_UNKNOWN)
+        self.assertTrue(decision.restarted)
+
+    def test_started_in_the_same_instance_reattaches(self) -> None:
+        decision = self.decide(_record("started"))
+        self.assertEqual(decision.action, REATTACH)
+        self.assertFalse(decision.restarted)
+
+    def test_started_from_another_instance_reattaches_and_reports_the_restart(self) -> None:
+        decision = self.decide(_record("started", instance="older-instance"))
+        self.assertEqual(decision.action, REATTACH)
+        self.assertTrue(decision.restarted)
+
+    def test_a_ran_record_inside_the_window_is_replayed(self) -> None:
+        for age in (0.0, 1.0, 599.999):
+            with self.subTest(age=age):
+                record = self.done_ran(age)
+                decision = self.decide(record)
+                self.assertEqual(decision.action, REPLAY)
+                self.assertEqual(decision.record, record)
+                self.assertFalse(decision.restarted)
+
+    def test_a_replay_from_another_instance_still_replays(self) -> None:
+        decision = self.decide(self.done_ran(5.0, instance="older-instance"))
+        self.assertEqual(decision.action, REPLAY)
+        self.assertTrue(decision.restarted)
+
+    def test_a_ran_record_at_exactly_600_seconds_is_refused_as_completed(self) -> None:
+        decision = self.decide(self.done_ran(600.0))
+        self.assertEqual(decision.action, REFUSE_COMPLETED)
+
+    def test_an_old_ran_record_is_refused_as_completed(self) -> None:
+        for age in (600.001, 601.0, 86_400.0):
+            with self.subTest(age=age):
+                self.assertEqual(self.decide(self.done_ran(age)).action, REFUSE_COMPLETED)
+
+    def test_a_future_dated_ran_record_is_refused_as_completed(self) -> None:
+        # The clock moved back, or the record was written with a skewed clock.
+        for age in (-5.0, -0.001, -86_400.0):
+            with self.subTest(age=age):
+                self.assertEqual(self.decide(self.done_ran(age)).action, REFUSE_COMPLETED)
+
+    def test_a_ran_record_with_an_unparseable_updated_at_is_refused_as_completed(self) -> None:
+        for stamp in ("not-a-time", "2026-10-29T12:00:00", ""):
+            with self.subTest(stamp=stamp):
+                record = _record("done")
+                record["updatedAt"] = stamp
+                self.assertEqual(self.decide(record).action, REFUSE_COMPLETED)
+
+    def test_any_other_done_result_is_refused_as_failed(self) -> None:
+        results = {
+            "failed": {"kind": "failed"},
+            "aborted": {"kind": "aborted"},
+            "lost taskNotFound": {"kind": "lost", "reason": "taskNotFound"},
+            "cancelled": {"kind": "cancelled"},
+            "unexpected": {"kind": "somethingNew"},
+        }
+        for name, result in results.items():
+            for age in (0.0, 30.0, 10_000.0):
+                with self.subTest(result=name, age=age):
+                    decision = self.decide(self.done_ran(age, result=result))
+                    self.assertEqual(decision.action, REFUSE_FAILED)
+
+    def test_a_ran_kind_check_is_exact(self) -> None:
+        record = self.done_ran(1.0, result={"kind": "Ran"})
+        self.assertEqual(self.decide(record).action, REFUSE_FAILED)
+
+    def test_decide_does_not_mutate_its_input(self) -> None:
+        records = [
+            _record("submitting"), _record("started"), self.done_ran(1.0),
+            self.done_ran(900.0), _record("outcomeUnknown"),
+            _record("done", result={"kind": "failed"}), _record("submitting", fp=_FP2),
+        ]
+        for record in records:
+            with self.subTest(state=record["state"], updated=record["updatedAt"]):
+                snapshot = copy.deepcopy(record)
+                self.decide(record)
+                self.assertEqual(record, snapshot)
+
+    def test_equal_inputs_give_equal_decisions(self) -> None:
+        record = self.done_ran(12.0)
+        self.assertEqual(self.decide(record), self.decide(copy.deepcopy(record)))
+        self.assertEqual(self.decide(None), self.decide(None))
+
+    def test_decision_is_frozen(self) -> None:
+        decision = self.decide(None)
+        with self.assertRaises(dataclasses.FrozenInstanceError):
+            decision.action = REPLAY  # type: ignore[misc]
+
+    def test_decide_needs_an_aware_now(self) -> None:
+        with self.assertRaises(ValueError):
+            self.decide(self.done_ran(1.0), now=datetime(2026, 10, 29, 12, 0, 0))
+
+    def test_decide_reads_no_file_and_makes_no_core_call(self) -> None:
+        with patch("builtins.open", side_effect=AssertionError("decide touched a file")), \
+                patch("os.open", side_effect=AssertionError("decide touched a file")):
+            self.assertEqual(self.decide(self.done_ran(1.0)).action, REPLAY)
+            self.assertEqual(self.decide(None).action, FRESH)
 
 
 if __name__ == "__main__":
