@@ -1231,6 +1231,31 @@ def _enclosing_function(
 _Site = tuple[str, Optional[ast.FunctionDef], ast.Call, dict[ast.AST, ast.AST]]
 
 
+def _claim_gates(function: ast.FunctionDef, send: ast.Call) -> bool:
+    """True when ``function`` assigns the value of a .claim() call to a name and,
+    between that assignment and ``send``, returns from an `if not <name>` (WR-05:
+    the claim returning False is the only thing that stops two tool servers
+    sharing a ledger from both sending the same step key)."""
+    for node in ast.walk(function):
+        value = node.value if isinstance(node, ast.Assign) else None
+        if not (isinstance(value, ast.Call) and isinstance(value.func, ast.Attribute)
+                and value.func.attr == _WRITE_AHEAD_CALL):
+            continue
+        assert isinstance(node, ast.Assign)
+        names = [t.id for t in node.targets if isinstance(t, ast.Name)]
+        for guard in ast.walk(function):
+            if not (isinstance(guard, ast.If) and isinstance(guard.test, ast.UnaryOp)
+                    and isinstance(guard.test.op, ast.Not)
+                    and isinstance(guard.test.operand, ast.Name)
+                    and guard.test.operand.id in names):
+                continue
+            if node.lineno < guard.lineno < send.lineno and any(
+                    isinstance(inner, ast.Return) for stmt in guard.body
+                    for inner in ast.walk(stmt)):
+                return True
+    return False
+
+
 def _stack_adapter_violations(trees: dict[str, ast.Module]) -> list[str]:
     """Pure, assertion-free no-MCP / open_service-shape / call-site checks
     (D-16, D-21) over every tools/stack module. Returns "<file>:<line>:
@@ -1327,6 +1352,10 @@ def _stack_adapter_violations(trees: dict[str, ast.Module]) -> list[str]:
                 violations.append(
                     f"{at}: acknowledge_failure() without a preceding {_ACK_YES_CONSTANT!r} check")
     for at, enclosing, call, parents in sites.get("execute_transfer", []):
+        if enclosing is not None and enclosing.name == "_run_fresh" and not _claim_gates(
+                enclosing, call):
+            violations.append(
+                f"{at}: execute_transfer() is reachable without testing the claim() result")
         ancestor = parents.get(call)
         while ancestor is not None:
             if isinstance(ancestor, _LOOP_NODES):
@@ -1412,6 +1441,25 @@ class TestAdapterInvariant(unittest.TestCase):
     def test_real_sources_are_clean(self) -> None:
         self.assertIn("server.py", self.trees)
         self.assertEqual(_stack_adapter_violations(self.trees), [])
+
+    def test_a_send_that_does_not_test_the_claim_result_is_reported(self) -> None:
+        """WR-05: dropping the `if not claimed: return` guard leaves a claim that
+        is called before the send but gates nothing."""
+        tree = copy.deepcopy(self.server)
+        removed = 0
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == "_run_fresh":
+                kept = []
+                for stmt in node.body:
+                    if (isinstance(stmt, ast.If) and isinstance(stmt.test, ast.UnaryOp)
+                            and isinstance(stmt.test.op, ast.Not)
+                            and isinstance(stmt.test.operand, ast.Name)):
+                        removed += 1
+                        continue
+                    kept.append(stmt)
+                node.body = kept
+        self.assertEqual(removed, 1)
+        self._assert_reported(tree, "without testing the claim() result")
 
     def test_every_forbidden_service_call_is_reported(self) -> None:
         self.assertEqual(len(_FORBIDDEN_SERVICE_CALLS), 5)
@@ -4060,6 +4108,46 @@ class TestAcknowledgeLeavesTheLedgerAlone(_TransferTestCase):
         self.assertFalse(os.path.exists(self.ledger_dir))
         self.assertEqual(self.core.call_names, ["acknowledge_failure"])
         self.assertEqual(self.core.calls[0][2], {"confirm": True})
+
+
+class TestClaimedElsewhere(_TransferTestCase):
+    """WR-05: a claim that returns False (another tool server sharing the ledger
+    holds the step key) must stop the Transfer before execute_transfer."""
+
+    def _assert_refused(self, reply: Any) -> None:
+        self.assertEqual(reply.response, ERROR_FROM_TOOL)
+        self.assertEqual(reply.error_message, stack_server._CLAIMED_ELSEWHERE)
+        self.assertIn("claimed by another tool server", reply.error_message)
+        self.assertIn("no transfer was sent", reply.error_message)
+        self.assertEqual(self.core.execute_calls, 0)
+        self.assertNotIn("wait", self.core.call_names)
+
+    def test_a_claim_that_returns_false_sends_nothing(self) -> None:
+        with patch.object(Ledger, "claim", return_value=False) as claim:
+            reply = self._transfer()
+        claim.assert_called_once()
+        self._assert_refused(reply)
+        self.assertEqual(self.core.call_names, ["plan_transfer"])
+
+    def test_a_record_another_server_wrote_after_our_read_is_not_overwritten_or_sent(
+            self) -> None:
+        """The real claim: the record appears between our read of the ledger
+        (empty) and our claim, as a second tool server's write-ahead would."""
+        _write_record(self.ledger_dir, _STEP_KEY, state="started", instance="other-server",
+                      handle=TaskHandle(guid=_GUID, robot="R1").to_dict())
+        with open(os.path.join(self.ledger_dir, "stack-ledger.json"), "rb") as handle:
+            before = handle.read()
+        with patch.object(Ledger, "get", return_value=None):
+            reply = self._transfer()
+        self._assert_refused(reply)
+        with open(os.path.join(self.ledger_dir, "stack-ledger.json"), "rb") as handle:
+            self.assertEqual(handle.read(), before)
+
+    def test_the_refusal_releases_the_motion_lock_and_leaves_the_tool_ready(self) -> None:
+        with patch.object(Ledger, "claim", return_value=False):
+            self._transfer()
+        self.assertFalse(stack_server._MOTION_LOCK.locked())
+        self.assertEqual(self._health().status, READY)
 
 
 class TestAcknowledgeDuringTransfer(_TransferTestCase):
