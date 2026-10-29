@@ -285,10 +285,32 @@ class StackServer(ToolServer):
         # serialises Configures; _state guards _readers/_reconfiguring so a
         # Configure waits for in-flight commands to finish before it closes
         # the owner, and commands wait while it swaps the owner and service.
+        self._read_bypass = threading.local()
         self._configure_lock = threading.Lock()
         self._state = threading.Condition()
         self._readers = 0
         self._reconfiguring = False
+
+    @property
+    def last_error(self) -> Optional[str]:
+        value: Optional[str] = self.__dict__.get("_last_error", "")
+        return value
+
+    @last_error.setter
+    def last_error(self, value: Optional[str]) -> None:
+        """WR-04: GetStatus.error_message is the operator's view of the tool's
+        last failure. A bypassed read must not clear or overwrite it (base
+        _dispatchCommand writes it on every reply), or a concurrent read could
+        erase a motion command's failure text with no change in status. Writes
+        made on a thread that is inside a bypassed read are dropped; the read's
+        own outcome is in its reply. Thread-local, so a motion command's write
+        on another thread is never suppressed and never overwritten by a stale
+        restore. The one deliberate exception is the bypass's own exception
+        handler, which still records the error (D-13)."""
+        bypass = self.__dict__.get("_read_bypass")  # absent while base __init__ runs
+        if bypass is not None and getattr(bypass, "active", False):
+            return
+        self.__dict__["_last_error"] = value
 
     def _teardown(self) -> None:
         """Drop the current owner, if any, so "no service" always holds after
@@ -395,14 +417,22 @@ class StackServer(ToolServer):
             field_name = stack_command.WhichOneof("command")
             if field_name in READ_COMMANDS:
                 command = getattr(stack_command, field_name)
+                # WR-04: last_error writes are dropped on this thread for the
+                # whole read (see the last_error setter).
+                self._read_bypass.active = True
                 try:
                     logging.info(f"Running command {command.__class__.__name__}")
                     return self._dispatchCommand(command)
                 except Exception as e:
                     logging.error(f"Error on Tool ={self.toolId}")
+                    # D-13 locks "an Exception sets last_error": the one write
+                    # a bypassed read still makes.
+                    self._read_bypass.active = False
                     self.last_error = str(e)
                     return ExecuteCommandReply(
                         response=DRIVER_ERROR, error_message=_one_line(str(e), 500))
+                finally:
+                    self._read_bypass.active = False
         return super().ExecuteCommand(request, context)
 
     def _dispatchCommand(self, command: message.Message) -> ExecuteCommandReply:

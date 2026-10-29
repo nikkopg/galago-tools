@@ -1901,6 +1901,43 @@ class TestBusyReads(_RealModeGrpcTestCase):
         self.assertEqual(self._health().status, READY)
 
 
+    def test_reads_do_not_clear_or_overwrite_the_last_error(self) -> None:
+        """WR-04: a motion command's failure text in GetStatus.error_message
+        survives successful, refused and failed (non-exception) reads."""
+        self.server.last_error = "transfer failed: arm fault"
+        self.service.robot_states.return_value = ReadFailed(
+            error={"status": 500, "name": "Boom"})
+        for field, message in (
+            ("get_manager_state", stack_pb2.Command.GetManagerState),    # SUCCESS
+            ("get_robot_states", stack_pb2.Command.GetRobotStates),      # ERROR_FROM_TOOL
+            ("get_failure_latch", stack_pb2.Command.GetFailureLatch),    # refusal
+        ):
+            with self.subTest(field):
+                self.stub.ExecuteCommand(self._stack(**{field: message()}))
+                self.assertEqual(self.server.last_error, "transfer failed: arm fault")
+                self.assertEqual(
+                    self._health().error_message, "transfer failed: arm fault")
+
+    def test_last_error_survives_reads_while_a_transfer_is_in_flight(self) -> None:
+        release, thread, result, _handler = self._start_blocked_command()
+        self.server.last_error = "transfer failed: arm fault"
+        reply = self.stub.ExecuteCommand(self._stack(
+            get_manager_state=stack_pb2.Command.GetManagerState()))
+        self.assertEqual(reply.response, SUCCESS)
+        self.assertEqual(self._health().status, tool_base_pb2.BUSY)
+        self.assertEqual(self._health().error_message, "transfer failed: arm fault")
+        release.set()
+        thread.join(10)
+
+    def test_a_non_read_command_still_records_its_error(self) -> None:
+        self.server.last_error = "stale"
+        reply = self.stub.ExecuteCommand(self._stack(
+            transfer=stack_pb2.Command.Transfer(step_key="s-1")))
+        self.assertEqual(reply.response, ERROR_FROM_TOOL)
+        self.assertEqual(self.server.last_error, reply.error_message)
+        self.assertNotEqual(self.server.last_error, "stale")
+
+
 class TestReadCommandSet(unittest.TestCase):
     """T-04-19: the BUSY-bypass set is pinned so a motion or acknowledge command
     can never join it silently."""
