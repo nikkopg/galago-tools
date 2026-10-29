@@ -92,6 +92,7 @@ from tools.grpc_interfaces.tool_driver_pb2_grpc import (
     ToolDriverStub,
     add_ToolDriverServicer_to_server,
 )
+from tools.stack.ledger import LedgerError
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -1878,6 +1879,161 @@ class TestFailureLatch(_RealModeGrpcTestCase):
         self._latch()
         self.assertEqual([c[0] for c in self.service.mock_calls], ["latch_status"])
         self.assertFalse(os.path.exists(os.path.join(self.xdg_state_home, "galago-tools")))
+
+
+_SUBMIT_GUID = "submit-0123456789abcdef"
+_STATE_GUID = "state-0123456789abcdef"
+
+
+class TestLatchGuidInMessage(_TransferTestCase):
+    """ACK-02 / A-2: every Transfer error whose cause can latch names the guid
+    from latch_status() first, labels the result's own guid "task guid", and
+    keeps that guid inside the 300-character cap."""
+
+    def _latched(self, guid: str = _SUBMIT_GUID, kind: str = "lost") -> LatchStatus:
+        return LatchStatus(latched=True, guid=guid, result_kind=kind,
+                           reason="submitOutcomeUnknown")
+
+    def test_a_failed_task_names_the_latched_guid_before_the_task_guid(self) -> None:
+        failed = Failed(task=_snapshot("g-task"))
+        self.core.wait_result = failed
+        self.core.latch_result = self._latched()
+        reply = self._transfer()
+        self.assertEqual(reply.response, ERROR_FROM_TOOL)
+        message = reply.error_message
+        self.assertIn(f"latched guid {_SUBMIT_GUID}", message)
+        self.assertIn("AcknowledgeFailure", message)
+        self.assertLess(message.index(f"latched guid {_SUBMIT_GUID}"),
+                        message.index("task guid g-task"))
+        self.assertNotIn("latched guid g-task", message)
+        self.assertEqual(reply.meta_data, _struct(failed.to_dict()))
+        self.assertEqual(self.core.call_names.count("latch_status"), 1)
+
+    def test_the_first_failure_wins_and_the_task_guid_is_never_the_one_to_acknowledge(self) -> None:
+        self.core.wait_result = Failed(task=_snapshot("g-task"))
+        self.core.latch_result = self._latched("g-earlier", "failed")
+        message = self._transfer().error_message
+        self.assertIn("latched guid g-earlier (failed)", message)
+        self.assertIn("task guid g-task", message)
+        self.assertNotIn("latched guid g-task", message)
+        self.assertLess(message.index("g-earlier"), message.index("g-task"))
+
+    def test_aborted_and_lost_with_an_unlatched_core_say_it_did_not_latch(self) -> None:
+        for label, result in (
+            ("aborted", Aborted(task=_snapshot("g-task"))),
+            ("lost", Lost(reason="taskNotFound", handle=TaskHandle(guid="g-handle"))),
+        ):
+            with self.subTest(label):
+                self.core.wait_result = result
+                self.core.latch_result = LatchStatus(latched=False)
+                reply = self._transfer(f"run-{label}:k")
+                self.assertEqual(reply.response, ERROR_FROM_TOOL)
+                self.assertIn("did not latch", reply.error_message)
+                self.assertIn("inspect the arm", reply.error_message)
+                self.assertNotIn("latched guid", reply.error_message)
+                self.assertEqual(reply.meta_data, _struct(result.to_dict()))
+
+    def test_a_failure_latched_plan_refusal_names_the_latch_and_sends_nothing(self) -> None:
+        refused = Refused(reason="failureLatched", detail={"guid": _STATE_GUID})
+        self.core.plan_result = refused
+        self.core.latch_result = self._latched(_STATE_GUID, "stateUnreadable")
+        reply = self._transfer()
+        self.assertEqual(reply.response, ERROR_FROM_TOOL)
+        self.assertIn(f"latched guid {_STATE_GUID} (stateUnreadable)", reply.error_message)
+        self.assertEqual(reply.meta_data, _struct(refused.to_dict()))
+        self.assertEqual(self.core.call_names, ["plan_transfer", "latch_status"])
+        self.assertFalse(os.path.exists(self.ledger_path))
+
+    def test_the_latched_guid_survives_the_cap_with_a_400_character_reason(self) -> None:
+        self.core.latch_result = self._latched()
+        self.core.wait_result = Lost(reason="r" * 400, handle=TaskHandle(guid="g-handle"))
+        message = self._transfer("wait:k").error_message
+        self.assertIn(_SUBMIT_GUID, message)
+        self.assertLessEqual(len(message), 300)
+        self.assertIn("AcknowledgeFailure", message)
+        reply = stack_server._transfer_error_reply(
+            self.core, Failed(task=_snapshot("g" * 400)))
+        self.assertLessEqual(len(reply.error_message), 300)
+        self.assertIn(_SUBMIT_GUID, reply.error_message)
+
+    def test_non_latching_errors_keep_the_phase_4_line_and_make_no_latch_call(self) -> None:
+        for label, plan in (
+            ("rejected", Rejected(stage="local", findings=[{"name": "stackArmNotFound"}])),
+            ("needsInput", NeedsInput(missing=["robot"])),
+            ("readFailed", ReadFailed(error={"status": 503, "name": "Busy"})),
+            ("robotNotIdle", Refused(reason="robotNotIdle", detail={"robot": "R1"})),
+        ):
+            with self.subTest(label):
+                self.core.calls.clear()
+                self.core.plan_result = plan
+                reply = self._transfer()
+                self.assertEqual(reply.response, ERROR_FROM_TOOL)
+                self.assertEqual(reply.error_message, _result_reply(plan).error_message)
+                self.assertEqual(reply.meta_data, _struct(plan.to_dict()))
+                self.assertNotIn("latch_status", self.core.call_names)
+
+    def test_the_ran_path_makes_no_latch_call(self) -> None:
+        reply = self._transfer()
+        self.assertEqual(reply.response, SUCCESS)
+        self.assertEqual(reply.error_message, "")
+        self.assertNotIn("latch_status", self.core.call_names)
+
+    def test_a_raising_latch_status_still_returns_the_error(self) -> None:
+        self.core.wait_result = Failed(task=_snapshot("g-task"))
+        self.core.latch_result = RuntimeError("secret detail")
+        reply = self._transfer()
+        self.assertEqual(reply.response, ERROR_FROM_TOOL)
+        self.assertIn("latch status unavailable; read GetFailureLatch", reply.error_message)
+        self.assertNotIn("secret detail", reply.error_message)
+        self.assertIn("task guid g-task", reply.error_message)
+
+    def test_a_malformed_latch_answer_is_unavailable_never_a_guess(self) -> None:
+        for label, answer in (
+            ("string", "submit-0123456789abcdef"),
+            ("none", None),
+            ("dict", {"latched": True, "guid": "g"}),
+            ("latched without a guid", LatchStatus(latched=True, guid=None)),
+            ("latched with a blank guid", LatchStatus(latched=True, guid="  ")),
+        ):
+            with self.subTest(label):
+                self.core.latch_result = answer
+                clause = stack_server._latch_clause(self.core)
+                self.assertEqual(clause, "latch status unavailable; read GetFailureLatch")
+
+    def test_the_clause_templates_are_the_spike_wording(self) -> None:
+        self.core.latch_result = self._latched("g-1", "failed")
+        self.assertEqual(stack_server._latch_clause(self.core),
+                         "latched guid g-1 (failed); inspect the arm, then AcknowledgeFailure")
+        self.core.latch_result = LatchStatus(latched=False)
+        self.assertEqual(stack_server._latch_clause(self.core),
+                         "the core did not latch this; inspect the arm")
+
+    def test_the_explanation_text_is_never_read(self) -> None:
+        self.core.wait_result = Failed(task=_snapshot("g-task"), explanation=_SENTINEL)
+        self.core.latch_result = LatchStatus(
+            latched=True, guid="g-1", result_kind="failed", explanation=_SENTINEL)
+        self.assertNotIn(_SENTINEL, self._transfer().error_message)
+
+    def test_a_ledger_write_failure_after_a_failure_still_names_the_latch(self) -> None:
+        self.core.wait_result = Failed(task=_snapshot("g-task"))
+        self.core.latch_result = self._latched()
+        with patch.object(stack_server.Ledger, "mark_done",
+                          side_effect=LedgerError("unwritable", self.ledger_path)):
+            reply = self._transfer()
+        message = reply.error_message
+        self.assertEqual(reply.response, ERROR_FROM_TOOL)
+        self.assertIn("ledger could not record it", message)
+        self.assertIn(f"latched guid {_SUBMIT_GUID}", message)
+        self.assertLess(message.index("latched guid"), message.index("will not send a second"))
+        self.assertLessEqual(len(message), 300)
+
+    def test_a_ledger_write_failure_after_ran_has_no_latch_clause(self) -> None:
+        with patch.object(stack_server.Ledger, "mark_done",
+                          side_effect=LedgerError("unwritable", self.ledger_path)):
+            reply = self._transfer()
+        self.assertEqual(reply.response, ERROR_FROM_TOOL)
+        self.assertIn("transfer ran, but the ledger could not record it", reply.error_message)
+        self.assertNotIn("latch_status", self.core.call_names)
 
 
 class TestTransferEstimate(_RealModeGrpcTestCase):
