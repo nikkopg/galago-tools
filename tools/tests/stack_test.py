@@ -1886,11 +1886,14 @@ class TestFailureLatch(_RealModeGrpcTestCase):
         def _blocking(*_a: Any, **_k: Any) -> Any:
             entered.set()
             release.wait(timeout=10)
-            return tool_base_pb2.ExecuteCommandReply(response=SUCCESS, return_reply=True)
+            return Ran(task=_ran_snapshot())
 
-        patcher = patch.object(self.server, "Transfer", MagicMock(side_effect=_blocking))
-        patcher.start()
-        self.addCleanup(patcher.stop)
+        # The real Transfer, blocked inside the core wait (not an injected handler).
+        self.server._ledger_dir = os.path.join(self._tmpdir.name, "ledger")
+        self.addCleanup(_TransferTestCase._assert_motion_lock_free)
+        self.service.plan_transfer.return_value = _FakeCore().plan_result
+        self.service.execute_transfer.return_value = TaskHandle(guid=_GUID, robot="R1")
+        self.service.wait.side_effect = _blocking
         thread = threading.Thread(target=lambda: self.stub.ExecuteCommand(self._stack(
             transfer=stack_pb2.Command.Transfer(step_key="busy-1"))))
         thread.start()
@@ -3639,6 +3642,19 @@ class TestSimulatedTransferOverGrpc(_SimulatedGrpcTestCase):
         self.assertEqual(self.sleeps, [])
         self._assert_core_free()
 
+    def test_a_simulated_transfer_never_writes_a_ledger_anywhere(self) -> None:
+        """STK-06 regression: neither the configured ledger dir nor
+        XDG_STATE_HOME (the default home of the ledger) gets a stack-ledger.json."""
+        reply = self._transfer(step_key="run-1:stack-1", robot="R1")
+        self.assertEqual(reply.response, SUCCESS)
+        self.assertFalse(self.ledger_path.exists())
+        self.assertFalse((self.ledger_path / "stack-ledger.json").exists())
+        found = [name for _root, _dirs, files in os.walk(self.xdg_state_home)
+                 for name in files if name.startswith("stack-ledger.json")]
+        self.assertEqual(found, [])
+        self.assertFalse(os.path.exists(os.path.join(self.fake_home, ".local")))
+        self._assert_core_free()
+
 
 class TestCheckArgs(unittest.TestCase):
     """D-17: the adapter checks only its own arguments, exactly."""
@@ -3978,13 +3994,18 @@ _BUSY_READS = (
 
 
 class TestBusyReads(_RealModeGrpcTestCase):
-    """STK-05 tracer (D-13..D-16): while a non-read command holds the tool BUSY,
-    every read answers with its own result and a second non-read is refused.
-    The real Transfer lands in Phase 5, so the slow command is an injected
-    Transfer handler."""
+    """STK-05 (D-12, D-13..D-17), re-proven on the real Transfer: while a Transfer
+    is blocked inside the core wait, GetStatus is BUSY, every read (including
+    GetFailureLatch) answers with its own result, a second Transfer is refused
+    (NOT_READY over gRPC, the motion lock on a direct call), and after release
+    the first Transfer is SUCCESS with its ledger record done. The slow part is
+    a fake core wait, never an injected handler."""
 
     def setUp(self) -> None:
         super().setUp()
+        self.ledger_dir = os.path.join(self._tmpdir.name, "ledger")
+        self.server._ledger_dir = self.ledger_dir
+        self.addCleanup(_TransferTestCase._assert_motion_lock_free)
         self.results = {
             "manager_state": ManagerState(mode="Idle", recovery=None, api_version="3"),
             "robot_states": RobotStates(robots=[]),
@@ -3999,25 +4020,25 @@ class TestBusyReads(_RealModeGrpcTestCase):
         for method, result in self.results.items():
             getattr(self.service, method).return_value = result
 
-    def _start_blocked_command(self) -> tuple[threading.Event, threading.Thread, dict[str, Any], MagicMock]:
-        """Blocks a Transfer sent over the gRPC stub inside its handler so
-        base_server's isReady/setStatus(BUSY) bracket is really exercised. The
-        step_key must be non-blank or the argument check answers
-        INVALID_ARGUMENTS instantly (Pitfall 5). An instance attribute wins
-        over the class handler because base _dispatchCommand resolves the
-        handler with getattr(self, name)."""
+    def _start_blocked_transfer(self) -> tuple[threading.Event, threading.Thread, dict[str, Any]]:
+        """Drive the real Transfer over the gRPC stub with a core wait that
+        blocks on an Event, so base_server's isReady/setStatus(BUSY) bracket and
+        the motion lock are really exercised. plan_transfer answers a plan,
+        execute_transfer a handle, and wait blocks (timeout 10) then answers
+        Ran. The step_key must be non-blank or the argument check answers
+        INVALID_ARGUMENTS instantly (Pitfall 5)."""
         release = threading.Event()
         entered = threading.Event()
 
         def _blocking(*args: Any, **kwargs: Any) -> Any:
             entered.set()
             release.wait(timeout=10)
-            return tool_base_pb2.ExecuteCommandReply(response=SUCCESS, return_reply=True)
+            return Ran(task=_ran_snapshot())
 
-        handler = MagicMock(side_effect=_blocking)
-        patcher = patch.object(self.server, "Transfer", handler)
-        patcher.start()
-        self.addCleanup(patcher.stop)
+        self.service.plan_transfer.return_value = _FakeCore().plan_result
+        self.service.execute_transfer.return_value = TaskHandle(
+            guid=_GUID, robot="R1", estimated_s=30.0)
+        self.service.wait.side_effect = _blocking
 
         result: dict[str, Any] = {}
 
@@ -4032,10 +4053,10 @@ class TestBusyReads(_RealModeGrpcTestCase):
         self.addCleanup(thread.join, 10)
         self.addCleanup(release.set)
         self.assertTrue(entered.wait(timeout=5))
-        return release, thread, result, handler
+        return release, thread, result
 
     def test_reads_answer_while_busy_and_a_second_transfer_is_refused(self) -> None:
-        release, thread, result, handler = self._start_blocked_command()
+        release, thread, result = self._start_blocked_transfer()
         self.assertEqual(self._health().status, tool_base_pb2.BUSY)
 
         for method, field, message in _BUSY_READS:
@@ -4055,13 +4076,28 @@ class TestBusyReads(_RealModeGrpcTestCase):
         second = self.stub.ExecuteCommand(self._stack(
             transfer=stack_pb2.Command.Transfer(step_key="busy-2")))
         self.assertEqual(second.response, NOT_READY)
-        self.assertEqual(handler.call_count, 1)
+        # D-12: a direct call (past the BUSY gate) meets the motion lock.
+        direct = self.server.Transfer(stack_pb2.Command.Transfer(step_key="busy-3"))
+        self.assertEqual(direct.response, ERROR_FROM_TOOL)
+        self.assertIn("busy", direct.error_message)
+        self.service.plan_transfer.assert_called_once()
+        self.service.execute_transfer.assert_called_once()
+        self.assertTrue(stack_server._MOTION_LOCK.locked())
 
         release.set()
         thread.join(10)
+        self.assertFalse(thread.is_alive())
         self.assertEqual(result["transfer"].response, SUCCESS)
         self.assertEqual(self._health().status, READY)
-
+        self.assertFalse(stack_server._MOTION_LOCK.locked())
+        with open(os.path.join(self.ledger_dir, "stack-ledger.json"), encoding="utf-8") as handle:
+            records = json.load(handle)["records"]
+        self.assertEqual(records["busy-1"]["state"], "done")
+        self.assertNotIn("busy-2", records)
+        self.assertNotIn("busy-3", records)
+        self.service.plan_transfer.assert_called_once()
+        self.service.execute_transfer.assert_called_once()
+        self.service.acknowledge_failure.assert_not_called()
 
     def test_reads_do_not_clear_or_overwrite_the_last_error(self) -> None:
         """WR-04: a motion command's failure text in GetStatus.error_message
@@ -4082,7 +4118,7 @@ class TestBusyReads(_RealModeGrpcTestCase):
                     self._health().error_message, "transfer failed: arm fault")
 
     def test_last_error_survives_reads_while_a_transfer_is_in_flight(self) -> None:
-        release, thread, result, _handler = self._start_blocked_command()
+        release, thread, result = self._start_blocked_transfer()
         self.server.last_error = "transfer failed: arm fault"
         reply = self.stub.ExecuteCommand(self._stack(
             get_manager_state=stack_pb2.Command.GetManagerState()))
@@ -4091,6 +4127,7 @@ class TestBusyReads(_RealModeGrpcTestCase):
         self.assertEqual(self._health().error_message, "transfer failed: arm fault")
         release.set()
         thread.join(10)
+        self.assertEqual(result["transfer"].response, SUCCESS)
 
     def test_a_non_read_command_still_records_its_error(self) -> None:
         self.service.plan_transfer.return_value = NeedsInput(missing=["robot"])

@@ -11,8 +11,14 @@ Transfer is the one motion path and the one multi-call command (D-12): a fresh
 step key runs plan_transfer, a write-ahead ledger record, execute_transfer,
 one wait and the terminal ledger record in a single command (_run_fresh, the
 only place either core call is made). The step ledger (tools/stack/ledger.py)
-is what guarantees a step key is never submitted twice; a step key that already
-has a record sends nothing.
+is what guarantees a step key is never submitted twice: a repeated step key is
+replayed (a recent ran), re-attached read-only (a started record, through
+wait_transfer only) or refused with its next action, and never re-sent. The
+reads, including GetFailureLatch, answer while a Transfer runs; a second
+Transfer is refused (NOT_READY while BUSY, the motion lock on a direct call).
+No adapter path acknowledges, cancels, retries or goes to the safe position:
+AcknowledgeFailure is a separate, operator-confirmed command and never touches
+the ledger.
 
 A result is turned into a reply by its ``kind``: only the explicit allowlist
 in _SUCCESS_KINDS yields SUCCESS; every other result (a refusal, a failed
@@ -883,6 +889,15 @@ class StackServer(ToolServer):
         return min(budget, MAX_TRANSFER_TIMEOUT_S)
 
     def Transfer(self, params: "Command.Transfer") -> ExecuteCommandReply:
+        """The one motion path and the one multi-call command (D-12): plan,
+        write-ahead ledger record, execute, wait, terminal record, guarded by
+        the step-key ledger (XFR-03, XFR-05). A repeated step key is decided by
+        decide(): replayed (done+ran inside the window), re-attached read-only
+        (started), or refused with the guid and the next action; execute_transfer
+        is called at most once per step key, except after a released "nothing
+        was sent" outcome (D-08). Reads, including GetFailureLatch, answer while
+        this runs; a second Transfer meets the motion lock. No path here
+        acknowledges, cancels, retries or goes to the safe position."""
         service = self._require_service()
         if not _MOTION_LOCK.acquire(blocking=False):
             return _reply(ERROR_FROM_TOOL, message=_BUSY_MESSAGE)
