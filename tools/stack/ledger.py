@@ -34,6 +34,7 @@ import dataclasses
 import hashlib
 import json
 import os
+import re
 import tempfile
 import time
 from datetime import datetime, timezone
@@ -51,6 +52,8 @@ _LOCK_POLL_S = 0.01
 
 # Results of a wait that end a task for the core's own bookkeeping (A-1).
 _TERMINAL_KINDS = frozenset({"ran", "failed", "aborted"})
+
+_FINGERPRINT_RE = re.compile(r"[0-9a-f]{64}")
 
 _T = TypeVar("_T")
 
@@ -129,6 +132,17 @@ def _non_empty_str(value: Any) -> bool:
     return isinstance(value, str) and bool(value)
 
 
+def _aware_stamp(value: Any) -> bool:
+    """True when ``value`` is an ISO-8601 string that parses to an aware datetime."""
+    if not isinstance(value, str):
+        return False
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return False
+    return parsed.tzinfo is not None and parsed.utcoffset() is not None
+
+
 def _validate_record(key: str, record: Any, path: str) -> None:
     """Raise LedgerError("corrupt") unless ``record`` is a well-formed record."""
     if not isinstance(record, dict):
@@ -136,12 +150,13 @@ def _validate_record(key: str, record: Any, path: str) -> None:
     state = record.get("state")
     if state not in STATES:
         raise LedgerError("corrupt", path)
-    if not isinstance(record.get("fingerprint"), str):
+    fingerprint_value = record.get("fingerprint")
+    if not (isinstance(fingerprint_value, str) and _FINGERPRINT_RE.fullmatch(fingerprint_value)):
         raise LedgerError("corrupt", path)
     if not isinstance(record.get("instance"), str):
         raise LedgerError("corrupt", path)
     for stamp in ("createdAt", "updatedAt"):
-        if not isinstance(record.get(stamp), str):
+        if not _aware_stamp(record.get(stamp)):
             raise LedgerError("corrupt", path)
     handle = record.get("handle")
     if handle is not None and not isinstance(handle, dict):
