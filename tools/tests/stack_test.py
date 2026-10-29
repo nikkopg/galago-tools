@@ -1107,7 +1107,8 @@ _MCP_MODULE = "stack_automation_layer.mcp"
 # The core MCP subpackage, the hardware STACK manager address and the
 # stack-server host must never appear in adapter code (hard constraints).
 _FORBIDDEN_LITERALS = (_MCP_MODULE, "10.150.1.125", "stack-server")
-_REQUIRED_FUNCTIONS = ("_configure", "_result_reply", "GetManagerState")
+_REQUIRED_FUNCTIONS = (
+    "_configure", "_result_reply", "GetManagerState", "_run_fresh", "Transfer")
 # D-16 call-site rules: each of these has exactly one call site, in the named
 # function; execute_transfer additionally never sits in a loop and always after
 # the write-ahead claim; acknowledge_failure may appear only in its handler.
@@ -1127,20 +1128,52 @@ def _name_of(func: ast.expr) -> Optional[str]:
     return None
 
 
+def _enclosing_function(
+        node: ast.AST, parents: dict[ast.AST, ast.AST]) -> Optional[ast.FunctionDef]:
+    """The nearest FunctionDef above `node`, or None at module level."""
+    ancestor = parents.get(node)
+    while ancestor is not None:
+        if isinstance(ancestor, ast.FunctionDef):
+            return ancestor
+        ancestor = parents.get(ancestor)
+    return None
+
+
+# Call sites of the single-site and acknowledge methods: (location, enclosing
+# FunctionDef, the Call, the tree's child-to-parent map).
+_Site = tuple[str, Optional[ast.FunctionDef], ast.Call, dict[ast.AST, ast.AST]]
+
+
 def _stack_adapter_violations(trees: dict[str, ast.Module]) -> list[str]:
-    """Pure, assertion-free no-motion / no-MCP / open_service-shape checks
-    (D-20, D-21) over every tools/stack module. Returns "<file>:<line>:
+    """Pure, assertion-free no-MCP / open_service-shape / call-site checks
+    (D-16, D-21) over every tools/stack module. Returns "<file>:<line>:
     <reason>" strings, or [] when clean. Never raises, so planted copies can
-    be checked without failing the test that plants them."""
+    be checked without failing the test that plants them.
+
+    Call-site rules (XFR-05): the _FORBIDDEN_SERVICE_CALLS names are never
+    called; execute_transfer and plan_transfer each have exactly one call site
+    across all modules, inside _run_fresh; execute_transfer has no loop,
+    comprehension or lambda ancestor and sits after the write-ahead claim call;
+    acknowledge_failure appears only inside AcknowledgeFailure, at most once;
+    none of these is reached through getattr with a string or held as an
+    uncalled attribute. wait_transfer and wait are read-only and unrestricted."""
     violations: list[str] = []
     open_service_calls = 0
     defined: set[str] = set()
+    sites: dict[str, list[_Site]] = {}
+    guarded = _FORBIDDEN_SERVICE_CALLS | set(_SINGLE_SITE_CALLS) | {_ACK_CALL}
 
     for fname, tree in sorted(trees.items()):
+        parents = {
+            child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
         for node in ast.walk(tree):
             at = f"{fname}:{getattr(node, 'lineno', 0)}"
             if isinstance(node, ast.FunctionDef):
                 defined.add(node.name)
+            if isinstance(node, ast.Attribute) and node.attr in guarded:
+                parent = parents.get(node)
+                if not (isinstance(parent, ast.Call) and parent.func is node):
+                    violations.append(f"{at}: .{node.attr} referenced without a call")
             if isinstance(node, ast.Import):
                 for alias in node.names:
                     if alias.name == _MCP_MODULE or alias.name.startswith(_MCP_MODULE + "."):
@@ -1162,6 +1195,14 @@ def _stack_adapter_violations(trees: dict[str, ast.Module]) -> list[str]:
             name = _name_of(func)
             if isinstance(func, ast.Attribute) and func.attr in _FORBIDDEN_SERVICE_CALLS:
                 violations.append(f"{at}: forbidden core call .{func.attr}()")
+            if isinstance(func, ast.Attribute) and (
+                    func.attr in _SINGLE_SITE_CALLS or func.attr == _ACK_CALL):
+                sites.setdefault(func.attr, []).append(
+                    (at, _enclosing_function(node, parents), node, parents))
+            if (name == "getattr" and len(node.args) >= 2
+                    and isinstance(node.args[1], ast.Constant)
+                    and node.args[1].value in guarded):
+                violations.append(f"{at}: .{node.args[1].value}() reached via getattr")
             if name in _FORBIDDEN_CONSTRUCTORS or (
                     isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name)
                     and func.value.id in _FORBIDDEN_CONSTRUCTORS):
@@ -1177,6 +1218,32 @@ def _stack_adapter_violations(trees: dict[str, ast.Module]) -> list[str]:
                         violations.append(f"{at}: open_service must not take ** keywords")
                     elif keyword.arg in ("lock_dir", "transport"):
                         violations.append(f"{at}: open_service must not pass {keyword.arg}=")
+
+    for call_name in (*_SINGLE_SITE_CALLS, _ACK_CALL):
+        found = sites.get(call_name, [])
+        home = _SINGLE_SITE_CALLS.get(call_name, _ACK_HANDLER)
+        # Zero acknowledge_failure calls is allowed until the handler is wired.
+        if len(found) > 1 or (len(found) != 1 and call_name in _SINGLE_SITE_CALLS):
+            violations.append(
+                f"tools/stack: {call_name}() must have exactly one call site, found {len(found)}")
+        for at, enclosing, _call, _parents in found:
+            if enclosing is None or enclosing.name != home:
+                violations.append(f"{at}: {call_name}() called outside {home}")
+    for at, enclosing, call, parents in sites.get("execute_transfer", []):
+        ancestor = parents.get(call)
+        while ancestor is not None:
+            if isinstance(ancestor, _LOOP_NODES):
+                violations.append(
+                    f"{at}: execute_transfer() inside a loop ({type(ancestor).__name__})")
+                break
+            ancestor = parents.get(ancestor)
+        if enclosing is not None and enclosing.name == "_run_fresh":
+            claims = [
+                c for c in ast.walk(enclosing)
+                if isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute)
+                and c.func.attr == _WRITE_AHEAD_CALL]
+            if not any(c.lineno < call.lineno for c in claims):
+                violations.append(f"{at}: execute_transfer() sent before the write-ahead claim")
 
     if open_service_calls == 0:
         violations.append("tools/stack: open_service is never called")
