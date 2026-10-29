@@ -844,6 +844,33 @@ class TestConfigureBusy(_StackTestCase):
             self.assertEqual(server._owned.endpoint, f"127.0.0.1:{port_b}")
             self.assertTrue(owned._closed)
 
+    def test_a_busy_refusal_leaves_the_tool_ready_and_able_to_transfer(self) -> None:
+        """WR-02: base Configure reports FAILED for every exception, but a busy
+        refusal changed nothing, so the status stays what the healthy owner had."""
+        port_a, port_b = self._two_ports()
+        transport = _fake_transport()
+        opener = MagicMock(side_effect=_fake_open_service(transport))
+        with patch("tools.stack.server.open_service", opener), \
+                patch("tools.stack.server.CONFIGURE_DRAIN_TIMEOUT_S", 0.05):
+            server = StackServer()
+            stub = _serve_in_process(self, server)
+            self.assertEqual(stub.Configure(_real_config("127.0.0.1", port_a)).response, SUCCESS)
+            parked = self._park_a_read(stub, transport)
+            reply = stub.Configure(_real_config("127.0.0.1", port_b))
+            self.assertEqual(reply.response, NOT_READY)
+            self.assertIn("stack: busy", reply.error_message)
+            self.assertEqual(stub.GetStatus(empty_pb2.Empty()).status, READY)
+            parked["release"].set()
+            parked["thread"].join(10)
+            transport.get_manager_state.side_effect = None
+            self.assertEqual(self._read(stub).response, SUCCESS)
+            # A motion command is admitted: the tool was never FAILED.
+            ack = stub.ExecuteCommand(tool_base_pb2.Command(stack=stack_pb2.Command(
+                acknowledge_failure=stack_pb2.Command.AcknowledgeFailure(
+                    guid="g", arm_inspected="no"))))
+            self.assertNotEqual(ack.response, NOT_READY)
+            self.assertEqual(stub.GetStatus(empty_pb2.Empty()).status, READY)
+
     def test_same_endpoint_configure_does_not_drain(self) -> None:
         port_a, _ = self._two_ports()
         transport = _fake_transport()

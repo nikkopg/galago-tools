@@ -280,9 +280,14 @@ _SUCCESS_KINDS = frozenset({
 })
 
 
-class _ConfigureBusy(RuntimeError):
-    """A Configure that could not drain the in-flight commands in time. Unlike
-    every other Configure failure it leaves the current owner in place."""
+class _ConfigureRefused(RuntimeError):
+    """A Configure that was refused with nothing changed: no setting applied and
+    the current owner kept. Unlike every other Configure failure it neither
+    drops the owner nor leaves the tool FAILED (WR-02)."""
+
+
+class _ConfigureBusy(_ConfigureRefused):
+    """A Configure that could not drain the in-flight commands in time."""
 
 
 def _text_or_none(cmd: Any, field: str) -> Optional[str]:
@@ -592,6 +597,9 @@ class StackServer(ToolServer):
         self.service: Optional[StackService] = None
         self._transfer_timeout_s: float = 0.0
         self._ledger_dir: str = ""
+        # WR-02: the status a refused Configure must leave standing, per thread
+        # (base Configure sets FAILED on the same thread right after _configure).
+        self._refused = threading.local()
         # D-05: minted once per server; a ledger record carries it so a later
         # plan can tell a record of this process from one left by a restart.
         self._instance: str = uuid.uuid4().hex
@@ -658,9 +666,11 @@ class StackServer(ToolServer):
         refusal (_ConfigureBusy): nothing was changed, so a healthy owner is
         kept rather than dropped for the sake of a retry."""
         with self._configure_lock:
+            self._refused.status = None
             try:
                 self._apply_config(config)
-            except _ConfigureBusy:
+            except _ConfigureRefused:
+                self._refused.status = self.status
                 raise
             except BaseException as exc:
                 if self._owned is not None:
@@ -670,6 +680,7 @@ class StackServer(ToolServer):
                         with self._exclusive():
                             self._teardown()
                     except _ConfigureBusy as busy:
+                        self._refused.status = self.status
                         raise busy from exc
                 self._configure_failed = True
                 raise
@@ -680,7 +691,18 @@ class StackServer(ToolServer):
         setStatus(READY), and a command admitted before a failing Configure can
         run that after Configure reported FAILED. READY with no service after a
         failed Configure would then be left standing, so it is held at FAILED
-        until the next Configure succeeds."""
+        until the next Configure succeeds.
+
+        WR-02: a Configure refused with nothing changed (_ConfigureRefused)
+        leaves the tool as it was, not FAILED: base Configure reports FAILED
+        for every exception, but the owner and service are healthy, so the
+        status the refusal recorded is restored instead."""
+        refused = self.__dict__.get("_refused")  # absent while base __init__ runs
+        if status == FAILED and refused is not None:
+            prior = getattr(refused, "status", None)
+            if prior is not None:
+                refused.status = None
+                status = prior
         if status == READY and self._configure_failed and self.service is None:
             status = FAILED
         super().setStatus(status)
