@@ -1,6 +1,6 @@
 ---
 phase: 04-stack-tool-registration-reads-estimate
-verified: 2026-10-29T08:05:00Z
+verified: 2026-10-29T08:20:00Z
 status: passed
 score: 6/6 must-haves verified
 covered_files:
@@ -22,24 +22,26 @@ covered_files:
   - "tools/stack/requirements.txt"
   - "tools/stack/server.py"
   - "tools/tests/stack_test.py"
-covered_digest: "v3:sha256:d576c77137b8b217805ab3ec050dd93e5c2ecf8ebcac25844d46a5601f043d57"
+covered_digest: "v3:sha256:a0caae631da3ce85082c3e13f2dcdfc7cce775443c671dbc4e369c2f9c63dca5"
 behavior_unverified: 0
 overrides_applied: 0
 re_verification:
   previous_status: passed
   previous_score: 6/6
-  gaps_closed: []
+  gaps_closed:
+    - "Review WR-01 (iteration 2): Configure drain wait is now bounded and a busy refusal keeps the healthy owner (advisory from previous report closed)"
+    - "Review WR-02 (iteration 2): commands during a Configure are refused immediately, handlers use the admitted service, stale READY held at FAILED (advisory from previous report closed)"
   gaps_remaining: []
   regressions: []
 advisory:
-  - finding: "Configure drains in-flight commands with no timeout while holding the state condition, so a long-running command (Phase 5 Transfer) would stall Configure and park every command, including BUSY-bypass reads, behind it (04-REVIEW WR-01)"
-    category: architectural
-    reason: "No long-running real-mode command exists in Phase 4 (Transfer, AcknowledgeFailure and GetFailureLatch are refused instantly; reads are bounded by core transport timeouts). Becomes real only when Phase 5 adds a motion command. Bound the wait or refuse-fast while reconfiguring before Phase 5."
-    evidence_status: "code-read plus 6-second multi-thread stress run (no hang); latent hazard not reproducible in Phase 4"
-  - finding: "A non-read command parked behind a failing Configure can reset status to READY with no service and overwrite last_error (04-REVIEW WR-02)"
-    category: architectural
-    reason: "Reachable in Phase 4 only through the instant refusals; resulting state is READY with service None, in which every read returns NOT_READY and no motion path exists. Cosmetic status inconsistency now; matters when Transfer exists. Snapshot the service and admission under one lock before Phase 5."
-    evidence_status: "code-read; not reproduced"
+  - finding: "The setStatus override holds READY at FAILED whenever _configure_failed is set and service is None, and it applies in simulated mode too. After a failed real-mode Configure followed by a switch to simulated, all ten simulated commands still run and return SUCCESS, but GetStatus keeps reporting FAILED (it is no longer flipped to READY by the first command, as it was before 6d46926)."
+    category: other
+    reason: "Cosmetic status display only: simulated commands are admitted by isReady() == True and never read status. Consider scoping the hold to real mode (or clearing _configure_failed on a successful simulated Configure) when Phase 6 builds the simulated workcell."
+    evidence_status: "reproduced by verifier script (scratchpad sim_after_fail.py); no behavioral impact on command results"
+  - finding: "A Configure refused as busy (drain timeout) makes base Configure set status FAILED while the healthy owner is kept and reads still answer. A motion command's own finally restores READY, but if the blocker was a long bypassed read nothing restores READY until the next successful Configure."
+    category: other
+    reason: "Status shown FAILED while the tool is in fact serving reads. Not reachable as a stuck state in Phase 4 (non-read commands are all instant refusals); revisit when Phase 5 adds a long-running Transfer."
+    evidence_status: "reproduced by verifier script (scratchpad busy.py): FAILED while owner kept and reads SUCCESS, READY again after the Transfer ended"
 ---
 
 # Phase 4: STACK Tool Registration, Reads & Estimate Verification Report
@@ -47,11 +49,11 @@ advisory:
 **Phase Goal:** An operator can register, Configure and read from a STACK tool in Galago (manager state, robots, devices, profiles, labware presence and a transfer estimate), and no real-mode code path can move the arm.
 **Verified:** 2026-10-29
 **Status:** passed
-**Re-verification:** Yes. The previous report (250 tests) went stale after the review-fix commits `3567aa0..6e1c585` (WR-01..WR-05) changed `tools/stack/server.py` and `tools/tests/stack_test.py`. Every criterion was re-checked against the current code, with extra scrutiny on STK-02, STK-05 and the no-motion invariant.
+**Re-verification:** Yes. The previous report (cade0b5, 261 tests) went stale after `d46fd4a` (bounded Configure drain, busy refusal keeps the owner, `open_service` outside `_state`) and `6d46926` (commands during a Configure refused with "stack: reconfiguring", handlers use the service captured at admission, `StackServer.setStatus` override). Every criterion was re-checked against the current code, with extra scrutiny on STK-05, STK-06, STK-02 and the no-motion invariant.
 
 ## Gate Command
 
-`source ~/data/nikko/.venvs/galago-py310/bin/activate && cd /home/formulatrix/data/nikko/galago-tools && bin/make proto test` was run by the verifier: proto regeneration OK, `ruff check .` "All checks passed!", `mypy ... tools` "Success: no issues found in 92 source files", **261 passed in 3.09s** (250 baseline plus 11 regression tests). No STACK motion was performed and nothing contacted 10.150.1.125 / stack-server (loopback ports, fake transports; the `_StackTestCase` loopback guard forbids anything else). The STACK core in the venv is stack-automation-layer 0.1.0 at `ed8ce478d8881a517eb93ed233707f81aea01238` (`direct_url.json`).
+`source ~/data/nikko/.venvs/galago-py310/bin/activate && cd /home/formulatrix/data/nikko/galago-tools && bin/make proto test` was run by the verifier: proto regeneration OK, `ruff check .` "All checks passed!", `mypy ... tools` "Success: no issues found in 92 source files", **267 passed in 3.31s**. No STACK motion was performed and nothing contacted 10.150.1.125 / stack-server (loopback ports and fake transports only; the `_StackTestCase` loopback guard forbids anything else; verifier scripts used a fake transport). The STACK core in the venv is stack-automation-layer at `ed8ce478d8881a517eb93ed233707f81aea01238` (`direct_url.json`), identical to the pin in `tools/stack/requirements.txt`. `git status` shows only the untracked `.planning/state.json`; no source was edited.
 
 ## Goal Achievement
 
@@ -59,48 +61,73 @@ advisory:
 
 | # | Truth | Status | Evidence |
 |---|-------|--------|----------|
-| 1 | `stack.proto` registered (tool_base Command `stack = 24`, Config `stack = 43`; controller `stack = 24`), gate green, `python -m tools.stack.server --port=N` starts and reports as `stack` | VERIFIED | `tool_base.proto:56` (`Command stack = 24`), `:87` (`Config stack = 43`), `controller.proto:31` (`stack = 24`). `StackServer.toolType = "stack"` (`server.py:282`). Live run: `python -m tools.stack.server --port=50998` logged "stack server started, listening on 50998". Gate green (261 passed, ruff, mypy clean). `TestRegistration` still passes. |
-| 2 | Configure with host/port; core opened only via `open_service(..., owner="galago")`, credentials from `STACK_USER`/`STACK_PASSWORD`, no `lock_dir` field; an mcp-held lock fails Configure naming the holder; no `stack_automation_layer.mcp` import; core pinned by SHA | VERIFIED | Sole open site `server.py:409` `open_service(host, port, owner="galago")`; no credential or `lock_dir` field in Config (`TestProtoFreeze`). `grep` of `tools/stack/` finds no `stack_automation_layer.mcp`, no `lock_dir`, and no hardware literal. `requirements.txt` pins `@ed8ce478...` with no `[mcp]` extra, matching the installed `direct_url.json` commit. Passing tests: `TestStackOwned.test_mcp_holder_fails_configure_naming_the_holder`, `TestConfigureFails` (missing credentials, password non-leak), `TestRequirementsPin`, `TestAdapterInvariant` (mcp imports, `lock_dir`/`transport` kwargs, constructors, literals). The fixes did not regress this: WR-01 `_teardown` releases the old owner's lock idempotently and clears `_owned`/`service` first, and WR-02 drops the owner on any Configure failure, so a failed Configure always means no service and no held lock. WR-05 adds `_HOST_RE` fullmatch and a 1..65535 port check before any open; tests accept `127.0.0.1`, `localhost`, hostnames, bracketed IPv6 and reject `@ / ? # \`, whitespace and scheme forms. |
-| 3 | Six reads each SUCCESS with empty message and core `to_dict()` in meta; `readFailed` and any non-read kind are `ERROR_FROM_TOOL` with one-line reason and guid, never SUCCESS; argument errors `INVALID_ARGUMENTS` | VERIFIED | Handlers `server.py:474-498` each make one service call and return `_result_reply` (`:269`): SUCCESS only for `kind` in the explicit `_SUCCESS_KINDS` allowlist with `meta=d` unchanged; anything else (or a non-dict) is `ERROR_FROM_TOOL` via `_error_line` (kind, reason, guid, one bounded hint, whitespace collapsed, 300-char cap). `_check_args` yields `INVALID_ARGUMENTS`. `TestReadCommands`, `TestResultMapping`, `TestCheckArgs`, `TestOneToOneSurface` pass. |
-| 4 | `GetTransferEstimate` works and nothing moves; simulated mode validates args (incl. `step_key`), sleeps constant `Estimate<Cmd>`, never contacts the core, never writes the ledger | VERIFIED | `GetTransferEstimate` (`:496`) calls only `service.estimate_transfer(...)`. `_dispatchCommand` (`:451`) runs `_check_args` first in both modes; in simulated mode it returns `super()._dispatchCommand` before the `_in_flight` tracker and before any service access. The ten `Estimate*` hooks (`:512-542`) return module constants and do no I/O. `TestEstimates`, `TestSimulatedCommands`, `TestSimulatedTransferOverGrpc`, `TestSimulatedBypassRead` pass. |
-| 5 | A read issued while another command holds the tool BUSY returns its result (injected slow command) while motion stays serialised; real-mode `Transfer`/`AcknowledgeFailure` refused with a not-yet-available error; a test proves nothing in `tools/stack/` calls core motion methods | VERIFIED | `ExecuteCommand` override (`:413-449`) bypasses `isReady`/`parseCommand`/`setStatus` for `READ_COMMANDS` only (the eight reads; `transfer` and `acknowledge_failure` excluded, `TestReadCommandSet`). `TestBusyReads` (passing) blocks a real gRPC Transfer inside its handler, confirms status BUSY, gets seven reads answered with their own SUCCESS meta and the latch refusal, status stays BUSY, a second Transfer gets NOT_READY, then READY. After WR-03, `_in_flight` only waits while `_reconfiguring` is true, so reads do not block on a running command, only on a Configure (see Advisory). After WR-04, `last_error` writes on a bypassed-read thread are dropped (thread-local), and the new tests `test_reads_do_not_clear_or_overwrite_the_last_error`, `test_last_error_survives_reads_while_a_transfer_is_in_flight` and `test_a_non_read_command_still_records_its_error` pass, so bypass reads leave status and `last_error` untouched. `Transfer`/`AcknowledgeFailure`/`GetFailureLatch` (`:500-510`) return `"stack: <Cmd> is not available in this build"` as `ERROR_FROM_TOOL` without touching the service. No-motion invariant: `TestAdapterInvariant` is unchanged by the fixes (the test diff adds no change to it and `Condition.wait_for` is a different attribute from the banned `.wait`); it passes against the current `server.py`. An independent AST scan by the verifier of all ten forbidden core calls (`plan_transfer`, `execute_transfer`, `start_transfer`, `wait`, `wait_transfer`, `cancel_transfer`, `go_to_safe_position`, `wait_safe_position`, `acknowledge_failure`, `validate_transfer`) over `tools/stack/server.py` returned `[]`. `tools/base_server.py` has no diff since before the phase. |
-| 6 | `stack.proto` frozen for v2: full surface incl. `Transfer`, `AcknowledgeFailure` and the latch-status read | VERIFIED | Ten-command oneof with `optional` field presence, pinned by `TestProtoFreeze` (passing). `git diff 69e102a..HEAD` shows no change to `interfaces/` or `requirements.txt`; the review fixes touched only `server.py` and `stack_test.py`. |
+| 1 | `stack.proto` registered (tool_base Command `stack = 24`, Config `stack = 43`; controller `stack = 24`), gate green, `python -m tools.stack.server --port=N` starts and reports as `stack` | VERIFIED | `TestRegistration` passes (tool type 24, Command oneof 24, Config oneof 43). `StackServer.toolType = "stack"`. Live run `python -m tools.stack.server --port=50997` logged "stack server started, listening on 50997". `git diff 69e102a..HEAD` shows no change under `interfaces/`. Gate green. |
+| 2 | Configure with host/port; core opened only via `open_service(..., owner="galago")`, credentials from `STACK_USER`/`STACK_PASSWORD`, no `lock_dir` field; an mcp-held lock fails Configure naming the holder; no `stack_automation_layer.mcp` import; core pinned by SHA | VERIFIED | Sole call site `server.py:474` `open_service(host, port, owner="galago")`; grep of `tools/stack/` finds no `stack_automation_layer.mcp`, no `lock_dir`, no `10.150`. Config has no credential or lock field (`TestProtoFreeze.test_config_fields`). `requirements.txt` pins `@ed8ce478...` without `[mcp]`. Owner-lock lifecycle re-read in the new code: `_teardown` (`:340`) clears `_owned`/`service` under `_state` then closes outside it and releases the lock in a `finally` (idempotent); `_apply_config` tears down first (close-first) then `open_service` (so a failed open leaves no lock and no service); `_configure` drops the owner on any non-busy failure; on `_ConfigureBusy` nothing was changed and the owner is kept. `open_service` now runs outside `_state` but inside `_exclusive()` and under `_configure_lock`, so no command can touch the owner mid-swap and Configures stay serialised. Same-endpoint reconfigure returns before any drain. Passing tests: `TestStackOwned` (mcp holder fails Configure naming the holder), `TestConfigureFails`, `TestConfigureFailureDropsService`, `TestConfigureCloseFails`, `TestConfigureBusy` (busy refusal keeps the owner, same endpoint does not drain), `TestRequirementsPin`, `TestAdapterInvariant`. Verifier script (busy.py): busy-refused Configure returned "stack: busy, a command is still running; retry Configure when it ends", owner `127.0.0.1:19301` kept, and a later Configure to the new endpoint succeeded; stress script ended with a successful Configure to a fresh port (no leaked lock). |
+| 3 | Six reads each SUCCESS with empty message and core `to_dict()` in meta; `readFailed` and any non-read kind are `ERROR_FROM_TOOL` with one-line reason and guid, never SUCCESS; argument errors `INVALID_ARGUMENTS` | VERIFIED | Handlers `server.py:538-566` each make one service call on the admitted service and return `_result_reply`: SUCCESS only for `kind` in `_SUCCESS_KINDS` with `meta=d` unchanged; anything else or a non-dict is `ERROR_FROM_TOOL` via `_error_line` (kind, reason, guid, one bounded hint, 300-char cap). `_check_args` yields `INVALID_ARGUMENTS` first in both modes. `TestReadCommands`, `TestResultMapping`, `TestCheckArgs`, `TestOneToOneSurface` pass. Verifier script: real-mode `GetManagerState` over the fake transport returned SUCCESS, empty message, meta `kind=managerState`. |
+| 4 | `GetTransferEstimate` works and nothing moves; simulated mode validates args (incl. `step_key`), sleeps constant `Estimate<Cmd>`, never contacts the core, never writes the ledger | VERIFIED | `GetTransferEstimate` calls only `service.estimate_transfer(...)`. `_dispatchCommand` runs `_check_args` first and, in simulated mode, returns `super()._dispatchCommand` before `_admit`, so simulated commands never read or wait on any real-mode state. Estimate hooks return module constants, no I/O. `TestEstimates`, `TestSimulatedCommands`, `TestSimulatedTransferOverGrpc`, `TestSimulatedBypassRead` pass. |
+| 5 | A read issued while another command holds the tool BUSY returns its result (injected slow command) while motion stays serialised; real-mode `Transfer`/`AcknowledgeFailure` refused with a not-yet-available error; a test proves nothing in `tools/stack/` calls core motion methods | VERIFIED | See STK-05 re-check below. `TestBusyReads` (injected slow Transfer over gRPC) and the new `TestReconfiguringAdmission` pass. Verifier script busy.py: with a slow injected Transfer holding status BUSY, `GetManagerState` returned SUCCESS with `kind=managerState` and status stayed BUSY; a second Transfer got NOT_READY (serialised). Independent AST scan of `tools/stack/*.py` for the ten forbidden names (`plan_transfer`, `execute_transfer`, `start_transfer`, `wait`, `wait_transfer`, `cancel_transfer`, `go_to_safe_position`, `wait_safe_position`, `acknowledge_failure`, `validate_transfer`) as Attribute or Name nodes returned `[]`; `TestAdapterInvariant` passes. `Transfer`/`AcknowledgeFailure`/`GetFailureLatch` return `"stack: <Cmd> is not available in this build"` as `ERROR_FROM_TOOL` without touching the service. |
+| 6 | `stack.proto` frozen for v2: full surface incl. `Transfer`, `AcknowledgeFailure` and the latch-status read | VERIFIED | Ten-command oneof pinned by `TestProtoFreeze` (passing); no diff to `interfaces/`, `requirements.txt` or `tools/base_server.py` since the previous verification. |
 
-**Score:** 6/6 truths verified (0 present, behavior-unverified). The behavior-dependent truths (SC5 BUSY bypass, status and `last_error` invariants, Configure serialisation) each have a passing behavioral test.
+**Score:** 6/6 truths verified (0 present, behavior-unverified). Behavior-dependent truths (BUSY bypass, reconfiguring refusal scope, status and `last_error` invariants, Configure serialisation) each have passing behavioral tests plus the verifier's own runs.
 
-### Concurrency Re-check (WR-03 code, the riskiest change)
+### STK-05 re-check (the riskiest part of the new code)
 
-Read `server.py:291-299, 340-382, 461-467` in full.
-- **Lock order:** `_configure_lock`, then `_state` (`_configure`: `with self._configure_lock, self._exclusive()`). `_in_flight` takes only `_state`. No inversion and no nested `_in_flight` in Phase 4.
-- **Counter integrity:** `_readers += 1` and the `try` are adjacent; the decrement and `notify_all` are in a `finally`; `_exclusive` clears `_reconfiguring` and notifies in a `finally`, so an exception in the body cannot wedge commands. `Condition.wait_for` releases the lock while waiting, so a finishing command can decrement.
-- **Simulated mode** returns before the tracker, so simulated reads never wait on Configure.
-- **Stress run (verifier, not committed):** 6 reader threads, 2 Transfer-refusal threads and 3 Configure threads (75% valid configures to three loopback ports, 25% blank-host failures) calling `StackServer.Configure`/`ExecuteCommand` directly with a fake transport for 6 seconds: 104,674 reads, 7,850 transfer refusals and 419 Configures; no deadlock (0 threads alive), no unexpected response code, `service is None` iff `_owned is None`, `_readers == 0`, `_reconfiguring == False`, and a final Configure to a new port succeeded (so no owner lock leaked).
-- **Regression tests:** `TestConfigureConcurrency` (Configure parks behind an in-flight read and the read completes on an open transport; two concurrent Configures leave one consistent owner), `TestConfigureCloseFails`, `TestConfigureFailureDropsService`, `TestConfigureHostValidation` all pass.
+- **The "reconfiguring" refusal applies only DURING a Configure.** `_admit` (`:432`) refuses only when `self._reconfiguring` is true. `_reconfiguring` is set only inside `_exclusive()` (the drain and the swap) and cleared in its `finally` and on the busy-timeout branch. An ordinary BUSY (a command in flight) does not set it. Verifier run: with a slow Transfer holding BUSY and no Configure in progress, a read returned SUCCESS (not "reconfiguring"). Only when a Configure to a different endpoint was concurrently draining did the read get `7 / "stack: reconfiguring"`; after the drain timed out (busy refusal) reads answered SUCCESS again. A same-endpoint Configure never sets the flag.
+- **The bypass path never calls `setStatus`/`isReady`/`parseCommand`.** The `StackServer.ExecuteCommand` bypass (`:480-520`) calls only `_dispatchCommand`; grep of `tools/stack/server.py` shows `setStatus` appears only at its definition (`:394`), the base `_dispatchCommand` (`tools/base_server.py:122-190`) contains no `setStatus`, `isReady` or `parseCommand` call, and the base `setStatus` callers are `Configure` (lines 100/109/114) and base `ExecuteCommand` (240/254) only, which the bypass does not enter. `base_server.py` is unmodified. The test `test_reads_never_call_set_status_but_a_transfer_brackets_busy_ready` passes. Verifier run: status was BUSY before and after the bypassed read.
+- **Serialisation of motion commands** is unchanged (base `isReady`/BUSY): a second Transfer during the first got NOT_READY.
+- **Counter integrity under the new admission:** `_admit` increments `_readers` under `_state` and returns the service snapshot atomically; `_leave` decrements in the `finally` of `_dispatchCommand` and notifies at zero; `_exclusive` waits `wait_for(not _readers, timeout)` (lock released while waiting). Handlers use `_require_service()` which returns the admitted service from a thread-local, never a fresh `self.service`.
+
+### STK-06 re-check (simulated mode)
+
+`_dispatchCommand` returns `super()._dispatchCommand(command)` for `self.simulated` before `_admit`, the thread-local and any service access, so the admission logic cannot affect it. The `setStatus` override only rewrites READY to FAILED when `_configure_failed and service is None`. Verifier script sim_after_fail.py: a failed real Configure (blank host), then a simulated Configure, then all ten commands over the base `ExecuteCommand` (estimates patched to 0 s): every command returned SUCCESS with empty message and `service` stayed `None` (core never contacted). Side effect recorded as an advisory: status reads FAILED throughout (cosmetic; it was FAILED already after the failed Configure, the first command used to flip it to READY). On a fresh server (`_configure_failed` False) simulated behavior is unchanged, and `TestSimulatedCommands`, `TestSimulatedBypassRead`, `TestSimulatedTransferOverGrpc`, `TestNotConfigured.test_simulated_to_real_switch_leaves_reads_not_configured` pass.
+
+### Concurrency Stress Re-run (new code)
+
+Verifier script stress.py (scratchpad, not committed): 5 `GetManagerState` threads, 2 `GetTransferEstimate` threads, 2 `Transfer` threads and 3 Configure threads (75% valid configures cycling three loopback ports through a fake transport, 25% blank-host failures) calling `StackServer.Configure`/`ExecuteCommand` directly for 8 seconds. Expected codes: SUCCESS, NOT_READY, and ERROR_FROM_TOOL with "stack: reconfiguring" or "stack: Transfer is not available in this build".
+
+- 0 threads left alive (no deadlock).
+- Final state: `service is None` iff `_owned is None`, `_readers == 0`, `_reconfiguring == False`; a final Configure to a new port succeeded and a read after it succeeded (no leaked owner lock).
+- Observed outcomes: reads SUCCESS 100, "reconfiguring" refusals 312 (reads) + 126 (estimates) + 72 (transfers), "not configured" NOT_READY, Transfer refusals, 25 Configures succeeded and 7 failed with the one-line "Config.host is required". The only entries outside the expected set were 41 `GetTransferEstimate` replies `stack: needsInput; missing: robot, labwareProfile, source, destination`, which are the correct `ERROR_FROM_TOOL` mapping for the verifier's deliberately empty estimate request (a script input artifact, not a defect). No unexpected response code, no exception.
+- Configure throughput was low (32 attempts) because Configure only gets in when `_readers` momentarily reaches zero under 9 hammering threads; that is the bounded-drain design, not a hang.
+
+### Deferred Items
+
+None.
+
+### Advisory (New Scope, Unevidenced)
+
+| # | Finding | Category | Why Advisory |
+|---|---------|----------|--------------|
+| 1 | `setStatus` hold at FAILED also applies in simulated mode after a failed real Configure (status display only) | other | Reproduced, but commands unaffected; cosmetic |
+| 2 | A busy-refused Configure leaves GetStatus FAILED while the owner is kept and reads still work | other | Reproduced, but not a stuck state reachable in Phase 4; revisit with Phase 5 Transfer |
+
+Both earlier advisories (unbounded drain, stale READY after a failed Configure) are closed by `d46fd4a`/`6d46926`.
 
 ### Required Artifacts
 
 | Artifact | Expected | Status | Details |
 |----------|----------|--------|---------|
-| `interfaces/tools/grpc_interfaces/stack.proto` | Frozen 10-command surface and Config | VERIFIED | Unchanged, imported by `tool_base.proto`, compiled by `bin/make proto`. |
-| `interfaces/tools/grpc_interfaces/tool_base.proto` | Command 24 / Config 43 | VERIFIED | Lines 56 and 87. |
-| `interfaces/controller.proto` | `stack = 24` ToolType | VERIFIED | Line 31. |
-| `tools/stack/server.py` | StackServer, mapping, reads, refusals, bypass, Configure hardening | VERIFIED | 552 lines, no stubs or debt markers, wired via `serve(StackServer(), ...)`. |
-| `tools/stack/requirements.txt` | SHA-pinned core, no `[mcp]` | VERIFIED | Single pinned line. |
+| `interfaces/tools/grpc_interfaces/stack.proto` | Frozen 10-command surface and Config | VERIFIED | Unchanged, compiled by `bin/make proto`. |
+| `interfaces/tools/grpc_interfaces/tool_base.proto` | Command 24 / Config 43 | VERIFIED | Unchanged. |
+| `interfaces/controller.proto` | `stack = 24` ToolType | VERIFIED | Unchanged. |
+| `tools/stack/server.py` | StackServer, mapping, reads, refusals, bypass, Configure hardening | VERIFIED | 632 lines, no stubs or debt markers, wired via `serve(StackServer(), ...)`. |
+| `tools/stack/requirements.txt` | SHA-pinned core, no `[mcp]` | VERIFIED | Single pinned line matching the installed commit. |
 | `tools/stack/__init__.py`, `pyproject.toml` | Package and mypy override | VERIFIED | Present; mypy clean. |
-| `tools/tests/stack_test.py` | Registration, freeze, ownership, mapping, simulation, bypass, concurrency tests | VERIFIED | 261-test gate passes. |
+| `tools/tests/stack_test.py` | Registration, freeze, ownership, mapping, simulation, bypass, concurrency tests | VERIFIED | 267-test gate passes (6 new: `TestConfigureBusy`, `TestReconfiguringAdmission`). |
 
 ### Key Link Verification
 
 | From | To | Via | Status | Details |
 |------|----|-----|--------|---------|
-| tool_base.proto | stack.proto | import + `stack = 24` / `= 43` | WIRED | grep and gate. |
-| `_apply_config` | `open_service` | `open_service(host, port, owner="galago")` | WIRED | `server.py:409`, only call site. |
-| `_configure` | `_exclusive` / `_teardown` | context manager and failure teardown | WIRED | `:346-351`. |
-| `_dispatchCommand` | `_in_flight` / `_check_args` | real-mode bracket, args first | WIRED | `:454-467`. |
-| read handlers | `_result_reply` | one service call each | WIRED | `:474-498`. |
-| `ExecuteCommand` | `_dispatchCommand` | `field_name in READ_COMMANDS` | WIRED | `:431-438`. |
-| `last_error` setter | `_read_bypass` thread-local | drops bypass-thread writes | WIRED | `:301-320`, `:435`. |
-| TestAdapterInvariant | `tools/stack/*.py` | `ast.parse` of every module | WIRED | passes on current source. |
+| tool_base.proto | stack.proto | import + `stack = 24` / `= 43` | WIRED | `TestRegistration`. |
+| `_apply_config` | `open_service` | `open_service(host, port, owner="galago")` inside `_exclusive()` | WIRED | `server.py:474`, only call site. |
+| `_configure` | `_exclusive` / `_teardown` | failure drop with bounded drain; busy re-raised without teardown | WIRED | `:360-380`. |
+| `_dispatchCommand` | `_admit` / `_leave` / `_admitted` | real-mode bracket, args and simulated first | WIRED | `:522-545`. |
+| read handlers | `_require_service` -> `_result_reply` | admitted service, one call each | WIRED | `:538-566`. |
+| `ExecuteCommand` | `_dispatchCommand` | `field_name in READ_COMMANDS`, no status calls | WIRED | `:480-520`. |
+| `setStatus` override | base `Configure` / `ExecuteCommand` finally | READY held at FAILED after failed Configure | WIRED | `:394`; not on the bypass path. |
+| `last_error` setter | `_read_bypass` thread-local | drops bypass-thread writes | WIRED | unchanged. |
+| TestAdapterInvariant | `tools/stack/*.py` | `ast.parse` of every module | WIRED | passes; verifier scan agrees. |
 
 ### Data-Flow Trace (Level 4)
 
@@ -112,12 +139,14 @@ Read `server.py:291-299, 340-382, 461-467` in full.
 
 | Behavior | Command | Result | Status |
 |----------|---------|--------|--------|
-| Full gate | `bin/make proto test` | 261 passed, ruff and mypy clean | PASS |
-| Server starts as stack tool | `python -m tools.stack.server --port=50998` | "stack server started, listening on 50998" | PASS |
-| Core pin | installed `direct_url.json` | commit_id `ed8ce478d8881a517eb93ed233707f81aea01238` | PASS |
-| No motion call in adapter | independent AST scan for the ten forbidden core calls | `[]` | PASS |
-| No mcp import, hardware literal or `lock_dir` | grep `tools/stack/` | no matches | PASS |
-| Configure/read concurrency | 11-thread stress, 6 s | no deadlock, consistent state, no lock leak | PASS |
+| Full gate | `bin/make proto test` | 267 passed, ruff and mypy clean | PASS |
+| Server starts as stack tool | `python -m tools.stack.server --port=50997` | "stack server started, listening on 50997" | PASS |
+| Reads answer while BUSY, "reconfiguring" only during a Configure, busy refusal keeps owner | scratchpad `busy.py` | as described under STK-05 | PASS |
+| Simulated mode: ten commands, no core, after a failed real Configure | scratchpad `sim_after_fail.py` | 10/10 SUCCESS, `service None` | PASS |
+| Concurrency stress, 8 s, 11 threads | scratchpad `stress.py` | no deadlock, consistent state, no lock leak, no unexpected code | PASS |
+| No motion call in adapter | independent AST scan, ten forbidden names | `[]` | PASS |
+| No mcp import, hardware literal or `lock_dir`; no debt markers | grep `tools/stack/` | no matches | PASS |
+| Core pin | installed `direct_url.json` vs `requirements.txt` | both `ed8ce478d8881a517eb93ed233707f81aea01238` | PASS |
 
 ### Probe Execution
 
@@ -130,24 +159,16 @@ All seven IDs appear in PLAN frontmatter (04-01: STK-01, 02, 03, 07; 04-02: STK-
 | Requirement | Source Plan | Status | Evidence |
 |-------------|-------------|--------|----------|
 | STK-01 | 04-01 | SATISFIED | SC1, SC6. |
-| STK-02 | 04-01, 04-02 | SATISFIED | SC2, re-checked after WR-01/02/03/05. |
+| STK-02 | 04-01, 04-02 | SATISFIED | SC2, re-checked after `d46fd4a`/`6d46926` (owner-lock lifecycle, busy keeps owner). |
 | STK-03 | 04-01, 04-03 | SATISFIED | SC3. |
 | STK-04 | 04-03, 04-04 | SATISFIED | SC4. |
-| STK-05 | 04-02, 04-04, 04-05 | SATISFIED | SC5, re-checked after WR-03/04. |
-| STK-06 | 04-04 | SATISFIED | SC4. |
+| STK-05 | 04-02, 04-04, 04-05 | SATISFIED | SC5, "reconfiguring" scoped to Configure only; bypass never touches status. |
+| STK-06 | 04-04 | SATISFIED | SC4; simulated path independent of admission, including after a failed real Configure. |
 | STK-07 | 04-01, 04-03 | SATISFIED | SC3. |
 
 ### Anti-Patterns Found
 
-No `TBD`, `FIXME`, `XXX`, `TODO` or `HACK` in `tools/stack/`; no stub returns (debt-marker gate clear). The incremental review (0 critical, 2 warnings, 5 info) was weighed against the goal:
-
-| File | Line | Pattern | Severity | Impact on goal |
-|------|------|---------|----------|----------------|
-| `tools/stack/server.py` | 353-367, 369-382 | Review WR-01: Configure waits with no timeout for in-flight commands while holding `_state`, which parks all commands (including bypass reads) for the duration | Warning (advisory) | In Phase 4 every real-mode command is bounded (reads by core transport timeouts, the three Phase 5 commands refused instantly), so the stall is short and the stress run showed no hang. It does not enable motion and does not undermine the Phase 4 goal. It would undercut STK-05 once a minutes-long Transfer exists, so it must be fixed before Phase 5 (bound the wait or refuse fast while reconfiguring; do the open outside `_state`). |
-| `tools/stack/server.py` | 451-467 | Review WR-02: a non-read command parked behind a failing Configure can set READY with no service and overwrite `last_error` | Warning (advisory) | Resulting state is READY with `service None`: reads return NOT_READY, nothing can move. Operator-visible status inconsistency only, on an unusual sequence. Take admission and the service snapshot together in `_in_flight` before Phase 5. |
-| `tools/stack/server.py` | various | IN-01..IN-05 | Info | Documentation, cosmetic, or latent hardening (for example `_teardown` reading the core's private `_lock`; bypass exception handler still writes `last_error` by D-13). |
-
-Neither warning touches the "no real-mode path can move the arm" half of the goal (the adapter can only call the seven read/estimate service methods, enforced by the AST invariant), and neither breaks a Phase 4 success criterion, so both are carried as non-blocking advisories.
+No `TBD`, `FIXME`, `XXX`, `TODO` or `HACK` in `tools/stack/`; no stub returns (debt-marker gate clear). The two iteration-2 review warnings (WR-01, WR-02) are resolved in code and tests. Remaining items are the two advisories above and the earlier Info findings (IN-01..IN-05), none touching the goal.
 
 ### Human Verification Required
 
@@ -155,7 +176,7 @@ None. Hardware behavior (a live STACK read) is outside Phase 4's no-motion, loop
 
 ### Gaps Summary
 
-No gaps. All six ROADMAP success criteria and all seven requirement IDs (STK-01..STK-07) hold against the current code after the five review-fix commits. The fixes did not regress STK-02 (Configure, owner lock, holder-naming failure), STK-05 (reads answer while BUSY, status and `last_error` untouched by the bypass) or the no-motion AST invariant. Recommendation for Phase 5 planning: close review WR-01 and WR-02 (bounded or refuse-fast Configure, atomic admission plus service snapshot) before the first real motion command lands.
+No gaps. All six ROADMAP success criteria and all seven requirement IDs (STK-01..STK-07) hold against the current code after `d46fd4a` and `6d46926`. Reads still answer while a motion command holds BUSY; the new "reconfiguring" refusal fires only during a Configure; the bypass path never reaches `setStatus`; simulated mode still runs all ten commands with no core even after a failed real Configure; the owner-lock lifecycle is intact and the AST no-motion invariant is clean. Two cosmetic status-display advisories are carried for Phase 5/6.
 
 ---
 
