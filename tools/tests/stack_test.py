@@ -2579,6 +2579,148 @@ class TestRepeatKey(_LedgerCase):
         self.assertEqual(self.core.execute_calls, 1)
 
 
+class TestTimedOutReattach(_LedgerCase):
+    """XFR-06 / D-11 / A-1: a timedOut wait leaves the arm running and the record
+    started; re-running the step re-attaches read-only (wait_transfer only,
+    never plan or execute) and finishes it. The re-attach loop is bounded by the
+    budget in 300 s slices and never calls with a non-positive timeout."""
+
+    def _timed_out(self) -> TimedOut:
+        return TimedOut(handle=TaskHandle(guid=_GUID, robot="R1", estimated_s=30.0))
+
+    def _start_then_time_out(self, key: str = _STEP_KEY) -> None:
+        """A fresh Transfer whose wait times out: the record is left started."""
+        self.core.wait_result = self._timed_out()
+        reply = self._transfer(key)
+        self.assertEqual(reply.response, ERROR_FROM_TOOL)
+        self.assertEqual(self._records()[key]["state"], "started")
+        self.core.calls.clear()
+
+    def test_a_timed_out_wait_is_still_running_and_the_record_stays_started(self) -> None:
+        self.core.wait_result = self._timed_out()
+        reply = self._transfer()
+        self.assertEqual(reply.response, ERROR_FROM_TOOL)
+        self.assertIn("still running", reply.error_message)
+        self.assertIn("re-run this step to re-attach", reply.error_message)
+        self.assertIn(_GUID, reply.error_message)
+        self.assertEqual(reply.meta_data["kind"], "timedOut")
+        self.assertEqual(self._records()[_STEP_KEY]["state"], "started")
+
+    def test_re_running_a_timed_out_step_re_attaches_and_finishes_it(self) -> None:
+        self._start_then_time_out()
+        self.core.wait_transfer_results = [Ran(task=_ran_snapshot())]
+        reply = self._transfer()
+        self.assertEqual(reply.response, SUCCESS)
+        self.assertEqual(reply.error_message, "")
+        self.assertEqual(reply.meta_data, _struct(Ran(task=_ran_snapshot()).to_dict()))
+        self.assertEqual(self.core.call_names, ["wait_transfer"])
+        self.assertEqual(self.core.calls[0][1], (_GUID,))
+        self.assertEqual(self.core.calls[0][2], {"timeout_s": 300.0})
+        self.assertEqual(self._records()[_STEP_KEY]["state"], "done")
+        self.assertEqual(self._records()[_STEP_KEY]["result"], Ran(task=_ran_snapshot()).to_dict())
+
+    def test_a_timed_out_step_is_sent_exactly_once_in_total(self) -> None:
+        self.core.wait_result = self._timed_out()
+        self._transfer()
+        self.core.wait_transfer_results = [self._timed_out(), Ran(task=_ran_snapshot())]
+        self.assertEqual(self._transfer().response, ERROR_FROM_TOOL)
+        self.assertEqual(self._transfer().response, SUCCESS)
+        replay = self._transfer()
+        self.assertEqual(replay.response, SUCCESS)
+        self.assertEqual(replay.meta_data["replayed"], True)
+        self.assertEqual(self.core.execute_calls, 1)
+        self.assertEqual(self.core.call_names.count("plan_transfer"), 1)
+        self.assertEqual(self.core.call_names.count("wait_transfer"), 2)
+
+    def test_the_re_attach_never_plans_executes_or_waits_on_a_handle(self) -> None:
+        self._start_then_time_out()
+        self.core.wait_transfer_results = [self._timed_out()]
+        reply = self._transfer()
+        self.assertEqual(reply.response, ERROR_FROM_TOOL)
+        for name in ("plan_transfer", "execute_transfer", "wait"):
+            self.assertNotIn(name, self.core.call_names)
+
+    def test_the_budget_is_spent_in_slices_and_never_called_with_nothing_left(self) -> None:
+        self._start_then_time_out()
+        clock = [1000.0]
+        timeouts: list[float] = []
+
+        def _wait_transfer(guid: str, *, timeout_s: float) -> Any:
+            timeouts.append(timeout_s)
+            clock[0] += timeout_s
+            return self._timed_out()
+
+        self.core.wait_result = _wait_transfer
+        with patch.object(stack_server, "_monotonic", side_effect=lambda: clock[0]):
+            reply = self._transfer(timeout_s=650)
+        self.assertEqual(timeouts, [300.0, 300.0, 50.0])
+        self.assertTrue(all(t > 0 for t in timeouts))
+        self.assertEqual(reply.response, ERROR_FROM_TOOL)
+        self.assertIn("still running", reply.error_message)
+        self.assertEqual(self._records()[_STEP_KEY]["state"], "started")
+
+    def test_a_loop_with_no_budget_makes_no_call_and_reads_as_timed_out(self) -> None:
+        result = self.server._reattach_loop(self.core, _GUID, 0.0)
+        self.assertIsInstance(result, TimedOut)
+        self.assertEqual(result.handle.guid, _GUID)
+        self.assertEqual(self.core.calls, [])
+
+    def test_a_poll_failure_leaves_the_record_started_and_a_re_run_re_attaches(self) -> None:
+        self._start_then_time_out()
+        self.core.latch_result = LatchStatus(
+            latched=True, guid=_SUBMIT_GUID, result_kind="lost", reason="pollFailed")
+        lost = Lost(reason="pollFailed", handle=TaskHandle(guid=_GUID))
+        self.core.wait_transfer_results = [lost]
+        reply = self._transfer()
+        self.assertEqual(reply.response, ERROR_FROM_TOOL)
+        self.assertEqual(self.core.call_names.count("wait_transfer"), 1)
+        self.assertIn(f"latched guid {_SUBMIT_GUID}", reply.error_message)
+        self.assertIn("re-run this step to re-attach", reply.error_message)
+        self.assertEqual(self._records()[_STEP_KEY]["state"], "started")
+        self.core.calls.clear()
+        self.core.wait_transfer_results = [Ran(task=_ran_snapshot())]
+        again = self._transfer()
+        self.assertEqual(again.response, SUCCESS)
+        self.assertEqual(self.core.call_names, ["wait_transfer"])
+        self.assertEqual(self._records()[_STEP_KEY]["state"], "done")
+
+    def test_the_fresh_path_keeps_pollfailed_started_and_ends_tasknotfound(self) -> None:
+        cases = (("pollFailed", "started"), ("taskNotFound", "done"))
+        for reason, state in cases:
+            with self.subTest(reason):
+                key = f"run-1:{reason}"
+                self.core.wait_result = Lost(reason=reason, handle=TaskHandle(guid=_GUID))
+                reply = self._transfer(key)
+                self.assertEqual(reply.response, ERROR_FROM_TOOL)
+                self.assertEqual(self._records()[key]["state"], state)
+
+    def test_a_failed_mark_done_after_a_re_attach_keeps_the_record_started(self) -> None:
+        self._start_then_time_out()
+        self.core.wait_transfer_results = [Ran(task=_ran_snapshot())]
+        with patch.object(Ledger, "mark_done", side_effect=LedgerError("unwritable", "p")):
+            reply = self._transfer()
+        self.assertEqual(reply.response, ERROR_FROM_TOOL)
+        self.assertIn("but the ledger could not record it", reply.error_message)
+        self.assertEqual(self._records()[_STEP_KEY]["state"], "started")
+        self.assertEqual(self.core.call_names, ["wait_transfer"])
+
+    def test_a_re_attach_to_a_failed_transfer_reports_the_latch_and_records_it_done(self) -> None:
+        self._start_then_time_out()
+        self.core.latch_result = LatchStatus(latched=True, guid=_GUID, result_kind="failed")
+        self.core.wait_transfer_results = [Failed(task=_snapshot(_GUID))]
+        reply = self._transfer()
+        self.assertEqual(reply.response, ERROR_FROM_TOOL)
+        self.assertIn(f"latched guid {_GUID}", reply.error_message)
+        self.assertEqual(self._records()[_STEP_KEY]["state"], "done")
+        self.assertNotIn("tool restarted", reply.error_message)
+
+    def test_a_same_instance_re_attach_to_ran_carries_no_restart_flag(self) -> None:
+        self._start_then_time_out()
+        self.core.wait_transfer_results = [Ran(task=_ran_snapshot())]
+        reply = self._transfer()
+        self.assertNotIn("reattachedAfterRestart", reply.meta_data)
+
+
 class TestTransferEstimate(_RealModeGrpcTestCase):
     """STK-04: GetTransferEstimate -> estimate_transfer, once, nothing else."""
 
