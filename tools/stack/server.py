@@ -89,6 +89,7 @@ COMMAND_TO_SERVICE_METHOD = {
     "ListTransferProfiles": "transfer_profiles",
     "GetLabwarePresence": "labware_presence",
     "GetTransferEstimate": "estimate_transfer",
+    "GetFailureLatch": "latch_status",
 }
 
 # D-19: every Estimate<Cmd> hook returns one of these local constants (seconds);
@@ -101,7 +102,7 @@ EST_ACK_S = 2
 
 # D-18: commands the real-mode adapter refuses without touching the service
 # (Phase 5 wires them). They win over the not-configured check (D-14).
-UNAVAILABLE_COMMANDS = frozenset({"AcknowledgeFailure", "GetFailureLatch"})
+UNAVAILABLE_COMMANDS = frozenset({"AcknowledgeFailure"})
 
 # D-13: the eight read-only commands (oneof field names) that bypass the BUSY
 # gate so an operator can read STACK state while a motion command holds the
@@ -183,6 +184,7 @@ _SUCCESS_KINDS = frozenset({
     "labwarePresence",
     "estimated",
     "failureAcknowledged",
+    "latchStatus",
     "ran",
 })
 
@@ -755,8 +757,8 @@ class StackServer(ToolServer):
         return _unavailable_reply("AcknowledgeFailure")
 
     def GetFailureLatch(self, params: "Command.GetFailureLatch") -> ExecuteCommandReply:
-        # D-18: refused in real mode; never touches the service.
-        return _unavailable_reply("GetFailureLatch")
+        # D-13: latch_status() 1:1, zero I/O; the guid AcknowledgeFailure must name.
+        return _result_reply(self._require_service().latch_status())
 
     def EstimateTransfer(self, params: "Command.Transfer") -> int:
         return EST_TRANSFER_S
