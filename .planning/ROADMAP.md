@@ -37,7 +37,7 @@ Companion: galago-core's own parallel milestone (codegen, command forms, operato
 - [x] **Phase 4: STACK Tool Registration, Reads & Estimate** - Register the STACK tool type and let an (completed 2026-10-29)
   operator Configure it, read instrument state and get a transfer estimate, with no path that can move
   the arm.
-- [ ] **Phase 5: F5-safe Transfer & Operator Acknowledge** - The only motion path: a `Transfer` that
+- [x] **Phase 5: F5-safe Transfer & Operator Acknowledge** - The only motion path: a `Transfer` that (completed 2026-10-30)
   can never send a second transfer for the same step, plus an operator-only failure acknowledge.
 - [ ] **Phase 6: GAL-02 Workflow, Simulated Workcell & PAC-Simulator Run** - Prove the STACK ->
   F.A.S.T. -> STACK handoff end to end, and that a re-dispatch sends nothing, before any hardware.
@@ -138,7 +138,7 @@ re-checked research: `.planning/research/SUMMARY.md` § Addendum (2026-10-29).
      `AcknowledgeFailure(guid, arm_inspected)`: only the exact string `"yes"` reaches
      `acknowledge_failure(guid, confirm=True)`, anything else is `INVALID_ARGUMENTS` with no core
      call, and no adapter path acknowledges on its own.
-**Plans:** 7/7 plans executed (waves 1-6; 05-03 and 05-04 run in parallel in wave 3, every other plan is sequential on `tools/stack/server.py` / `tools/tests/stack_test.py`)
+**Plans:** 7/7 plans complete (waves 1-6; 05-03 and 05-04 run in parallel in wave 3, every other plan is sequential on `tools/stack/server.py` / `tools/tests/stack_test.py`)
 
 Plans:
 **Wave 1**
@@ -241,7 +241,7 @@ Phases execute in numeric order: 4 → 5 → 6 → 7 (DEP-01 is met, so Phase 5 
 | Phase | Milestone | Plans Complete | Status | Completed |
 |-------|-----------|----------------|--------|-----------|
 | 4. STACK Tool Registration, Reads & Estimate | v2 | 5/5 | Complete    | 2026-10-29 |
-| 5. F5-safe Transfer & Operator Acknowledge | v2 | 7/7 | In Progress | - |
+| 5. F5-safe Transfer & Operator Acknowledge | v2 | 7/7 | Complete    | 2026-10-30 |
 | 6. GAL-02 Workflow, Simulated Workcell & PAC-Simulator Run | v2 | 0/TBD | Not started | - |
 | 7. Deploy & Supervised Live STACK + Handoff | v2 | 0/TBD | Not started | - |
 
