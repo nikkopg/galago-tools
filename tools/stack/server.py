@@ -280,6 +280,24 @@ class StackServer(ToolServer):
         self._transfer_timeout_s: float = 0.0
         self._ledger_dir: str = ""
 
+    def _teardown(self) -> None:
+        """Drop the current owner, if any, so "no service" always holds after
+        this returns or raises (WR-01). The references are cleared before the
+        close: the core's OwnedService.close() marks itself closed before it
+        closes the transport, so a transport close that raises would otherwise
+        skip the lock release and leave a dead service looking usable. The
+        owner lock is therefore released in a finally (OwnerLock.release() is
+        idempotent), which is a no-op after a clean close."""
+        owned, self._owned, self.service = self._owned, None, None
+        if owned is None:
+            return
+        try:
+            owned.close()
+        finally:
+            lock = getattr(owned, "_lock", None)
+            if lock is not None:
+                lock.release()
+
     def _configure(self, config: Config) -> None:
         host = config.host.strip()
         if not host:
@@ -298,10 +316,7 @@ class StackServer(ToolServer):
         # Close-first: release the old owner lock before opening the new
         # endpoint, so a failed open leaves this tool holding no lock and no
         # service.
-        if self._owned is not None:
-            self._owned.close()
-            self._owned = None
-            self.service = None
+        self._teardown()
         self._owned = open_service(host, port, owner="galago")
         self.service = self._owned.service
         logging.warning(_RESTART_WARNING)

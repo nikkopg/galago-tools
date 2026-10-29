@@ -501,6 +501,49 @@ class TestConfigureFails(_StackTestCase):
             self.assertNotIn(sentinel, str(record.args))
 
 
+class TestConfigureCloseFails(_StackTestCase):
+    """WR-01: the core's OwnedService.close() marks itself closed before it
+    closes the transport, so a raising close skips the lock release. The
+    adapter must still end with no service and no lock held."""
+
+    def _assert_free(self, port: int) -> None:
+        acquire_owner_lock(
+            "127.0.0.1", port, owner="mcp", lock_dir=self.lock_dir).release()
+
+    def test_a_raising_close_leaves_no_service_and_no_lock(self) -> None:
+        port_a, port_b = _free_tcp_port(), _free_tcp_port()
+        while port_b == port_a:
+            port_b = _free_tcp_port()
+        opener = MagicMock(side_effect=_fake_open_service(_fake_transport()))
+        with patch("tools.stack.server.open_service", opener):
+            server = StackServer()
+            stub = _serve_in_process(self, server)
+            self.assertEqual(stub.Configure(_real_config("127.0.0.1", port_a)).response, SUCCESS)
+            first = server.service
+            assert server._owned is not None
+
+            def _boom() -> None:
+                raise RuntimeError("transport close failed")
+
+            server._owned._stack.callback(_boom)
+
+            reply = stub.Configure(_real_config("127.0.0.1", port_b))
+            self.assertEqual(reply.response, NOT_READY)
+            self.assertIn("transport close failed", reply.error_message)
+            self.assertEqual(stub.GetStatus(empty_pb2.Empty()).status, FAILED)
+            self.assertIsNone(server.service)
+            self.assertIsNone(server._owned)
+            self.assertEqual(opener.call_count, 1)
+            # The old endpoint's lock was released despite the raise ...
+            self._assert_free(port_a)
+            # ... and a retry for the same endpoint opens a fresh session
+            # instead of reusing the half-closed one.
+            self.assertEqual(stub.Configure(_real_config("127.0.0.1", port_a)).response, SUCCESS)
+            self.assertEqual(opener.call_count, 2)
+            self.assertIsNotNone(server.service)
+            self.assertIsNot(server.service, first)
+
+
 class TestConfigureWarning(_StackTestCase):
     """D-09: a fresh open warns once that a restart clears the core's latch."""
 
