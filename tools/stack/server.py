@@ -546,6 +546,16 @@ def _non_terminal_reply(service: Any, result: Any, d: Any) -> ExecuteCommandRepl
     return _with_suffix(_transfer_error_reply(service, result), f"; {_RE_ATTACH}")
 
 
+def _with_restart_clause(service: Any, reply: ExecuteCommandReply, d: Any) -> ExecuteCommandReply:
+    """D-09: after a restart the core may not own the guid, so a non-ran outcome
+    may never have latched. Append the arm-inspection clause, preceded by the
+    current latch clause unless the reply already carries it (a latching result).
+    The front of the line is cut, never these clauses, so the latched guid stays
+    inside the 300-character cap."""
+    latch = "" if _can_latch(d) else f"{_latch_clause(service)}; "
+    return _with_suffix(reply, f"; {latch}{_RESTART_CLAUSE}")
+
+
 def _ledger_meta(key: str, record: dict[str, Any], **extra: Any) -> dict[str, Any]:
     """D-10: the meta of every ledger-generated reply, {stepKey, ledgerState}
     plus whatever the reply adds (a replay adds result and replayed)."""
@@ -1019,12 +1029,16 @@ class StackServer(ToolServer):
         return _with_suffix(_transfer_error_reply(service, outcome), f"; {_NOT_RE_SENT}")
 
     def _finish(self, service: StackService, ledger: Ledger, key: str, result: Any,
-                write_failed: bool) -> ExecuteCommandReply:
+                write_failed: bool, restarted: bool = False) -> ExecuteCommandReply:
         """Record a terminal wait result and map it to the reply. A ledger write
         failure never stops the wait (the transfer already ran), but it turns
-        the reply into an error (D-04)."""
+        the reply into an error (D-04). ``restarted`` is set only on a re-attach
+        of a record written by another tool-server instance (D-09): a live ran
+        is then SUCCESS flagged reattachedAfterRestart, and every other outcome
+        gets the arm-inspection clause."""
         to_dict = getattr(result, "to_dict", None)
         d = to_dict() if callable(to_dict) else None
+        ran = isinstance(d, dict) and d.get("kind") == "ran"
         # No terminal write after a failed started write: the ledger is not
         # trusted, and the record stays submitting so a re-run never re-sends.
         if isinstance(d, dict) and is_terminal(d) and not write_failed:
@@ -1037,15 +1051,21 @@ class StackServer(ToolServer):
             # The latch clause comes first: it is the guid the operator needs.
             # A ran result has no latch to name, so it makes no latch_status call.
             latch = f"{_latch_clause(service)}; " if d is None or _can_latch(d) else ""
-            return _reply(
+            reply = _reply(
                 ERROR_FROM_TOOL,
                 message=_one_line(_LATER_WRITE_FAILED.format(
                     kind=kind if isinstance(kind, str) and kind else "outcome unknown",
                     latch=latch), 300),
                 meta=d if isinstance(d, dict) else None)
-        if not (isinstance(d, dict) and is_terminal(d)):
-            return _non_terminal_reply(service, result, d)
-        return _transfer_error_reply(service, result)
+        elif isinstance(d, dict) and is_terminal(d):
+            if ran and restarted:
+                return _reply(SUCCESS, meta={**d, "reattachedAfterRestart": True})
+            reply = _transfer_error_reply(service, result)
+        else:
+            reply = _non_terminal_reply(service, result, d)
+        if restarted and not ran:
+            reply = _with_restart_clause(service, reply, d)
+        return reply
 
     def _reattach(self, service: StackService, ledger: Ledger, key: str,
                   record: dict[str, Any], budget: float, restarted: bool) -> ExecuteCommandReply:
@@ -1055,7 +1075,7 @@ class StackServer(ToolServer):
         handle = record.get("handle")
         guid = handle.get("guid") if isinstance(handle, dict) else None
         result = self._reattach_loop(service, guid if isinstance(guid, str) else "", budget)
-        return self._finish(service, ledger, key, result, False)
+        return self._finish(service, ledger, key, result, False, restarted)
 
     def _reattach_loop(self, service: Any, guid: str, budget: float) -> Any:
         """Wait on ``guid`` in slices of min(remaining, WAIT_SLICE_S) until a
