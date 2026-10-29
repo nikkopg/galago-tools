@@ -2924,6 +2924,94 @@ class TestRestart(_LedgerCase):
         self.assertNotIn("reattachedAfterRestart", reply.meta_data)
 
 
+class TestMessageCap(_LedgerCase):
+    """WR-03: whatever a client key, a core field or the environment makes long,
+    an operator line stays within 300 characters and keeps what the operator
+    acts on: the kind, the guids and the next action. The part that is cut is
+    the variable, least useful one."""
+
+    _TASK = "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb"
+    _LATCH = "cccccccc-4444-5555-6666-dddddddddddd"
+
+    def test_a_long_owner_step_key_does_not_cut_the_kind_or_the_guid(self) -> None:
+        owner_key = "owner-" + "k" * 250
+        other = Ledger(Path(self.ledger_dir))
+        now = datetime.now(timezone.utc)
+        self.assertTrue(other.claim(owner_key, fingerprint="a" * 64, instance="x", now=now))
+        other.mark_started(
+            owner_key, handle=TaskHandle(guid="g-owner", robot="R1").to_dict(), now=now)
+        self.core.execute_result = Refused(reason="inFlight", detail={"guid": "g-owner"})
+        reply = self._transfer()
+        self.assertEqual(reply.response, ERROR_FROM_TOOL)
+        self.assertLessEqual(len(reply.error_message), 300)
+        self.assertTrue(reply.error_message.startswith("stack: refused (inFlight)"),
+                        reply.error_message)
+        self.assertIn("g-owner", reply.error_message)
+        self.assertIn("is still running; re-run that step to re-attach", reply.error_message)
+
+    def test_a_timed_out_re_attach_after_a_restart_keeps_both_guids(self) -> None:
+        self._seed(state="started", instance="old-instance",
+                   handle=TaskHandle(guid=self._TASK, robot="R1").to_dict())
+        self.core.latch_result = LatchStatus(
+            latched=True, guid=self._LATCH, result_kind="cancelRequested")
+        clock = [1000.0]
+
+        def _wait_transfer(guid: str, *, timeout_s: float) -> Any:
+            clock[0] += timeout_s
+            return TimedOut(handle=TaskHandle(guid=guid))
+
+        self.core.wait_result = _wait_transfer
+        with patch.object(stack_server, "_monotonic", side_effect=lambda: clock[0]):
+            reply = self._transfer()
+        self.assertEqual(reply.response, ERROR_FROM_TOOL)
+        message = reply.error_message
+        self.assertLessEqual(len(message), 300)
+        self.assertTrue(message.startswith("stack: still running"), message)
+        self.assertIn(f"task guid {self._TASK}", message)
+        self.assertIn(f"latched guid {self._LATCH} (cancelRequested)", message)
+        self.assertIn("tool restarted mid-transfer", message)
+        self.assertIn("may not have latched", message)
+
+    def test_a_lost_re_attach_keeps_the_whole_task_guid_with_a_long_reason(self) -> None:
+        self._seed(state="started", handle=TaskHandle(guid=self._TASK, robot="R1").to_dict())
+        self.core.latch_result = LatchStatus(
+            latched=True, guid=self._LATCH, result_kind="cancelRequested")
+        self.core.wait_transfer_results = [Lost(
+            reason="r" * 80, handle=TaskHandle(guid=self._TASK))]
+        reply = self._transfer()
+        self.assertEqual(reply.response, ERROR_FROM_TOOL)
+        self.assertLessEqual(len(reply.error_message), 300)
+        self.assertIn(f"task guid {self._TASK}", reply.error_message)
+        self.assertIn(f"latched guid {self._LATCH}", reply.error_message)
+
+    def test_a_recorded_failure_keeps_the_task_guid_before_a_long_step_key(self) -> None:
+        key = "run-" + "k" * 250
+        self._seed(key, state="done", handle=TaskHandle(guid=self._TASK).to_dict(),
+                   result=Lost(reason="r" * 80, handle=TaskHandle(guid=self._TASK)).to_dict())
+        self.core.latch_result = LatchStatus(
+            latched=True, guid=self._LATCH, result_kind="cancelRequested")
+        reply = self._transfer(key)
+        self.assertEqual(reply.response, ERROR_FROM_TOOL)
+        self.assertLessEqual(len(reply.error_message), 300)
+        self.assertIn(f"task guid {self._TASK}", reply.error_message)
+        self.assertIn(f"latched guid {self._LATCH}", reply.error_message)
+
+    def test_a_long_ledger_path_does_not_cut_do_not_delete_it(self) -> None:
+        directory = self.ledger_dir
+        for part in ("a" * 120, "b" * 120, "c" * 120):
+            directory = os.path.join(directory, part)
+        self.server._ledger_dir = directory
+        os.makedirs(directory, mode=0o700)
+        with open(os.path.join(directory, "stack-ledger.json"), "wb") as handle:
+            handle.write(b"{not json")
+        reply = self._transfer()
+        self.assertEqual(reply.response, ERROR_FROM_TOOL)
+        self.assertLessEqual(len(reply.error_message), 300)
+        self.assertIn("do not delete it; no transfer was sent", reply.error_message)
+        self.assertIn("stack-ledger.json", reply.error_message)
+        self.assertEqual(self.core.calls, [])
+
+
 class TestLedgerDirPinned(_LedgerCase):
     """CR-01: the ledger is found by directory, so once a Transfer has used a
     directory a Configure must not move it (a step key that already ran would

@@ -190,6 +190,10 @@ _ACK_BUSY_MESSAGE = (
     "stack: busy; a Transfer is running in this tool; wait for it to finish, "
     "then acknowledge again")
 
+# WR-03: the longest ledger path (or step key) shown in an operator line.
+_PATH_SHOWN_MAX = 120
+_KEY_SHOWN_MAX = 60
+
 # D-04: operator-visible ledger messages (05-SPIKE.md section 6f).
 _LEDGER_UNREADABLE = (
     "stack: step ledger unreadable ({reason}) at {path}; do not delete it; "
@@ -352,6 +356,32 @@ def _one_line(text: str, limit: int) -> str:
     return collapsed
 
 
+# WR-03: the "; task guid <g>" segment of an operator line. It is what the
+# operator needs to find the task, so a line that is too long is cut around it.
+_TASK_GUID_SEGMENT = re.compile(r"; task guid \S+")
+
+
+def _fit(front: str, suffix: str = "", limit: int = 300) -> str:
+    """``front`` + ``suffix`` in at most ``limit`` characters. The suffix (a
+    fixed clause) and the front's "; task guid <g>" segment are kept whole; what
+    is cut is the front's text after that segment (a hint, a step key) first,
+    then the front's head. A line that already fits is returned unchanged."""
+    suffix = _one_line(suffix, limit) if suffix else ""
+    match = _TASK_GUID_SEGMENT.search(front)
+    if match is not None:
+        head, keep, rest = front[:match.start()], match.group(0), front[match.end():]
+    else:
+        head, keep, rest = front, "", ""
+    room = limit - len(suffix) - len(keep)
+    if room < 0:
+        # Pathological (a clause alone near the limit): keep the line bounded.
+        return _one_line(front + suffix, limit)
+    if len(head) + len(rest) > room:
+        rest = _one_line(rest, max(room - len(head), 0)) if room - len(head) >= 3 else ""
+        head = _one_line(head, room - len(rest))
+    return _one_line(head + keep + rest + suffix, limit)
+
+
 def _reply(code: ResponseCode, *, message: str = "",
            meta: Optional[dict] = None) -> ExecuteCommandReply:
     """Always sets return_reply=True. When meta is given, builds a Struct,
@@ -457,6 +487,10 @@ def _ledger_error_reply(exc: Exception, path: str) -> ExecuteCommandReply:
     structured reason only, never str(exc)."""
     reason = exc.reason if isinstance(exc, LedgerError) else "invalid"
     shown = exc.path if isinstance(exc, LedgerError) else path
+    # WR-03: a long path is cut from its left (the file name is the useful end),
+    # never the "do not delete it; no transfer was sent" that follows it.
+    if len(shown) > _PATH_SHOWN_MAX:
+        shown = "..." + shown[-(_PATH_SHOWN_MAX - 3):]
     return _reply(ERROR_FROM_TOOL, message=_one_line(
         _LEDGER_UNREADABLE.format(reason=reason, path=shown), 300))
 
@@ -511,7 +545,7 @@ def _transfer_error_reply(service: Any, result: Any) -> ExecuteCommandReply:
     hint = _hint(d)
     if hint:
         line += f"; {hint}"
-    return _reply(ERROR_FROM_TOOL, message=_one_line(line, 300), meta=d)
+    return _reply(ERROR_FROM_TOOL, message=_fit(line), meta=d)
 
 
 def _latched_guid(service: Any) -> Optional[str]:
@@ -528,11 +562,11 @@ def _latched_guid(service: Any) -> Optional[str]:
 
 
 def _with_suffix(reply: ExecuteCommandReply, suffix: str) -> ExecuteCommandReply:
-    """Append a fixed clause to a reply's message, cutting the front part (never
-    the clause) so the line stays within 300 characters."""
+    """Append a fixed clause to a reply's message so the line stays within 300
+    characters: the clause and the front's task guid are kept whole and the rest
+    of the front is cut (see _fit)."""
     if suffix:
-        reply.error_message = _one_line(
-            reply.error_message, 300 - len(suffix)) + suffix
+        reply.error_message = _fit(reply.error_message, suffix)
     return reply
 
 
@@ -550,7 +584,8 @@ def _in_flight_owner_clause(ledger: Ledger, d: dict[str, Any], own_key: str) -> 
         return ""
     if owner is None or owner == own_key:
         return ""
-    return "; " + _IN_FLIGHT_OWNER.format(key=owner)
+    # The owner's key is client input and unbounded (WR-03).
+    return "; " + _IN_FLIGHT_OWNER.format(key=_one_line(owner, _KEY_SHOWN_MAX))
 
 
 def _non_terminal_reply(service: Any, result: Any, d: Any) -> ExecuteCommandReply:
@@ -563,12 +598,12 @@ def _non_terminal_reply(service: Any, result: Any, d: Any) -> ExecuteCommandRepl
     guid = _find_guid(d) if isinstance(d, dict) else None
     task = f"; task guid {guid}" if guid else ""
     if kind == "timedOut":
-        return _reply(ERROR_FROM_TOOL, message=_one_line(_STILL_RUNNING + task, 300), meta=meta)
+        return _reply(ERROR_FROM_TOOL, message=_fit(_STILL_RUNNING + task), meta=meta)
     if kind == "lost" and isinstance(d, dict):
         reason = d.get("reason")
         shown = _one_line(reason, 60) if isinstance(reason, str) and reason else "unknown"
         line = _NOT_ENDED.format(reason=shown, latch=_latch_clause(service)) + task
-        return _reply(ERROR_FROM_TOOL, message=_one_line(line, 300), meta=meta)
+        return _reply(ERROR_FROM_TOOL, message=_fit(line), meta=meta)
     return _with_suffix(_transfer_error_reply(service, result), f"; {_RE_ATTACH}")
 
 
@@ -1039,7 +1074,7 @@ class StackServer(ToolServer):
             line = self._refuse_failed_line(service, key, record)
         else:
             line = f"stack: unrecognised ledger decision; nothing was sent; step key {key}"
-        return _reply(ERROR_FROM_TOOL, message=_one_line(line, 300), meta=meta)
+        return _reply(ERROR_FROM_TOOL, message=_fit(line), meta=meta)
 
     @staticmethod
     def _refuse_failed_line(service: StackService, key: str, record: dict[str, Any]) -> str:
