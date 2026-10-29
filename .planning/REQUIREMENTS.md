@@ -35,9 +35,9 @@ milestone; stack-automation-layer core gaps are fixed there via `/gsd-quick`. Re
 
 ### F5-safe Transfer (GAL-01, on the DEP-01 core: `934a621`)
 
-- [ ] **XFR-01**: A workflow step can move a plate with `Transfer`: `plan_transfer` → `execute_transfer`
+- [x] **XFR-01**: A workflow step can move a plate with `Transfer`: `plan_transfer` → `execute_transfer`
   → wait to a terminal result in one command; starting the Galago run is the approval
-- [ ] **XFR-02**: `Transfer` requires a non-blank `step_key`; a persisted, atomically written ledger
+- [x] **XFR-02**: `Transfer` requires a non-blank `step_key`; a persisted, atomically written ledger
   records key + request fingerprint, a write-ahead `submitting` record before `execute_transfer`, then
   the guid, then the terminal outcome
 - [ ] **XFR-03**: A repeated `step_key` (F5 re-dispatch, retry after failure, tool restart) never
@@ -48,7 +48,7 @@ milestone; stack-automation-layer core gaps are fixed there via `/gsd-quick`. Re
   (`934a621` limit 1)
 - [ ] **XFR-04**: An outcome that proves nothing was sent (`refused`/`rejected`/`needsInput`/
   `readFailed`) releases the key so the operator can fix the cause and re-run the step
-- [ ] **XFR-05**: The adapter never retries motion — an AST invariant with planted violations proves it
+- [x] **XFR-05**: The adapter never retries motion — an AST invariant with planted violations proves it
   never calls `start_transfer`, `cancel_transfer` or `go_to_safe_position`, and calls
   `execute_transfer` at most once per key
 - [ ] **XFR-06**: A Transfer `TimedOut` leaves the arm running and is reported as an error; re-running
@@ -127,11 +127,11 @@ milestone; stack-automation-layer core gaps are fixed there via `/gsd-quick`. Re
 | STK-05 | Phase 4 | Complete |
 | STK-06 | Phase 4 | Complete |
 | STK-07 | Phase 4 | Complete |
-| XFR-01 | Phase 5 | Pending |
-| XFR-02 | Phase 5 | Pending |
+| XFR-01 | Phase 5 | Complete |
+| XFR-02 | Phase 5 | Complete |
 | XFR-03 | Phase 5 | Pending |
 | XFR-04 | Phase 5 | Pending |
-| XFR-05 | Phase 5 | Pending |
+| XFR-05 | Phase 5 | Complete |
 | XFR-06 | Phase 5 | Pending |
 | ACK-01 | Phase 5 | Pending |
 | ACK-02 | Phase 5 | Pending |

@@ -138,14 +138,14 @@ re-checked research: `.planning/research/SUMMARY.md` § Addendum (2026-10-29).
      `AcknowledgeFailure(guid, arm_inspected)`: only the exact string `"yes"` reaches
      `acknowledge_failure(guid, confirm=True)`, anything else is `INVALID_ARGUMENTS` with no core
      call, and no adapter path acknowledges on its own.
-**Plans:** 1/7 plans executed (waves 1-6; 05-03 and 05-04 run in parallel in wave 3, every other plan is sequential on `tools/stack/server.py` / `tools/tests/stack_test.py`)
+**Plans:** 2/7 plans executed (waves 1-6; 05-03 and 05-04 run in parallel in wave 3, every other plan is sequential on `tools/stack/server.py` / `tools/tests/stack_test.py`)
 
 Plans:
 **Wave 1**
 - [x] 05-01-PLAN.md — D-01 design spike `05-SPIKE.md` against core 934a621: answers, amendments A-1/A-2, resolved open questions, binding ledger contract (XFR-03, XFR-04, ACK-02)
 
 **Wave 2** *(blocked on Wave 1 completion)*
-- [ ] 05-02-PLAN.md — Tracer: fresh-path Transfer through a write-ahead step ledger (`tools/stack/ledger.py`), Phase 4 test migration, then the XFR-05 call-site AST rules (XFR-01, XFR-02, XFR-05)
+- [x] 05-02-PLAN.md — Tracer: fresh-path Transfer through a write-ahead step ledger (`tools/stack/ledger.py`), Phase 4 test migration, then the XFR-05 call-site AST rules (XFR-01, XFR-02, XFR-05)
 
 **Wave 3** *(blocked on Wave 2 completion; the two plans share no files)*
 - [ ] 05-03-PLAN.md — Pure ledger: storage contract tests, `decide()` state machine and transitions, test first (XFR-02, XFR-03, XFR-04)
@@ -241,7 +241,7 @@ Phases execute in numeric order: 4 → 5 → 6 → 7 (DEP-01 is met, so Phase 5 
 | Phase | Milestone | Plans Complete | Status | Completed |
 |-------|-----------|----------------|--------|-----------|
 | 4. STACK Tool Registration, Reads & Estimate | v2 | 5/5 | Complete    | 2026-10-29 |
-| 5. F5-safe Transfer & Operator Acknowledge | v2 | 1/7 | In Progress | - |
+| 5. F5-safe Transfer & Operator Acknowledge | v2 | 2/7 | In Progress | - |
 | 6. GAL-02 Workflow, Simulated Workcell & PAC-Simulator Run | v2 | 0/TBD | Not started | - |
 | 7. Deploy & Supervised Live STACK + Handoff | v2 | 0/TBD | Not started | - |
 

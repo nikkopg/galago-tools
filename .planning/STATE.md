@@ -5,16 +5,16 @@ milestone_name: STACK Tool & STACK↔F.A.S.T. Handoff
 current_phase: 5
 current_phase_name: F5-safe Transfer & Operator Acknowledge
 status: executing
-stopped_at: Completed 05-01-PLAN.md
-last_updated: "2026-10-29T08:42:20.738Z"
+stopped_at: Completed 05-02-PLAN.md
+last_updated: "2026-10-29T08:50:03.426Z"
 last_activity: 2026-10-29
 last_activity_desc: Phase 5 execution started
-state_head: 93767379312188b44a63dc13d576c4bf534e2900
+state_head: a2d653f5072107ea2f7aaa7693ed41e18a2ddc42
 progress:
   total_phases: 4
   completed_phases: 1
   total_plans: 12
-  completed_plans: 6
+  completed_plans: 7
   percent: 25
 ---
 
@@ -32,7 +32,7 @@ acknowledges on its own. For the STACK: a step never sends a second transfer.
 ## Current Position
 
 Phase: 5 (F5-safe Transfer & Operator Acknowledge) — EXECUTING
-Plan: 2 of 7
+Plan: 3 of 7
 Status: Ready to execute
 Last activity: 2026-10-29 — Phase 5 execution started
 
@@ -87,6 +87,7 @@ Progress: [███░░░░░░░] 25%
 | Phase 04 P04 | 20 min | 3 tasks | 2 files |
 | Phase 4 P05 | 15 min | 2 tasks | 2 files |
 | Phase 05 P01 | 6 min | 2 tasks | 1 files |
+| Phase 5 P02 | 25min | 3 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -119,6 +120,8 @@ v2 roadmap-level decisions (2026-10-28, detail in PROJECT.md Key Decisions):
 - [Phase 05]: 05-01 A-1: ledger done set mirrors core _task_ended (ran, failed, aborted, lost(taskNotFound)); timedOut and lost(pollFailed) stay started — Recording lost(pollFailed) as done would leave the core persisted in-flight guard set forever (acknowledge does not clear it), so every later Transfer would be Refused(inFlight)
 - [Phase 05]: 05-01 A-2: the guid to acknowledge comes from latch_status() first; the result guid is labelled task guid only — Latch is first-failure-wins and acknowledge_failure answers guidMismatch for any other guid
 - [Phase 05]: 05-01 OQ1/OQ2: keep D-09 (live ran after restart is SUCCESS flagged reattachedAfterRestart); release after Rejected(instrument)/Refused(stackBusy) per XFR-04 as documented residual risk; orphaned core in-flight guard goes to the Phase 7 runbook — Orchestrator resolutions in --auto mode; adapter holds no instrument policy
+- [Phase 5]: 05-02: an existing step key sends nothing (interim ERROR_FROM_TOOL, replaced by decide() in 05-06); non-TaskHandle execute results keep the record submitting (interim, 05-05 adds the release whitelist)
+- [Phase 5]: 05-02: XFR-05 call-site AST rules replace the blanket no-motion rule: single sites for execute_transfer/plan_transfer in _run_fresh, no loop ancestor, after claim, no getattr/alias, acknowledge_failure confined to AcknowledgeFailure
 
 ### Pending Todos
 
@@ -152,8 +155,8 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-29T08:42:20.704Z
-Stopped at: Completed 05-01-PLAN.md
+Last session: 2026-10-29T08:50:03.390Z
+Stopped at: Completed 05-02-PLAN.md
 Resume file: None
 
 ## Operator Next Steps
