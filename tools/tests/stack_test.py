@@ -116,9 +116,14 @@ class _StackTestCase(unittest.TestCase):
         self._tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmpdir.cleanup)
         self.lock_dir = self._tmpdir.name
+        # The core persists its failure latch per endpoint under STACK_STATE_DIR
+        # (default ~/.local/state/stack-automation-layer, shared with stack-mcp);
+        # tests must never read or write the real one.
+        self.state_dir = os.path.join(self._tmpdir.name, "state")
 
         env_patcher = patch.dict(os.environ, {
             "STACK_MCP_LOCK_DIR": self.lock_dir,
+            "STACK_STATE_DIR": self.state_dir,
             "STACK_USER": "galago-test-user",
             "STACK_PASSWORD": "galago-test-password",
         })
@@ -1042,7 +1047,7 @@ class TestConfigureLedgerDir(_StackTestCase):
                 self.assertEqual(server._transfer_timeout_s, value)
 
 
-_PINNED_CORE_SHA = "ed8ce478d8881a517eb93ed233707f81aea01238"
+_PINNED_CORE_SHA = "934a621ece116a8b263897c1e9b62b57374f4ef3"
 
 
 class TestRequirementsPin(unittest.TestCase):
