@@ -93,7 +93,7 @@ from tools.grpc_interfaces.tool_driver_pb2_grpc import (
     ToolDriverStub,
     add_ToolDriverServicer_to_server,
 )
-from tools.stack.ledger import Ledger, LedgerError
+from tools.stack.ledger import Ledger, LedgerError, fingerprint
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -1784,7 +1784,9 @@ class TestTransferFreshPath(_TransferTestCase):
         self.assertEqual(self.core.execute_calls, 1)
         self.assertEqual(len(self.core.calls), before)
         self.assertEqual(self.core.call_names.count("plan_transfer"), 1)
-        self.assertEqual(reply.response, ERROR_FROM_TOOL)
+        # A done+ran record inside the replay window is replayed (D-07).
+        self.assertEqual(reply.response, SUCCESS)
+        self.assertEqual(reply.meta_data["replayed"], True)
 
     def test_a_corrupt_ledger_refuses_the_transfer_and_is_left_untouched(self) -> None:
         os.makedirs(self.ledger_dir, mode=0o700)
@@ -2374,6 +2376,206 @@ class TestMotionLock(_TransferTestCase):
         reply = self._transfer("run-after:k")
         self.assertEqual(reply.response, DRIVER_ERROR)
         self.assertFalse(stack_server._MOTION_LOCK.locked())
+
+
+def _write_record(ledger_dir: str, key: str, **fields: Any) -> None:
+    """Write (or replace) one record in the ledger file by hand, so a test can
+    plant any state, instance, fingerprint or timestamp. Other records stay."""
+    stamp = datetime.now(timezone.utc).isoformat()
+    record: dict[str, Any] = {
+        "fingerprint": "a" * 64, "state": "submitting", "instance": "old-instance",
+        "handle": None, "result": None, "createdAt": stamp, "updatedAt": stamp}
+    record.update(fields)
+    path = os.path.join(ledger_dir, "stack-ledger.json")
+    os.makedirs(ledger_dir, mode=0o700, exist_ok=True)
+    document: dict[str, Any] = {"version": 1, "records": {}}
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as handle:
+            document = json.load(handle)
+    document["records"][key] = record
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(document, handle)
+
+
+class _LedgerCase(_TransferTestCase):
+    """Shared helpers for the repeat-key tests: the request fingerprint a
+    Transfer computes, a planted record, and a call-name tally."""
+
+    def _fp(self) -> str:
+        request = stack_server._transfer_request(stack_pb2.Command.Transfer(**_ESTIMATE_FIELDS))
+        return fingerprint(self.server._endpoint(), request)
+
+    def _seed(self, key: str = _STEP_KEY, **fields: Any) -> None:
+        fields.setdefault("fingerprint", self._fp())
+        fields.setdefault("instance", self.server._instance)
+        _write_record(self.ledger_dir, key, **fields)
+
+    def _at(self, now: datetime, age_s: float) -> str:
+        return (now - timedelta(seconds=age_s)).isoformat()
+
+    def _assert_no_motion_calls(self) -> None:
+        for name in ("plan_transfer", "execute_transfer", "wait", "wait_transfer"):
+            self.assertNotIn(name, self.core.call_names)
+
+
+_NOW = datetime(2026, 10, 29, 12, 0, 0, tzinfo=timezone.utc)
+
+
+class TestRepeatKey(_LedgerCase):
+    """XFR-03 / D-07 as amended by 05-SPIKE.md 6b: a repeated step key never
+    submits. A different request is INVALID_ARGUMENTS; a done+ran record inside
+    the replay window replays; every other state is refused with a next action,
+    and no refusal calls plan, execute, wait or wait_transfer (A-6)."""
+
+    def _transfer_at(self, now: datetime, **fields: Any) -> Any:
+        with patch.object(stack_server, "_utcnow", return_value=now):
+            return self._transfer(**fields)
+
+    def test_a_different_request_is_invalid_arguments_for_every_state(self) -> None:
+        handle = TaskHandle(guid=_GUID, robot="R1", estimated_s=30.0).to_dict()
+        ran = Ran(task=_ran_snapshot()).to_dict()
+        states = (
+            ("submitting", {}),
+            ("started", {"handle": handle}),
+            ("outcomeUnknown", {"latchGuid": _SUBMIT_GUID}),
+            ("done-ran", {"handle": handle, "result": ran}),
+            ("done-failed", {"handle": handle, "result": Failed(task=_snapshot("g-task")).to_dict()}),
+        )
+        for label, extra in states:
+            with self.subTest(label):
+                key = f"run-1:{label}"
+                state = "done" if label.startswith("done") else label
+                self._seed(key, state=state, fingerprint="b" * 64, **extra)
+                self.core.calls.clear()
+                reply = self._transfer(key)
+                self.assertEqual(reply.response, tool_base_pb2.INVALID_ARGUMENTS)
+                self.assertEqual(self.core.calls, [])
+                self.assertEqual(reply.meta_data["stepKey"], key)
+
+    def test_the_same_request_against_another_stack_endpoint_is_a_mismatch(self) -> None:
+        self.assertEqual(self._transfer().response, SUCCESS)
+        self.core.calls.clear()
+        self.server.config = stack_pb2.Config(host="127.0.0.2")
+        reply = self._transfer()
+        self.assertEqual(reply.response, tool_base_pb2.INVALID_ARGUMENTS)
+        self.assertIn("different request or STACK", reply.error_message)
+        self.assertEqual(self.core.calls, [])
+
+    def test_a_done_ran_record_inside_the_window_is_replayed(self) -> None:
+        ran = Ran(task=_ran_snapshot()).to_dict()
+        self._seed(state="done", handle=TaskHandle(guid=_GUID).to_dict(), result=ran,
+                    updatedAt=self._at(_NOW, 1))
+        reply = self._transfer_at(_NOW)
+        self.assertEqual(reply.response, SUCCESS)
+        self.assertEqual(reply.error_message, "")
+        self.assertEqual(reply.meta_data, _struct({
+            "stepKey": _STEP_KEY, "ledgerState": "done", "result": ran, "replayed": True}))
+        self.assertEqual(self.core.calls, [])
+
+    def test_a_done_ran_record_at_the_window_edges(self) -> None:
+        ran = Ran(task=_ran_snapshot()).to_dict()
+        cases = (("599.9 s", 599.9, SUCCESS), ("600 s", 600.0, ERROR_FROM_TOOL),
+                 ("601 s", 601.0, ERROR_FROM_TOOL), ("future-dated", -5.0, ERROR_FROM_TOOL))
+        for label, age, expected in cases:
+            with self.subTest(label):
+                self._seed(state="done", handle=TaskHandle(guid=_GUID).to_dict(), result=ran,
+                            updatedAt=self._at(_NOW, age))
+                reply = self._transfer_at(_NOW)
+                self.assertEqual(reply.response, expected)
+                if expected == ERROR_FROM_TOOL:
+                    self.assertIn("already completed at", reply.error_message)
+                    self.assertIn("mint a new step key", reply.error_message)
+                self.assertEqual(self.core.calls, [])
+
+    def test_a_submitting_record_is_refused_and_never_re_sent(self) -> None:
+        self._seed(state="submitting")
+        reply = self._transfer()
+        self.assertEqual(reply.response, ERROR_FROM_TOOL)
+        for fragment in ("outcome unknown", "GetFailureLatch", "will not be re-sent"):
+            self.assertIn(fragment, reply.error_message)
+        self.assertNotIn("tool restarted", reply.error_message)
+        self._assert_no_motion_calls()
+        self.assertEqual(reply.meta_data, _struct({"stepKey": _STEP_KEY, "ledgerState": "submitting"}))
+
+    def test_an_outcome_unknown_record_names_its_recorded_latch_guid(self) -> None:
+        self._seed(state="outcomeUnknown", latchGuid=_SUBMIT_GUID)
+        reply = self._transfer()
+        self.assertEqual(reply.response, ERROR_FROM_TOOL)
+        self.assertIn(_SUBMIT_GUID, reply.error_message)
+        self.assertIn("AcknowledgeFailure", reply.error_message)
+        self.assertIn("will not be re-sent", reply.error_message)
+        self._assert_no_motion_calls()
+
+    def test_an_outcome_unknown_record_without_a_latch_guid_says_to_read_the_latch(self) -> None:
+        self._seed(state="outcomeUnknown", latchGuid=None)
+        reply = self._transfer()
+        self.assertEqual(reply.response, ERROR_FROM_TOOL)
+        self.assertIn("no latch guid was recorded", reply.error_message)
+        self.assertIn("GetFailureLatch", reply.error_message)
+        self._assert_no_motion_calls()
+
+    def test_a_done_failed_record_repeats_kind_reason_and_task_guid(self) -> None:
+        lost = Lost(reason="taskNotFound", handle=TaskHandle(guid="g-task")).to_dict()
+        for label, result, kind in (
+                ("failed", Failed(task=_snapshot("g-task"), reason="robotError").to_dict(), "failed"),
+                ("aborted", Aborted(task=_snapshot("g-task")).to_dict(), "aborted"),
+                ("lost", lost, "lost")):
+            with self.subTest(label):
+                self._seed(state="done", handle=TaskHandle(guid="g-task").to_dict(), result=result)
+                self.core.calls.clear()
+                self.core.latch_result = LatchStatus(latched=True, guid="g-task", result_kind=kind)
+                reply = self._transfer()
+                self.assertEqual(reply.response, ERROR_FROM_TOOL)
+                message = reply.error_message
+                self.assertIn(kind, message)
+                if result.get("reason"):
+                    self.assertIn(str(result["reason"]), message)
+                self.assertIn("latched guid g-task", message)
+                self.assertIn("AcknowledgeFailure", message)
+                self.assertIn("new step key", message)
+                self.assertIn("task guid g-task", message)
+                self._assert_no_motion_calls()
+                self.assertLessEqual(self.core.call_names.count("latch_status"), 1)
+
+    def test_a_key_that_differs_by_a_trailing_space_takes_the_fresh_path(self) -> None:
+        key = "run-1:stack-1"
+        self._seed(key, state="done", result=Ran(task=_ran_snapshot()).to_dict())
+        reply = self._transfer(key + " ")
+        self.assertEqual(reply.response, SUCCESS)
+        self.assertEqual(self.core.call_names.count("plan_transfer"), 1)
+        self.assertEqual(self.core.execute_calls, 1)
+        self.assertEqual(sorted(self._records()), [key, key + " "])
+
+    def test_a_280_character_step_key_keeps_every_refusal_within_300_characters(self) -> None:
+        key = "k" * 280
+        ran = Ran(task=_ran_snapshot()).to_dict()
+        failed = Failed(task=_snapshot(_GUID)).to_dict()
+        cases = (
+            ("submitting", {"state": "submitting"}, None),
+            ("outcomeUnknown", {"state": "outcomeUnknown", "latchGuid": _SUBMIT_GUID}, _SUBMIT_GUID),
+            ("completed", {"state": "done", "result": ran, "updatedAt": self._at(_NOW, 9999)}, None),
+            ("failed", {"state": "done", "result": failed}, _GUID),
+            ("mismatch", {"state": "submitting", "fingerprint": "b" * 64}, None),
+        )
+        for label, fields, guid in cases:
+            with self.subTest(label):
+                self._seed(key, **fields)
+                self.core.latch_result = LatchStatus(latched=True, guid=_GUID, result_kind="failed")
+                with patch.object(stack_server, "_utcnow", return_value=_NOW):
+                    reply = self._transfer(key)
+                self.assertLessEqual(len(reply.error_message), 300)
+                if guid:
+                    self.assertIn(guid, reply.error_message)
+
+    def test_a_repeat_of_a_just_completed_step_replays_without_a_core_call(self) -> None:
+        self.assertEqual(self._transfer().response, SUCCESS)
+        self.assertEqual(self.core.execute_calls, 1)
+        before = len(self.core.calls)
+        reply = self._transfer()
+        self.assertEqual(reply.response, SUCCESS)
+        self.assertEqual(reply.meta_data["replayed"], True)
+        self.assertEqual(len(self.core.calls), before)
+        self.assertEqual(self.core.execute_calls, 1)
 
 
 class TestTransferEstimate(_RealModeGrpcTestCase):
