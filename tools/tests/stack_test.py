@@ -20,7 +20,7 @@ from concurrent import futures
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Optional
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call as mock_call, patch
 
 import grpc
 from google.protobuf import empty_pb2
@@ -1748,6 +1748,84 @@ class TestTransferFreshPath(_TransferTestCase):
         self.assertFalse(stack_server._MOTION_LOCK.locked())
 
 
+class TestFailureLatch(_RealModeGrpcTestCase):
+    """ACK-02 / D-13: GetFailureLatch is latch_status() 1:1, zero I/O, idempotent."""
+
+    LATCHES = (
+        ("task guid", LatchStatus(latched=True, guid=_GUID, result_kind="failed", reason=None)),
+        ("submit id", LatchStatus(latched=True, guid="submit-0123456789abcdef",
+                                  result_kind="lost", reason="submitOutcomeUnknown")),
+        ("state id", LatchStatus(latched=True, guid="state-0123456789abcdef",
+                                 result_kind="stateUnreadable", reason="stateUnreadable")),
+        ("unlatched", LatchStatus(latched=False)),
+    )
+
+    def _latch(self) -> Any:
+        return self.stub.ExecuteCommand(self._stack(
+            get_failure_latch=stack_pb2.Command.GetFailureLatch()))
+
+    def test_every_latch_shape_is_success_with_latch_status_meta(self) -> None:
+        for label, status in self.LATCHES:
+            with self.subTest(label):
+                self.service.reset_mock()
+                self.service.latch_status.return_value = status
+                reply = self._latch()
+                self.assertEqual(reply.response, SUCCESS, reply.error_message)
+                self.assertEqual(reply.error_message, "")
+                self.assertEqual(reply.meta_data, _struct(status.to_dict()))
+                self.assertEqual(self.service.mock_calls, [mock_call.latch_status()])
+
+    def test_the_unlatched_status_carries_a_null_guid(self) -> None:
+        self.service.latch_status.return_value = LatchStatus(latched=False)
+        meta = MessageToDict(self._latch().meta_data)
+        self.assertIs(meta["latched"], False)
+        self.assertIsNone(meta["guid"])
+        self.assertEqual(meta["kind"], "latchStatus")
+
+    def test_two_reads_return_the_same_meta_and_change_nothing(self) -> None:
+        self.service.latch_status.return_value = self.LATCHES[1][1]
+        first, second = self._latch(), self._latch()
+        self.assertEqual(first.meta_data, second.meta_data)
+        self.assertEqual(self.service.mock_calls, [mock_call.latch_status()] * 2)
+        self.assertEqual(self._health().status, READY)
+
+    def test_the_latch_answers_while_a_transfer_holds_the_tool_busy(self) -> None:
+        self.service.latch_status.return_value = self.LATCHES[0][1]
+        release = threading.Event()
+        entered = threading.Event()
+
+        def _blocking(*_a: Any, **_k: Any) -> Any:
+            entered.set()
+            release.wait(timeout=10)
+            return tool_base_pb2.ExecuteCommandReply(response=SUCCESS, return_reply=True)
+
+        patcher = patch.object(self.server, "Transfer", MagicMock(side_effect=_blocking))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        thread = threading.Thread(target=lambda: self.stub.ExecuteCommand(self._stack(
+            transfer=stack_pb2.Command.Transfer(step_key="busy-1"))))
+        thread.start()
+        self.addCleanup(thread.join, 10)
+        self.addCleanup(release.set)
+        self.assertTrue(entered.wait(timeout=5))
+        self.assertEqual(self._health().status, tool_base_pb2.BUSY)
+        reply = self._latch()
+        self.assertEqual(reply.response, SUCCESS)
+        self.assertEqual(reply.meta_data, _struct(self.LATCHES[0][1].to_dict()))
+
+    def test_unconfigured_the_latch_is_not_ready(self) -> None:
+        self.server.service = None
+        reply = self._latch()
+        self.assertEqual(reply.response, NOT_READY)
+        self.assertEqual(reply.error_message, "stack: not configured")
+
+    def test_latch_status_is_the_only_core_call_and_no_ledger_is_made(self) -> None:
+        self.service.latch_status.return_value = self.LATCHES[0][1]
+        self._latch()
+        self.assertEqual([c[0] for c in self.service.mock_calls], ["latch_status"])
+        self.assertFalse(os.path.exists(os.path.join(self.xdg_state_home, "galago-tools")))
+
+
 class TestTransferEstimate(_RealModeGrpcTestCase):
     """STK-04: GetTransferEstimate -> estimate_transfer, once, nothing else."""
 
@@ -1948,13 +2026,12 @@ class TestReadCommands(_RealModeGrpcTestCase):
 
 
 class TestOneToOneSurface(_StackTestCase):
-    def test_map_has_seven_keys_matching_the_oneof_names(self) -> None:
+    def test_map_has_eight_keys_matching_the_oneof_names(self) -> None:
         mapping = stack_server.COMMAND_TO_SERVICE_METHOD
-        self.assertEqual(len(mapping), 7)
+        self.assertEqual(len(mapping), 8)
         oneof = stack_pb2.Command.DESCRIPTOR.oneofs_by_name["command"].fields
         names = {f.message_type.name for f in oneof}
-        self.assertEqual(set(mapping) | {"Transfer", "AcknowledgeFailure", "GetFailureLatch"},
-                         names)
+        self.assertEqual(set(mapping) | {"Transfer", "AcknowledgeFailure"}, names)
 
     def test_every_oneof_message_has_a_handler_and_the_sets_are_disjoint(self) -> None:
         oneof = stack_pb2.Command.DESCRIPTOR.oneofs_by_name["command"].fields
@@ -1983,6 +2060,7 @@ class TestOneToOneSurface(_StackTestCase):
             "transfer_profiles": TransferProfiles(profiles=[]),
             "labware_presence": LabwarePresence(robot_name="R1", has_labware=False),
             "estimate_transfer": Estimated(estimated_time="00:00:01", guid=None),
+            "latch_status": LatchStatus(latched=False),
         }
         messages = {
             "GetManagerState": stack_pb2.Command.GetManagerState(),
@@ -1992,6 +2070,7 @@ class TestOneToOneSurface(_StackTestCase):
             "ListTransferProfiles": stack_pb2.Command.ListTransferProfiles(),
             "GetLabwarePresence": stack_pb2.Command.GetLabwarePresence(robot="R1"),
             "GetTransferEstimate": stack_pb2.Command.GetTransferEstimate(**_ESTIMATE_FIELDS),
+            "GetFailureLatch": stack_pb2.Command.GetFailureLatch(),
         }
         self.assertEqual(set(messages), set(stack_server.COMMAND_TO_SERVICE_METHOD))
         for command, method in stack_server.COMMAND_TO_SERVICE_METHOD.items():
@@ -2037,6 +2116,9 @@ class TestResultMapping(_StackTestCase):
         LabwarePresence(robot_name="R1", has_labware=False),
         Estimated(estimated_time="00:00:48", guid=None, advisories=[], seconds=48.0),
         FailureAcknowledged(guid="g1", result_kind="failed", explanation=_SENTINEL),
+        LatchStatus(latched=False),
+        LatchStatus(latched=True, guid="submit-0123456789abcdef", result_kind="lost",
+                    reason="submitOutcomeUnknown", explanation=_SENTINEL),
         Ran(task=_snapshot()),
     )
 
@@ -2060,7 +2142,7 @@ class TestResultMapping(_StackTestCase):
         ]
 
     def test_allowlisted_kinds_are_success_with_empty_message_and_core_meta(self) -> None:
-        self.assertEqual(len(self.SUCCESS_RESULTS), 9)
+        self.assertEqual(len(self.SUCCESS_RESULTS), 11)
         for result in self.SUCCESS_RESULTS:
             with self.subTest(kind=result.to_dict()["kind"]):
                 reply = _result_reply(result)
@@ -2081,7 +2163,7 @@ class TestResultMapping(_StackTestCase):
 
     def test_unknown_and_case_variant_kinds_are_never_success(self) -> None:
         for kind in ("brandNewKind", "ManagerState", "managerstate", " managerState",
-                     "managerState ", "RAN"):
+                     "managerState ", "RAN", "LatchStatus", "latchstatus", "latchStatus "):
             with self.subTest(kind=kind):
                 reply = _result_reply(_DictResult({"kind": kind}))
                 self.assertEqual(reply.response, ERROR_FROM_TOOL)
@@ -2355,7 +2437,6 @@ class TestCheckArgs(unittest.TestCase):
 
 _REFUSALS = {
     "AcknowledgeFailure": "stack: AcknowledgeFailure is not available in this build",
-    "GetFailureLatch": "stack: GetFailureLatch is not available in this build",
 }
 
 
@@ -2369,8 +2450,6 @@ class TestRealModeRefusals(_RealModeGrpcTestCase):
             "AcknowledgeFailure": self._stack(
                 acknowledge_failure=stack_pb2.Command.AcknowledgeFailure(
                     guid="g", arm_inspected="yes")),
-            "GetFailureLatch": self._stack(
-                get_failure_latch=stack_pb2.Command.GetFailureLatch()),
         }
         for name, command in commands.items():
             with self.subTest(name):
@@ -2405,10 +2484,10 @@ class TestRealModeRefusalsOrdering(_StackTestCase):
     def _dispatch(self, name: str, **fields: Any) -> Any:
         return self.server._dispatchCommand(getattr(stack_pb2.Command, name)(**fields))
 
-    def test_the_latch_is_refused_not_unconfigured(self) -> None:
+    def test_the_latch_is_not_ready_when_unconfigured(self) -> None:
         reply = self._dispatch("GetFailureLatch")
-        self.assertEqual(reply.response, ERROR_FROM_TOOL)
-        self.assertEqual(reply.error_message, _REFUSALS["GetFailureLatch"])
+        self.assertEqual(reply.response, NOT_READY)
+        self.assertEqual(reply.error_message, "stack: not configured")
 
     def test_ack_with_good_arguments_is_refused_not_unconfigured(self) -> None:
         reply = self._dispatch("AcknowledgeFailure", guid="g", arm_inspected="no")
@@ -2569,6 +2648,7 @@ class TestBusyReads(_RealModeGrpcTestCase):
             "estimate_transfer": Estimated(
                 estimated_time="00:00:48", guid=None, advisories=[], seconds=48.0),
         }
+        self.results["latch_status"] = LatchStatus(latched=False)
         for method, result in self.results.items():
             getattr(self.service, method).return_value = result
 
@@ -2620,8 +2700,9 @@ class TestBusyReads(_RealModeGrpcTestCase):
         with self.subTest("get_failure_latch"):
             reply = self.stub.ExecuteCommand(self._stack(
                 get_failure_latch=stack_pb2.Command.GetFailureLatch()))
-            self.assertEqual(reply.response, ERROR_FROM_TOOL)
-            self.assertEqual(reply.error_message, _REFUSALS["GetFailureLatch"])
+            self.assertEqual(reply.response, SUCCESS, reply.error_message)
+            self.assertEqual(reply.meta_data, _struct(self.results["latch_status"].to_dict()))
+            self.service.latch_status.assert_called_once()
 
         self.assertEqual(self._health().status, tool_base_pb2.BUSY)
         second = self.stub.ExecuteCommand(self._stack(
@@ -2639,12 +2720,13 @@ class TestBusyReads(_RealModeGrpcTestCase):
         """WR-04: a motion command's failure text in GetStatus.error_message
         survives successful, refused and failed (non-exception) reads."""
         self.server.last_error = "transfer failed: arm fault"
+        self.service.latch_status.return_value = LatchStatus(latched=False)
         self.service.robot_states.return_value = ReadFailed(
             error={"status": 500, "name": "Boom"})
         for field, message in (
             ("get_manager_state", stack_pb2.Command.GetManagerState),    # SUCCESS
             ("get_robot_states", stack_pb2.Command.GetRobotStates),      # ERROR_FROM_TOOL
-            ("get_failure_latch", stack_pb2.Command.GetFailureLatch),    # refusal
+            ("get_failure_latch", stack_pb2.Command.GetFailureLatch),    # SUCCESS
         ):
             with self.subTest(field):
                 self.stub.ExecuteCommand(self._stack(**{field: message()}))
@@ -2722,7 +2804,7 @@ class TestNotConfigured(_StackTestCase):
     def _health(self) -> tool_base_pb2.StatusReply:
         return self.stub.GetStatus(empty_pb2.Empty())  # type: ignore[no-any-return]
 
-    def test_fresh_server_reads_are_not_ready_and_the_latch_is_refused(self) -> None:
+    def test_fresh_server_reads_and_the_latch_are_not_ready(self) -> None:
         self.assertEqual(self._health().status, tool_base_pb2.NOT_CONFIGURED)
         for field, message in (("get_manager_state", stack_pb2.Command.GetManagerState),
                                ("get_transfer_estimate", stack_pb2.Command.GetTransferEstimate)):
@@ -2732,8 +2814,8 @@ class TestNotConfigured(_StackTestCase):
                 self.assertEqual(reply.error_message, "stack: not configured")
         reply = self.stub.ExecuteCommand(self._stack(
             get_failure_latch=stack_pb2.Command.GetFailureLatch()))
-        self.assertEqual(reply.response, ERROR_FROM_TOOL)
-        self.assertEqual(reply.error_message, _REFUSALS["GetFailureLatch"])
+        self.assertEqual(reply.response, NOT_READY)
+        self.assertEqual(reply.error_message, "stack: not configured")
         self.assertEqual(self._health().status, tool_base_pb2.NOT_CONFIGURED)
         self.open_service.assert_not_called()
 
