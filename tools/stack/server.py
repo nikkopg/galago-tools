@@ -360,25 +360,71 @@ def _one_line(text: str, limit: int) -> str:
 # operator needs to find the task, so a line that is too long is cut around it.
 _TASK_GUID_SEGMENT = re.compile(r"; task guid \S+")
 
+# WR-02 (iteration 2): the clauses that tell the operator what to do are never
+# cut. When a line is still too long after the free text after the task guid
+# is gone, only variable text is shed, in this order: the core's result-kind
+# label on a held latch, then the reason of the result. Each is also in the
+# core's meta, which the reply carries unchanged.
+_SHED_LATCH_KIND = re.compile(r"(latched guid \S+) \([^()]*\)")
+_SHED_REASON = re.compile(r"^(stack: \w+) \([^()]*\)")
+# After a restart the line says "inspect the arm" twice when a latch clause is
+# present; the second one is dropped last, before any fixed clause is cut.
+_RESTART_DUPLICATE = re.compile(r"(tool restarted mid-transfer;) inspect the arm;")
+_INSPECT_THE_ARM = "inspect the arm"
+
+
+def _shed_variable_text(head: str, suffix: str, over: int) -> tuple[str, str]:
+    """Remove variable text from ``head`` and ``suffix`` until ``over``
+    characters are gone (or nothing variable is left): the latch kind label,
+    then the reason, then a repeated "inspect the arm". Never a clause."""
+    for rule, keep_group in ((_SHED_LATCH_KIND, r"\1"), (_SHED_REASON, r"\1")):
+        for in_head in (True, False):
+            if over <= 0:
+                return head, suffix
+            text = head if in_head else suffix
+            shorter = rule.sub(keep_group, text, count=1)
+            over -= len(text) - len(shorter)
+            head, suffix = (shorter, suffix) if in_head else (head, shorter)
+    if over > 0:
+        marker = "tool restarted mid-transfer;"
+        before, found, _after = suffix.partition(marker)
+        if found and _INSPECT_THE_ARM in head + before:
+            suffix = _RESTART_DUPLICATE.sub(r"\1", suffix, count=1)
+    return head, suffix
+
 
 def _fit(front: str, suffix: str = "", limit: int = 300) -> str:
     """``front`` + ``suffix`` in at most ``limit`` characters. The suffix (a
-    fixed clause) and the front's "; task guid <g>" segment are kept whole; what
-    is cut is the front's text after that segment (a hint, a step key) first,
-    then the front's head. A line that already fits is returned unchanged."""
+    fixed clause), the front's "; task guid <g>" segment and a "re-run this step
+    to re-attach" clause that ends the front are kept whole. What is cut is
+    variable text: the front's text after the task guid (a hint, a step key)
+    first, then the reason and the latch kind label (see _shed_variable_text),
+    and only then the front's head. A line that already fits is returned
+    unchanged."""
     suffix = _one_line(suffix, limit) if suffix else ""
     match = _TASK_GUID_SEGMENT.search(front)
     if match is not None:
         head, keep, rest = front[:match.start()], match.group(0), front[match.end():]
     else:
         head, keep, rest = front, "", ""
+    # The re-attach clause that ends the free text is an action, not free text.
+    tail = f"; {_RE_ATTACH}"
+    if rest.endswith(tail):
+        rest, suffix = rest[:-len(tail)], tail + suffix
+    elif not rest and head.endswith(tail) and match is None:
+        head, suffix = head[:-len(tail)], tail + suffix
     room = limit - len(suffix) - len(keep)
     if room < 0:
         # Pathological (a clause alone near the limit): keep the line bounded.
         return _one_line(front + suffix, limit)
     if len(head) + len(rest) > room:
         rest = _one_line(rest, max(room - len(head), 0)) if room - len(head) >= 3 else ""
-        head = _one_line(head, room - len(rest))
+    over = len(head) + len(rest) - room
+    if over > 0:
+        head, suffix = _shed_variable_text(head, suffix, over)
+        room = limit - len(suffix) - len(keep)
+        if len(head) + len(rest) > room:
+            head = _one_line(head, room - len(rest))
     return _one_line(head + keep + rest + suffix, limit)
 
 

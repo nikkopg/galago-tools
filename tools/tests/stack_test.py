@@ -3016,9 +3016,15 @@ class TestMessageCap(_LedgerCase):
         self.assertLessEqual(len(message), 300)
         self.assertTrue(message.startswith("stack: still running"), message)
         self.assertIn(f"task guid {self._TASK}", message)
-        self.assertIn(f"latched guid {self._LATCH} (cancelRequested)", message)
-        self.assertIn("tool restarted mid-transfer", message)
-        self.assertIn("may not have latched", message)
+        # The latch kind label is variable text (it is in the meta) and goes
+        # first; the guid and the actions never do (WR-02, iteration 2).
+        self.assertIn(f"latched guid {self._LATCH}", message)
+        self.assertIn("inspect the arm, then AcknowledgeFailure", message)
+        self.assertIn("re-run this step to re-attach", message)
+        self.assertNotIn("...", message)
+        self.assertIn(
+            "tool restarted mid-transfer; inspect the arm; the core may not have latched "
+            "this failure", message)
 
     def test_a_lost_re_attach_keeps_the_whole_task_guid_with_a_long_reason(self) -> None:
         self._seed(state="started", handle=TaskHandle(guid=self._TASK, robot="R1").to_dict())
@@ -3031,6 +3037,43 @@ class TestMessageCap(_LedgerCase):
         self.assertLessEqual(len(reply.error_message), 300)
         self.assertIn(f"task guid {self._TASK}", reply.error_message)
         self.assertIn(f"latched guid {self._LATCH}", reply.error_message)
+        self.assertIn("re-run this step to re-attach", reply.error_message)
+
+    def test_a_lost_re_attach_after_a_restart_keeps_the_re_attach_action(self) -> None:
+        # WR-02 (iteration 2): the longest line there is. Both guids, the
+        # re-attach action and the restart clause all fit; only the reason, the
+        # latch kind label and the repeated "inspect the arm" are shed.
+        self._seed(state="started", instance="old-instance",
+                   handle=TaskHandle(guid=self._TASK, robot="R1").to_dict())
+        self.core.latch_result = LatchStatus(
+            latched=True, guid=self._LATCH, result_kind="cancelRequested")
+        self.core.wait_transfer_results = [Lost(
+            reason="r" * 80, handle=TaskHandle(guid=self._TASK))]
+        reply = self._transfer()
+        self.assertEqual(reply.response, ERROR_FROM_TOOL)
+        message = reply.error_message
+        self.assertLessEqual(len(message), 300)
+        self.assertTrue(message.startswith("stack: lost"), message)
+        self.assertIn(f"task guid {self._TASK}", message)
+        self.assertIn(f"latched guid {self._LATCH}", message)
+        self.assertIn("inspect the arm, then AcknowledgeFailure", message)
+        self.assertIn("the transfer may still be running; re-run this step to re-attach", message)
+        self.assertIn("tool restarted mid-transfer", message)
+        self.assertIn("the core may not have latched this failure", message)
+        self.assertNotIn("...", message)
+
+    def test_a_re_attach_clause_that_follows_a_hint_survives_a_later_suffix(self) -> None:
+        # The re-attach action ends the free text of a reply that is already
+        # built (_with_suffix) when the restart clause is appended to it.
+        front = (f"stack: cancelled ({'r' * 60}); latched guid {self._LATCH} (cancelRequested); "
+                 f"inspect the arm, then AcknowledgeFailure; task guid {self._TASK}; "
+                 f"finding: {'f' * 80}; re-run this step to re-attach")
+        line = stack_server._fit(front, "; tool restarted mid-transfer; inspect the arm; "
+                                        "the core may not have latched this failure")
+        self.assertLessEqual(len(line), 300)
+        self.assertIn(f"task guid {self._TASK}", line)
+        self.assertIn(f"latched guid {self._LATCH}", line)
+        self.assertIn("; re-run this step to re-attach; tool restarted mid-transfer", line)
 
     def test_a_recorded_failure_keeps_the_task_guid_before_a_long_step_key(self) -> None:
         key = "run-" + "k" * 250
