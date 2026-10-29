@@ -5,16 +5,16 @@ milestone_name: STACK Tool & STACK↔F.A.S.T. Handoff
 current_phase: 5
 current_phase_name: F5-safe Transfer & Operator Acknowledge
 status: executing
-stopped_at: Phase 5 context gathered
-last_updated: "2026-10-29T08:36:44.466Z"
+stopped_at: Completed 05-01-PLAN.md
+last_updated: "2026-10-29T08:42:20.738Z"
 last_activity: 2026-10-29
-last_activity_desc: Phase 4 complete, transitioned to Phase 5
-state_head: ace9cd7c6da6ebf504431fee66eecb6a702f0fca
+last_activity_desc: Phase 5 execution started
+state_head: 93767379312188b44a63dc13d576c4bf534e2900
 progress:
   total_phases: 4
   completed_phases: 1
   total_plans: 12
-  completed_plans: 5
+  completed_plans: 6
   percent: 25
 ---
 
@@ -27,14 +27,14 @@ See: .planning/PROJECT.md (updated 2026-10-28)
 **Core value:** An operator running an instrument step from Galago can always see what the instrument
 is doing and recover it themselves; no adapter code path pauses, resumes, aborts, cancels, retries or
 acknowledges on its own. For the STACK: a step never sends a second transfer.
-**Current focus:** Phase 4 — STACK Tool Registration, Reads & Estimate
+**Current focus:** Phase 5 — F5-safe Transfer & Operator Acknowledge
 
 ## Current Position
 
-Phase: 5 (F5-safe Transfer & Operator Acknowledge) — READY TO EXECUTE
-Plan: Not started
+Phase: 5 (F5-safe Transfer & Operator Acknowledge) — EXECUTING
+Plan: 2 of 7
 Status: Ready to execute
-Last activity: 2026-10-29 — Phase 4 complete, transitioned to Phase 5
+Last activity: 2026-10-29 — Phase 5 execution started
 
 Progress: [███░░░░░░░] 25%
 
@@ -86,6 +86,7 @@ Progress: [███░░░░░░░] 25%
 | Phase 04 P03 | 15 min | 3 tasks | 2 files |
 | Phase 04 P04 | 20 min | 3 tasks | 2 files |
 | Phase 4 P05 | 15 min | 2 tasks | 2 files |
+| Phase 05 P01 | 6 min | 2 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -115,6 +116,9 @@ v2 roadmap-level decisions (2026-10-28, detail in PROJECT.md Key Decisions):
 - [Phase 04]: 04-03: operator error line = kind, reason, guid, then one bounded structured hint; core explanation/detail text never read
 - [Phase 04]: 04-04: Phase 5 commands (Transfer, AcknowledgeFailure, GetFailureLatch) are refused in real mode before the not-configured check; arm_inspected matched byte-for-byte against yes/no
 - [Phase 4]: 04-05: READ_COMMANDS (eight reads incl. get_transfer_estimate, get_failure_latch) bypass BUSY via StackServer.ExecuteCommand; reads never call isReady/parseCommand/setStatus; transfer/acknowledge_failure never in set
+- [Phase 05]: 05-01 A-1: ledger done set mirrors core _task_ended (ran, failed, aborted, lost(taskNotFound)); timedOut and lost(pollFailed) stay started — Recording lost(pollFailed) as done would leave the core persisted in-flight guard set forever (acknowledge does not clear it), so every later Transfer would be Refused(inFlight)
+- [Phase 05]: 05-01 A-2: the guid to acknowledge comes from latch_status() first; the result guid is labelled task guid only — Latch is first-failure-wins and acknowledge_failure answers guidMismatch for any other guid
+- [Phase 05]: 05-01 OQ1/OQ2: keep D-09 (live ran after restart is SUCCESS flagged reattachedAfterRestart); release after Rejected(instrument)/Refused(stackBusy) per XFR-04 as documented residual risk; orphaned core in-flight guard goes to the Phase 7 runbook — Orchestrator resolutions in --auto mode; adapter holds no instrument policy
 
 ### Pending Todos
 
@@ -148,9 +152,9 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-29T04:31:08.155Z
-Stopped at: Phase 5 context gathered
-Resume file: .planning/phases/05-f5-safe-transfer-operator-acknowledge/05-CONTEXT.md
+Last session: 2026-10-29T08:42:20.704Z
+Stopped at: Completed 05-01-PLAN.md
+Resume file: None
 
 ## Operator Next Steps
 
