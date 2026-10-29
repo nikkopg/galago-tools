@@ -44,7 +44,8 @@ Task IDs from plans 05-01..05-07. Verify blocks that run stack_test.py first run
 |---------|-------------|----------|-----------|-------------------|-------------|--------|
 | 05-01-T1/T2 | XFR-03, XFR-04, ACK-02 | 05-SPIKE.md answers the D-01 questions and core citations hold at 934a621 | doc + git grep | the grep / `git show 934a621` checks in 05-01 verify | ❌ W0 (spike) | ⬜ pending |
 | 05-02-T1 | XFR-01, XFR-02 | Fresh path plan → write-ahead → execute → started → wait → done. `ran` → SUCCESS. Corrupt ledger refuses | integration | `pytest tools/tests/stack_test.py -k TestTransferFreshPath` | ❌ W0 | ⬜ pending |
-| 05-02-T2 | XFR-05 | Call-site AST rules with planted violations | AST | `pytest tools/tests/stack_test.py -k TestAdapterInvariant` | partial (rewrite) | ⬜ pending |
+| 05-02-T2 | XFR-05 | Phase 4 refusal and no-motion tests migrated to the wired Transfer. All of stack_test.py green | integration + AST | `pytest tools/tests/stack_test.py` | ✅ migrate | ⬜ pending |
+| 05-02-T3 | XFR-05 | Call-site AST rules with planted violations | AST | `pytest tools/tests/stack_test.py -k TestAdapterInvariant` | partial (rewrite) | ⬜ pending |
 | 05-03-T1 | XFR-02 | Atomic write-ahead ledger. Fails closed. Modes 0700/0600. flock. Path resolution. Fingerprint | unit | `pytest tools/tests/stack_ledger_test.py -k "TestLedgerStorage or TestResolveLedgerDir or TestFingerprint"` | ❌ W0 | ⬜ pending |
 | 05-03-T2 | XFR-03 | `decide()` per D-07 row, incl. the replay-window edges | unit | `pytest tools/tests/stack_ledger_test.py -k TestDecide` | ❌ W0 | ⬜ pending |
 | 05-03-T3 | XFR-03, XFR-04 | release / outcomeUnknown / `is_terminal` (A-1) / retention | unit | `pytest tools/tests/stack_ledger_test.py` | ❌ W0 | ⬜ pending |
@@ -54,7 +55,8 @@ Task IDs from plans 05-01..05-07. Verify blocks that run stack_test.py first run
 | 05-05-T1 | XFR-04 | Whitelisted release. Unknown / exception / submitOutcomeUnknown keep the key | integration | `pytest tools/tests/stack_test.py -k TestKeyRelease` | ❌ W0 | ⬜ pending |
 | 05-05-T2 | XFR-02, XFR-06 | Configure ledger_dir, fail-closed Transfer, budget precedence, motion lock | integration | `pytest tools/tests/stack_test.py -k "TestLedgerFailClosed or TestWaitBudget or TestMotionLock or TestConfigureLedgerDir"` | ❌ W0 | ⬜ pending |
 | 05-06-T1 | XFR-03 | Each D-07 row wired into Transfer. Fingerprint mismatch | integration | `pytest tools/tests/stack_test.py -k TestRepeatKey` | ❌ W0 | ⬜ pending |
-| 05-06-T2 | XFR-06, XFR-03 | `timedOut` → re-attach → `ran`. 300 s slices. `lost(pollFailed)` stays `started`. Restart | integration | `pytest tools/tests/stack_test.py -k "TestTimedOutReattach or TestRestart"` | ❌ W0 | ⬜ pending |
+| 05-06-T2 | XFR-06 | `timedOut` → re-attach → `ran`. 300 s slices. `lost(pollFailed)` stays `started` | integration | `pytest tools/tests/stack_test.py -k TestTimedOutReattach` | ❌ W0 | ⬜ pending |
+| 05-06-T3 | XFR-03 | Restart re-attach: a live `ran` is SUCCESS flagged `reattachedAfterRestart`. Anything else adds the arm-inspection clause | integration | `pytest tools/tests/stack_test.py -k TestRestart` | ❌ W0 | ⬜ pending |
 | 05-07-T1 | XFR-05 | Behavioural submit count of 1 across the D-16 matrix. No auto-ack | integration | `pytest tools/tests/stack_test.py -k TestNeverResends` | ❌ W0 | ⬜ pending |
 | 05-07-T2 | STK-05, STK-06 | Reads answer during a real Transfer. Simulated mode never writes the ledger | integration | `pytest tools/tests/stack_test.py -k "TestBusyReads or TestSimulated"` | rewrite | ⬜ pending |
 
