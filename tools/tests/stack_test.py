@@ -3221,6 +3221,39 @@ class TestLedgerDirPinned(_LedgerCase):
         self.core.plan_result = good_plan
         self._assert_directory_can_still_move(port)
 
+    def test_a_ledger_holding_other_keys_stays_pinned_after_a_transfer_that_wrote_nothing(
+            self) -> None:
+        # Review iteration 3 WR-01: a step that completed earlier must never
+        # read as FRESH after a Configure moved the ledger away.
+        port = _free_tcp_port()
+        self.assertEqual(self._configure(self.ledger_dir, port).response, SUCCESS)
+        self.server._ledger_pinned = None  # as after a tool-server restart
+        self._seed(state="submitting")
+        with patch.object(Ledger, "claim", side_effect=LedgerError("unwritable", "p")):
+            reply = self._transfer(step_key="another-step")
+        self.assertEqual(reply.response, ERROR_FROM_TOOL)
+        self.assertIsNotNone(self.server._ledger_pinned)
+        self.assertEqual(
+            self._configure(os.path.join(self._tmpdir.name, "another-ledger"), port).response,
+            NOT_READY)
+
+    def test_a_transfer_that_wrote_nothing_keeps_an_earlier_pin(self) -> None:
+        # Review iteration 3 WR-02: the finally restores the previous pin, never None.
+        port = _free_tcp_port()
+        self.assertEqual(self._configure(self.ledger_dir, port).response, SUCCESS)
+        self.assertEqual(self._transfer().response, SUCCESS)
+        good_plan = self.core.plan_result
+        self.core.plan_result = NeedsInput(missing=["robot"])
+        self.assertEqual(self._transfer(step_key="another-step").response, ERROR_FROM_TOOL)
+        self.core.plan_result = good_plan
+        self.assertIsNotNone(self.server._ledger_pinned)
+        self.assertEqual(
+            self._configure(os.path.join(self._tmpdir.name, "another-ledger"), port).response,
+            NOT_READY)
+        executes = self.core.execute_calls
+        self.assertEqual(self._transfer().response, SUCCESS)
+        self.assertEqual(self.core.execute_calls, executes)
+
     def test_an_untrusted_ledger_file_pins_the_directory(self) -> None:
         # The file may hold step keys: moving ledger_dir would forget them.
         for reason in ("unreadable", "corrupt", "unknownVersion"):

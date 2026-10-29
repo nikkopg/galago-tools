@@ -1095,7 +1095,8 @@ class StackServer(ToolServer):
                     tentative = True
                 ledger = Ledger(directory)
                 existing = ledger.get(key)
-                if existing is not None:
+                # Any ledger file here may hold other steps' keys: keep the pin.
+                if existing is not None or ledger.path.exists():
                     self._ledger_used = True
             except (LedgerError, ValueError) as exc:
                 # A ledger file that exists but cannot be trusted may hold step
