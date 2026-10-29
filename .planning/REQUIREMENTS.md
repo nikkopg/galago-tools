@@ -56,10 +56,10 @@ milestone; stack-automation-layer core gaps are fixed there via `/gsd-quick`. Re
 
 ### Operator acknowledge (GAL-01)
 
-- [ ] **ACK-01**: Operator can clear a core failure latch with `AcknowledgeFailure(guid, arm_inspected)`;
+- [x] **ACK-01**: Operator can clear a core failure latch with `AcknowledgeFailure(guid, arm_inspected)`;
   only the exact string `"yes"` reaches `acknowledge_failure(guid, confirm=True)`, anything else →
   `INVALID_ARGUMENTS` with no core call; no adapter path sends it on its own
-- [ ] **ACK-02**: Operator can see the latched guid — in the error message and via `GetFailureLatch`,
+- [x] **ACK-02**: Operator can see the latched guid — in the error message and via `GetFailureLatch`,
   bound 1:1 to the core's `latch_status()` (`latchStatus` kind, zero I/O), including the `submit-<hex>`
   case after an ambiguous submit and the `state-<hex>` case after an unreadable or unsaved core state file
 
@@ -133,8 +133,8 @@ milestone; stack-automation-layer core gaps are fixed there via `/gsd-quick`. Re
 | XFR-04 | Phase 5 | Pending |
 | XFR-05 | Phase 5 | Complete |
 | XFR-06 | Phase 5 | Pending |
-| ACK-01 | Phase 5 | Pending |
-| ACK-02 | Phase 5 | Pending |
+| ACK-01 | Phase 5 | Complete |
+| ACK-02 | Phase 5 | Complete |
 | FLOW-01 | Phase 6 | Pending |
 | FLOW-02 | Phase 6 | Pending |
 | FLOW-03 | Phase 6 | Pending |

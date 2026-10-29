@@ -5,16 +5,16 @@ milestone_name: STACK Tool & STACK↔F.A.S.T. Handoff
 current_phase: 5
 current_phase_name: F5-safe Transfer & Operator Acknowledge
 status: executing
-stopped_at: Completed 05-03-PLAN.md
-last_updated: "2026-10-29T08:55:55.264Z"
+stopped_at: Completed 05-04-PLAN.md
+last_updated: "2026-10-29T09:02:08.765Z"
 last_activity: 2026-10-29
 last_activity_desc: Phase 5 execution started
-state_head: 497075706d276b5266d024dc10b7f7b395ba3252
+state_head: 67a670dec4e19dd8fa8b8a798aea182a926eead3
 progress:
   total_phases: 4
   completed_phases: 1
   total_plans: 12
-  completed_plans: 8
+  completed_plans: 9
   percent: 25
 ---
 
@@ -32,7 +32,7 @@ acknowledges on its own. For the STACK: a step never sends a second transfer.
 ## Current Position
 
 Phase: 5 (F5-safe Transfer & Operator Acknowledge) — EXECUTING
-Plan: 4 of 7
+Plan: 5 of 7
 Status: Ready to execute
 Last activity: 2026-10-29 — Phase 5 execution started
 
@@ -89,6 +89,7 @@ Progress: [███░░░░░░░] 25%
 | Phase 05 P01 | 6 min | 2 tasks | 1 files |
 | Phase 5 P02 | 25min | 3 tasks | 3 files |
 | Phase 5 P03 | 3 min | 3 tasks | 2 files |
+| Phase 5 P04 | 14min | 3 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -125,6 +126,8 @@ v2 roadmap-level decisions (2026-10-28, detail in PROJECT.md Key Decisions):
 - [Phase 5]: 05-02: XFR-05 call-site AST rules replace the blanket no-motion rule: single sites for execute_transfer/plan_transfer in _run_fresh, no loop ancestor, after claim, no getattr/alias, acknowledge_failure confined to AcknowledgeFailure
 - [Phase 5]: 05-03: decide() treats an unknown record state as refuseOutcomeUnknown; replay only for done+ran with 0 <= age < 600 s
 - [Phase 5]: 05-03: ledger retention prunes done records older than 7 days only inside a mutation that wrote; load never prunes
+- [Phase 5]: GetFailureLatch is latch_status() 1:1; the yes gate sits in _dispatchCommand before admission and again in the AcknowledgeFailure handler
+- [Phase 5]: Later ledger-write-failure message carries the latch clause for latching results only (ran makes no latch_status call)
 
 ### Pending Todos
 
@@ -158,8 +161,8 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-29T08:55:55.228Z
-Stopped at: Completed 05-03-PLAN.md
+Last session: 2026-10-29T09:02:08.729Z
+Stopped at: Completed 05-04-PLAN.md
 Resume file: None
 
 ## Operator Next Steps
