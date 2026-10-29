@@ -35,11 +35,13 @@ from tools.stack.ledger import (
     REFUSE_SUBMITTING,
     REPLAY,
     REPLAY_WINDOW_S,
+    RETENTION_DONE_S,
     Decision,
     Ledger,
     LedgerError,
     decide,
     fingerprint,
+    is_terminal,
     resolve_ledger_dir,
 )
 
@@ -743,6 +745,275 @@ class TestDecide(unittest.TestCase):
                 patch("os.open", side_effect=AssertionError("decide touched a file")):
             self.assertEqual(self.decide(self.done_ran(1.0)).action, REPLAY)
             self.assertEqual(self.decide(None).action, FRESH)
+
+
+class TestTransitions(_LedgerCase):
+    def test_release_deletes_only_its_key(self) -> None:
+        self.claim("k")
+        self.claim("k2", fp=_FP2, now=_NOW + timedelta(seconds=1))
+        kept = self.ledger.get("k2")
+        self.ledger.release("k", now=_NOW + timedelta(seconds=2))
+        self.assertEqual(sorted(self.ledger.load()), ["k2"])
+        self.assertEqual(self.ledger.get("k2"), kept)
+
+    def test_release_of_an_absent_key_writes_nothing_new(self) -> None:
+        self.claim("k")
+        before = self.ledger.path.read_bytes()
+        mtime = os.stat(self.ledger.path).st_mtime_ns
+        self.ledger.release("absent", now=_NOW + timedelta(seconds=5))
+        self.assertEqual(self.ledger.path.read_bytes(), before)
+        self.assertEqual(os.stat(self.ledger.path).st_mtime_ns, mtime)
+        self.assertEqual(self.stray_temp_files(), [])
+
+    def test_release_on_a_missing_ledger_creates_no_ledger_file(self) -> None:
+        self.ledger.release("absent", now=_NOW)
+        self.assertFalse(self.ledger.path.exists())
+
+    def test_release_refuses_a_corrupt_ledger_and_leaves_it(self) -> None:
+        self.directory.mkdir()
+        self.ledger.path.write_bytes(b"{broken")
+        with self.assertRaises(LedgerError):
+            self.ledger.release("k", now=_NOW)
+        self.assertEqual(self.ledger.path.read_bytes(), b"{broken")
+
+    def test_release_needs_an_aware_now(self) -> None:
+        self.claim("k")
+        with self.assertRaises(ValueError):
+            self.ledger.release("k", now=datetime(2026, 10, 29, 12, 0, 0))
+        self.assertIsNotNone(self.ledger.get("k"))
+
+    def test_mark_outcome_unknown_records_the_latch_guid(self) -> None:
+        self.claim("k")
+        later = _NOW + timedelta(seconds=3)
+        self.ledger.mark_outcome_unknown("k", latch_guid="submit-0123456789abcdef", now=later)
+        record = self.ledger.get("k")
+        assert record is not None
+        self.assertEqual(record["state"], "outcomeUnknown")
+        self.assertEqual(record["latchGuid"], "submit-0123456789abcdef")
+        self.assertEqual(record["updatedAt"], later.isoformat())
+        self.assertEqual(record["createdAt"], _NOW.isoformat())
+        self.assertEqual(record["fingerprint"], _FP)
+        self.assertEqual(record["instance"], _INSTANCE)
+
+    def test_mark_outcome_unknown_with_no_latch_guid_stores_none(self) -> None:
+        self.claim("k")
+        self.ledger.mark_outcome_unknown("k", latch_guid=None, now=_NOW)
+        record = self.ledger.get("k")
+        assert record is not None
+        self.assertEqual(record["state"], "outcomeUnknown")
+        self.assertIn("latchGuid", record)
+        self.assertIsNone(record["latchGuid"])
+
+    def test_the_outcome_unknown_file_still_loads_strictly(self) -> None:
+        self.claim("k")
+        self.ledger.mark_outcome_unknown("k", latch_guid="submit-0123456789abcdef", now=_NOW)
+        self.assertEqual(Ledger(self.directory).get("k"), self.ledger.get("k"))
+
+    def test_mark_outcome_unknown_on_an_absent_key_is_a_missing_error(self) -> None:
+        with self.assertRaises(LedgerError) as caught:
+            self.ledger.mark_outcome_unknown("nope", latch_guid=None, now=_NOW)
+        self.assertEqual(caught.exception.reason, "missing")
+
+    def test_mark_outcome_unknown_keeps_a_started_handle(self) -> None:
+        self.claim("k")
+        handle = {"kind": "transfer", "guid": _GUID}
+        self.ledger.mark_started("k", handle=handle, now=_NOW)
+        self.ledger.mark_outcome_unknown("k", latch_guid=None, now=_NOW)
+        record = self.ledger.get("k")
+        assert record is not None
+        self.assertEqual(record["handle"], handle)
+
+    def test_other_transitions_leave_no_latch_guid(self) -> None:
+        self.claim("k")
+        self.ledger.mark_started("k", handle={"guid": _GUID}, now=_NOW)
+        self.ledger.mark_done("k", result={"kind": "ran"}, now=_NOW)
+        record = self.ledger.get("k")
+        assert record is not None
+        self.assertIsNone(record.get("latchGuid"))
+
+    def test_find_by_guid_returns_the_owning_step_key(self) -> None:
+        other = "99999999-8888-7777-6666-555555555555"
+        self.claim("k")
+        self.claim("k2")
+        self.claim("k3")
+        self.ledger.mark_started("k", handle={"kind": "transfer", "guid": _GUID}, now=_NOW)
+        self.ledger.mark_started("k2", handle={"kind": "transfer", "guid": other}, now=_NOW)
+        self.assertEqual(self.ledger.find_by_guid(_GUID), "k")
+        self.assertEqual(self.ledger.find_by_guid(other), "k2")
+        self.assertIsNone(self.ledger.find_by_guid("11111111-0000-0000-0000-000000000000"))
+        self.assertIsNone(self.ledger.find_by_guid(""))
+
+    def test_find_by_guid_ignores_records_without_a_handle(self) -> None:
+        self.claim("k")
+        self.assertIsNone(self.ledger.find_by_guid(_GUID))
+
+    def test_find_by_guid_is_read_only(self) -> None:
+        self.assertIsNone(self.ledger.find_by_guid(_GUID))
+        self.assertFalse(self.directory.exists())
+        self.claim("k")
+        before = self.ledger.path.read_bytes()
+        self.ledger.find_by_guid(_GUID)
+        self.assertEqual(self.ledger.path.read_bytes(), before)
+
+    def test_find_by_guid_fails_closed_on_a_corrupt_ledger(self) -> None:
+        self.directory.mkdir()
+        self.ledger.path.write_bytes(b"[]")
+        with self.assertRaises(LedgerError):
+            self.ledger.find_by_guid(_GUID)
+
+    def test_mark_done_refuses_a_non_terminal_result_and_changes_nothing(self) -> None:
+        self.claim("k")
+        self.ledger.mark_started("k", handle={"guid": _GUID}, now=_NOW)
+        before = self.ledger.path.read_bytes()
+        for result in (
+            {"kind": "timedOut"},
+            {"kind": "lost", "reason": "pollFailed"},
+            {"kind": "lost", "reason": "submitOutcomeUnknown"},
+            {"kind": "cancelled"},
+            {"kind": "needsInput"},
+            {},
+        ):
+            with self.subTest(result=result):
+                with self.assertRaises(ValueError):
+                    self.ledger.mark_done("k", result=result, now=_NOW)
+                self.assertEqual(self.ledger.path.read_bytes(), before)
+
+    def test_mark_done_accepts_each_terminal_result(self) -> None:
+        for number, result in enumerate((
+            {"kind": "ran"},
+            {"kind": "failed"},
+            {"kind": "aborted"},
+            {"kind": "lost", "reason": "taskNotFound"},
+        )):
+            with self.subTest(result=result):
+                key = f"k{number}"
+                self.claim(key)
+                self.ledger.mark_done(key, result=result, now=_NOW)
+                record = self.ledger.get(key)
+                assert record is not None
+                self.assertEqual(record["state"], "done")
+                self.assertEqual(record["result"], result)
+
+
+class TestIsTerminal(unittest.TestCase):
+    def test_terminal_results(self) -> None:
+        for result in (
+            {"kind": "ran"},
+            {"kind": "failed"},
+            {"kind": "aborted"},
+            {"kind": "lost", "reason": "taskNotFound"},
+        ):
+            with self.subTest(result=result):
+                self.assertTrue(is_terminal(result))
+
+    def test_non_terminal_results(self) -> None:
+        for result in (
+            {"kind": "timedOut"},
+            {"kind": "cancelled"},
+            {"kind": "lost", "reason": "pollFailed"},
+            {"kind": "lost", "reason": "submitOutcomeUnknown"},
+            {"kind": "lost"},
+            {"kind": "lost", "reason": "TaskNotFound"},
+            {"kind": "needsInput"},
+            {"kind": "readFailed"},
+            {"kind": "refused"},
+            {"kind": "Ran"},
+            {"kind": "RAN"},
+            {"kind": "ran "},
+            {"kind": "unknown"},
+            {"kind": None},
+            {"kind": ["ran"]},
+            {"kind": {"x": 1}},
+            {"reason": "taskNotFound"},
+            {},
+        ):
+            with self.subTest(result=result):
+                self.assertFalse(is_terminal(result))
+
+    def test_non_dict_input_is_not_terminal(self) -> None:
+        for value in ([], ["ran"], "ran", None, 3, ("kind", "ran")):
+            with self.subTest(value=value):
+                self.assertFalse(is_terminal(value))  # type: ignore[arg-type]
+
+
+class TestRetention(_LedgerCase):
+    def seed(self, **ages_s: Any) -> None:
+        """Write a ledger whose records are of the given (state, age in seconds)."""
+        records: dict[str, Any] = {}
+        for key, (state, age) in ages_s.items():
+            records[key] = _record(state, when=_NOW - timedelta(seconds=age))
+        self.write_records(records)
+
+    def test_the_retention_is_seven_days(self) -> None:
+        self.assertEqual(RETENTION_DONE_S, 604_800.0)
+
+    def test_a_write_prunes_an_expired_done_record(self) -> None:
+        self.seed(old=("done", RETENTION_DONE_S + 1.0))
+        self.assertTrue(self.claim("new"))
+        self.assertEqual(sorted(self.ledger.load()), ["new"])
+
+    def test_a_done_record_at_exactly_the_retention_is_kept(self) -> None:
+        self.seed(edge=("done", RETENTION_DONE_S))
+        self.claim("new")
+        self.assertEqual(sorted(self.ledger.load()), ["edge", "new"])
+
+    def test_a_done_record_younger_than_the_retention_is_kept(self) -> None:
+        self.seed(young=("done", 6 * 86_400.0), fresh=("done", 5.0))
+        self.claim("new")
+        self.assertEqual(sorted(self.ledger.load()), ["fresh", "new", "young"])
+
+    def test_unfinished_records_of_any_age_are_kept(self) -> None:
+        thirty_days = 30 * 86_400.0
+        self.seed(
+            sub=("submitting", thirty_days),
+            start=("started", thirty_days),
+            unknown=("outcomeUnknown", thirty_days),
+            ancient=("submitting", 3650 * 86_400.0),
+        )
+        self.claim("new")
+        self.assertEqual(
+            sorted(self.ledger.load()), ["ancient", "new", "start", "sub", "unknown"])
+
+    def test_load_alone_never_prunes(self) -> None:
+        self.seed(old=("done", RETENTION_DONE_S + 100.0))
+        before = self.ledger.path.read_bytes()
+        self.assertEqual(sorted(self.ledger.load()), ["old"])
+        self.assertIsNotNone(self.ledger.get("old"))
+        self.assertEqual(self.ledger.path.read_bytes(), before)
+
+    def test_a_write_that_changes_nothing_does_not_prune(self) -> None:
+        self.seed(old=("done", RETENTION_DONE_S + 100.0), live=("submitting", 10.0))
+        before = self.ledger.path.read_bytes()
+        self.assertFalse(self.claim("live"))
+        self.ledger.release("absent", now=_NOW)
+        self.assertEqual(self.ledger.path.read_bytes(), before)
+
+    def test_every_mutator_prunes(self) -> None:
+        old = ("done", RETENTION_DONE_S + 100.0)
+        with self.subTest(mutator="mark_started"):
+            self.seed(old=old, live=("submitting", 1.0))
+            self.ledger.mark_started("live", handle={"guid": _GUID}, now=_NOW)
+            self.assertEqual(sorted(self.ledger.load()), ["live"])
+        with self.subTest(mutator="mark_outcome_unknown"):
+            self.seed(old=old, live=("submitting", 1.0))
+            self.ledger.mark_outcome_unknown("live", latch_guid=None, now=_NOW)
+            self.assertEqual(sorted(self.ledger.load()), ["live"])
+        with self.subTest(mutator="release"):
+            self.seed(old=old, live=("submitting", 1.0))
+            self.ledger.release("live", now=_NOW)
+            self.assertEqual(sorted(self.ledger.load()), [])
+        with self.subTest(mutator="mark_done"):
+            self.seed(old=old, live=("started", 1.0))
+            self.ledger.mark_done("live", result={"kind": "ran"}, now=_NOW)
+            self.assertEqual(sorted(self.ledger.load()), ["live"])
+
+    def test_a_corrupt_ledger_is_never_pruned_or_treated_as_empty(self) -> None:
+        self.directory.mkdir()
+        raw = b'{"version": 1, "records": {"old": {"state": "done"}}}'
+        self.ledger.path.write_bytes(raw)
+        with self.assertRaises(LedgerError):
+            self.claim("new")
+        self.assertEqual(self.ledger.path.read_bytes(), raw)
 
 
 if __name__ == "__main__":
