@@ -544,6 +544,51 @@ class TestConfigureCloseFails(_StackTestCase):
             self.assertIsNot(server.service, first)
 
 
+class TestConfigureFailureDropsService(_StackTestCase):
+    """WR-02: FAILED always implies no service. A Configure that fails
+    validation must not leave the previous endpoint serving reads."""
+
+    def _assert_free(self, port: int) -> None:
+        acquire_owner_lock(
+            "127.0.0.1", port, owner="mcp", lock_dir=self.lock_dir).release()
+
+    def test_validation_failure_drops_the_previous_service(self) -> None:
+        bad_configs = {
+            "blank host": lambda port: _real_config("   ", port),
+            "bad timeout": lambda port: _real_config(
+                "127.0.0.1", port, transfer_timeout_s=float("nan")),
+        }
+        for label, make_config in bad_configs.items():
+            with self.subTest(label):
+                port = _free_tcp_port()
+                transport = _fake_transport()
+                with patch("tools.stack.server.open_service",
+                           _fake_open_service(transport)):
+                    server = StackServer()
+                    stub = _serve_in_process(self, server)
+                    self.assertEqual(
+                        stub.Configure(_real_config("127.0.0.1", port)).response, SUCCESS)
+                    ok = stub.ExecuteCommand(tool_base_pb2.Command(
+                        stack=stack_pb2.Command(
+                            get_manager_state=stack_pb2.Command.GetManagerState())))
+                    self.assertEqual(ok.response, SUCCESS)
+
+                    reply = stub.Configure(make_config(port))
+                    self.assertEqual(reply.response, NOT_READY)
+                    self.assertEqual(stub.GetStatus(empty_pb2.Empty()).status, FAILED)
+                    self.assertIsNone(server.service)
+                    self.assertIsNone(server._owned)
+                    self._assert_free(port)
+                    # The read bypass no longer answers from the old endpoint.
+                    transport.get_manager_state.reset_mock()
+                    read = stub.ExecuteCommand(tool_base_pb2.Command(
+                        stack=stack_pb2.Command(
+                            get_manager_state=stack_pb2.Command.GetManagerState())))
+                    self.assertEqual(read.response, NOT_READY)
+                    self.assertEqual(read.error_message, "stack: not configured")
+                    transport.get_manager_state.assert_not_called()
+
+
 class TestConfigureWarning(_StackTestCase):
     """D-09: a fresh open warns once that a restart clears the core's latch."""
 

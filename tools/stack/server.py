@@ -299,6 +299,18 @@ class StackServer(ToolServer):
                 lock.release()
 
     def _configure(self, config: Config) -> None:
+        """Apply a real-mode Config. Any failure -- a validation error as much
+        as a failed open -- drops the current owner (WR-02), so the FAILED
+        status base Configure then reports always means "no service": a read
+        can never keep answering from a previously configured STACK while
+        GetStatus says the tool is not configured."""
+        try:
+            self._apply_config(config)
+        except BaseException:
+            self._teardown()
+            raise
+
+    def _apply_config(self, config: Config) -> None:
         host = config.host.strip()
         if not host:
             raise ValueError("stack: Config.host is required")
