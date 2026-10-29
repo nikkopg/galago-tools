@@ -33,11 +33,14 @@ from tools.grpc_interfaces.stack_pb2 import Command, Config
 from tools.grpc_interfaces.tool_base_pb2 import (
     DRIVER_ERROR,
     ERROR_FROM_TOOL,
+    FAILED,
     INVALID_ARGUMENTS,
     NOT_READY,
+    READY,
     SUCCESS,
     ExecuteCommandReply,
     ResponseCode,
+    ToolStatus,
 )
 from tools.grpc_interfaces.tool_base_pb2 import Command as ToolCommand
 
@@ -96,6 +99,13 @@ _HOST_RE = re.compile(r"[A-Za-z0-9._\-]+|\[[0-9A-Fa-f:.]+\]")
 
 # D-14: real mode with no service yet.
 _NOT_CONFIGURED_MESSAGE = "stack: not configured"
+
+# WR-02: a command that arrives while a Configure is swapping the owner is
+# refused at once, never parked. ERROR_FROM_TOOL rather than NOT_READY because
+# galago-core hides the text of NOT_READY / INVALID_ARGUMENTS replies from the
+# operator (see _unavailable_reply), and this one is worth seeing: it is
+# transient and the controller should retry.
+_RECONFIGURING_MESSAGE = "stack: reconfiguring"
 
 # D-09: logged once per fresh open. A restart of this tool server silently
 # drops the core's in-process failure latch and in-flight guard.
@@ -292,6 +302,8 @@ def _result_reply(result: Any) -> ExecuteCommandReply:
 class StackServer(ToolServer):
     toolType = "stack"
     config: Config
+    # WR-02: True from a failed Configure until the next successful one.
+    _configure_failed = False
 
     def __init__(self) -> None:
         super().__init__()
@@ -301,9 +313,11 @@ class StackServer(ToolServer):
         self._ledger_dir: str = ""
         # WR-03: serve() runs commands on a thread pool. _configure_lock
         # serialises Configures; _state guards _readers/_reconfiguring so a
-        # Configure waits for in-flight commands to finish before it closes
-        # the owner, and commands wait while it swaps the owner and service.
+        # Configure waits (bounded) for in-flight commands to finish before it
+        # closes the owner, and a command that arrives meanwhile is refused.
         self._read_bypass = threading.local()
+        # WR-02: the service a command was admitted against, per thread.
+        self._admitted = threading.local()
         self._configure_lock = threading.Lock()
         self._state = threading.Condition()
         self._readers = 0
@@ -373,7 +387,19 @@ class StackServer(ToolServer):
                             self._teardown()
                     except _ConfigureBusy as busy:
                         raise busy from exc
+                self._configure_failed = True
                 raise
+            self._configure_failed = False
+
+    def setStatus(self, status: ToolStatus) -> None:
+        """WR-02: base ExecuteCommand ends every non-read command with
+        setStatus(READY), and a command admitted before a failing Configure can
+        run that after Configure reported FAILED. READY with no service after a
+        failed Configure would then be left standing, so it is held at FAILED
+        until the next Configure succeeds."""
+        if status == READY and self._configure_failed and self.service is None:
+            status = FAILED
+        super().setStatus(status)
 
     @contextlib.contextmanager
     def _exclusive(self) -> Iterator[None]:
@@ -399,20 +425,22 @@ class StackServer(ToolServer):
                 self._reconfiguring = False
                 self._state.notify_all()
 
-    @contextlib.contextmanager
-    def _in_flight(self) -> Iterator[None]:
-        """WR-03: bracket one real-mode command. Waits while a Configure is
-        swapping the owner; the service cannot change until the command ends."""
+    def _admit(self) -> tuple[bool, Optional[StackService]]:
+        """WR-02: admission and the service snapshot, taken together under
+        _state. While a Configure is swapping the owner a command is refused at
+        once rather than parked, so it can never wake up against a different
+        (or no) owner, and it never ties up a gRPC worker waiting for one."""
         with self._state:
-            self._state.wait_for(lambda: not self._reconfiguring)
+            if self._reconfiguring:
+                return False, None
             self._readers += 1
-        try:
-            yield
-        finally:
-            with self._state:
-                self._readers -= 1
-                if not self._readers:
-                    self._state.notify_all()
+            return True, self.service
+
+    def _leave(self) -> None:
+        with self._state:
+            self._readers -= 1
+            if not self._readers:
+                self._state.notify_all()
 
     def _apply_config(self, config: Config) -> None:
         host = config.host.strip()
@@ -497,18 +525,31 @@ class StackServer(ToolServer):
                 message=_one_line("invalid arguments: " + "; ".join(problems), 500))
         if self.simulated:
             return super()._dispatchCommand(command)
-        with self._in_flight():
+        admitted, service = self._admit()
+        if not admitted:
+            return _reply(ERROR_FROM_TOOL, message=_RECONFIGURING_MESSAGE)
+        local = self._admitted
+        previous = (getattr(local, "active", False), getattr(local, "service", None))
+        local.active, local.service = True, service
+        try:
             # D-14: the three refusals need no service and their text is
             # operator-visible, so they win over not-configured.
-            if (self.service is None
-                    and type(command).__name__ not in UNAVAILABLE_COMMANDS):
+            if service is None and type(command).__name__ not in UNAVAILABLE_COMMANDS:
                 return _reply(NOT_READY, message=_NOT_CONFIGURED_MESSAGE)
             return super()._dispatchCommand(command)
+        finally:
+            local.active, local.service = previous
+            self._leave()
 
     def _require_service(self) -> StackService:
-        if self.service is None:
+        """The service this command was admitted against (WR-02), never a
+        fresh read of self.service. Outside a dispatch (a handler called
+        directly) it falls back to the current service."""
+        local = self._admitted
+        service = local.service if getattr(local, "active", False) else self.service
+        if service is None:
             raise RuntimeError("stack: not configured")
-        return self.service
+        return cast(StackService, service)
 
     def GetManagerState(self, params: "Command.GetManagerState") -> ExecuteCommandReply:
         return _result_reply(self._require_service().manager_state())

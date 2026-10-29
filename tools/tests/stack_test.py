@@ -876,6 +876,122 @@ class TestConfigureBusy(_StackTestCase):
         self.assertEqual(results["configure"].response, SUCCESS)
 
 
+class TestReconfiguringAdmission(_StackTestCase):
+    """WR-02: a command is never parked behind a Configure. Admission and the
+    service snapshot are taken together; a command refused during a Configure
+    says so at once, handlers use the service they were admitted against, and a
+    stale READY cannot outlive a failed Configure."""
+
+    def _two_ports(self) -> tuple[int, int]:
+        port_a, port_b = _free_tcp_port(), _free_tcp_port()
+        while port_b == port_a:
+            port_b = _free_tcp_port()
+        return port_a, port_b
+
+    def _read(self, stub: ToolDriverStub, **kwargs: Any) -> tool_base_pb2.ExecuteCommandReply:
+        return stub.ExecuteCommand(  # type: ignore[no-any-return]
+            tool_base_pb2.Command(stack=stack_pb2.Command(
+                get_manager_state=stack_pb2.Command.GetManagerState())), **kwargs)
+
+    def test_commands_during_a_configure_are_refused_immediately(self) -> None:
+        port_a, port_b = self._two_ports()
+        fake_open = _fake_open_service(_fake_transport())
+        entered, release = threading.Event(), threading.Event()
+
+        def gated_open(host: str, port: int, *, owner: str) -> Any:
+            if port == port_b:
+                entered.set()
+                release.wait(timeout=10)
+            return fake_open(host, port, owner=owner)
+
+        with patch("tools.stack.server.open_service", gated_open):
+            server = StackServer()
+            stub = _serve_in_process(self, server)
+            self.assertEqual(stub.Configure(_real_config("127.0.0.1", port_a)).response, SUCCESS)
+            results: dict[str, Any] = {}
+            thread = threading.Thread(target=lambda: results.__setitem__(
+                "configure", stub.Configure(_real_config("127.0.0.1", port_b))))
+            thread.start()
+            self.addCleanup(thread.join, 10)
+            self.addCleanup(release.set)
+            self.assertTrue(entered.wait(timeout=5))
+            # The Configure is blocked inside open_service. Each call below
+            # would hang (and hit the gRPC deadline) if it parked behind it.
+            read = self._read(stub, timeout=5)
+            transfer = stub.ExecuteCommand(tool_base_pb2.Command(stack=stack_pb2.Command(
+                transfer=stack_pb2.Command.Transfer(step_key="s"))), timeout=5)
+            for reply in (read, transfer):
+                self.assertEqual(reply.response, ERROR_FROM_TOOL)
+                self.assertEqual(reply.error_message, "stack: reconfiguring")
+            self.assertEqual(stub.GetStatus(empty_pb2.Empty(), timeout=5).status, READY)
+            release.set()
+            thread.join(10)
+            self.assertEqual(results["configure"].response, SUCCESS)
+            # Admission reopens as soon as the Configure ends.
+            self.assertEqual(self._read(stub, timeout=5).response, SUCCESS)
+
+    def test_a_handler_uses_the_service_it_was_admitted_against(self) -> None:
+        first, second = MagicMock(spec=StackService), MagicMock(spec=StackService)
+        server = StackServer()
+        server.service = first
+        seen: list[Any] = []
+
+        def _manager_state() -> dict[str, str]:
+            server.service = second  # whatever swaps the owner mid-command
+            seen.append(server._require_service())
+            return {"kind": "managerState"}
+
+        first.manager_state.side_effect = _manager_state
+        reply = server._dispatchCommand(stack_pb2.Command.GetManagerState())
+        self.assertEqual(reply.response, SUCCESS)
+        self.assertEqual(seen, [first])
+        second.manager_state.assert_not_called()
+        # The snapshot does not outlive the dispatch.
+        self.assertIs(server._require_service(), second)
+        self.assertEqual(server._readers, 0)
+
+    def test_a_stale_ready_does_not_survive_a_failed_configure(self) -> None:
+        port_a, _ = self._two_ports()
+        reached, proceed = threading.Event(), threading.Event()
+        gate_open = [False]
+        with patch("tools.stack.server.open_service",
+                   _fake_open_service(_fake_transport())):
+            server = StackServer()
+            stub = _serve_in_process(self, server)
+            self.assertEqual(stub.Configure(_real_config("127.0.0.1", port_a)).response, SUCCESS)
+            real_set_status = server.setStatus
+
+            def _gated(status: Any) -> None:
+                # The motion command's trailing setStatus(READY), held until
+                # after the failed Configure has reported FAILED.
+                if gate_open[0] and status == READY:
+                    reached.set()
+                    proceed.wait(timeout=10)
+                real_set_status(status)
+
+            with patch.object(server, "setStatus", _gated):
+                gate_open[0] = True
+                self.addCleanup(proceed.set)
+                thread = threading.Thread(target=lambda: stub.ExecuteCommand(
+                    tool_base_pb2.Command(stack=stack_pb2.Command(
+                        transfer=stack_pb2.Command.Transfer(step_key="s")))))
+                thread.start()
+                self.addCleanup(thread.join, 10)
+                self.assertTrue(reached.wait(timeout=5))
+                gate_open[0] = False
+                reply = stub.Configure(_real_config("   ", port_a))
+                self.assertEqual(reply.response, NOT_READY)
+                self.assertEqual(stub.GetStatus(empty_pb2.Empty()).status, FAILED)
+                proceed.set()
+                thread.join(10)
+            status = stub.GetStatus(empty_pb2.Empty())
+            self.assertIsNone(server.service)
+            self.assertEqual(status.status, FAILED)
+            # A successful Configure lifts the hold.
+            self.assertEqual(stub.Configure(_real_config("127.0.0.1", port_a)).response, SUCCESS)
+            self.assertEqual(stub.GetStatus(empty_pb2.Empty()).status, READY)
+
+
 class TestConfigureWarning(_StackTestCase):
     """D-09: a fresh open warns once that a restart clears the core's latch."""
 
