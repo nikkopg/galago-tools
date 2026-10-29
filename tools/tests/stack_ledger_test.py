@@ -12,6 +12,7 @@ import dataclasses
 import fcntl
 import json
 import os
+import shutil
 import stat
 import tempfile
 import threading
@@ -814,14 +815,65 @@ class TestTransitions(_LedgerCase):
             self.ledger.mark_outcome_unknown("nope", latch_guid=None, now=_NOW)
         self.assertEqual(caught.exception.reason, "missing")
 
-    def test_mark_outcome_unknown_keeps_a_started_handle(self) -> None:
-        self.claim("k")
-        handle = {"kind": "transfer", "guid": _GUID}
-        self.ledger.mark_started("k", handle=handle, now=_NOW)
-        self.ledger.mark_outcome_unknown("k", latch_guid=None, now=_NOW)
-        record = self.ledger.get("k")
-        assert record is not None
-        self.assertEqual(record["handle"], handle)
+    def _put(self, key: str, state: str) -> None:
+        """Bring ``key`` to ``state`` through the ledger's own legal writes."""
+        self.claim(key)
+        if state == "submitting":
+            return
+        if state == "outcomeUnknown":
+            self.ledger.mark_outcome_unknown(key, latch_guid="submit-0123456789abcdef", now=_NOW)
+            return
+        self.ledger.mark_started(key, handle={"kind": "transfer", "guid": _GUID}, now=_NOW)
+        if state == "done":
+            self.ledger.mark_done(key, result={"kind": "ran"}, now=_NOW)
+
+    def test_a_transition_the_write_order_never_makes_is_refused_and_changes_nothing(
+            self) -> None:
+        """WR-04: the ledger is the one guard against a second send, so it does
+        not rely on its callers: only a submitting record is released, only a
+        submitting record starts or becomes outcomeUnknown, and a done or
+        outcomeUnknown record is never overwritten."""
+        later = _NOW + timedelta(seconds=9)
+        operations = {
+            "release": (
+                ("started", "done", "outcomeUnknown"),
+                lambda: self.ledger.release("k", now=later)),
+            "mark_started": (
+                ("started", "done", "outcomeUnknown"),
+                lambda: self.ledger.mark_started("k", handle={"guid": _GUID}, now=later)),
+            "mark_done": (
+                ("done", "outcomeUnknown"),
+                lambda: self.ledger.mark_done("k", result={"kind": "failed"}, now=later)),
+            "mark_outcome_unknown": (
+                ("started", "done", "outcomeUnknown"),
+                lambda: self.ledger.mark_outcome_unknown("k", latch_guid=None, now=later)),
+        }
+        for name, (refused_from, operation) in operations.items():
+            for state in refused_from:
+                with self.subTest(operation=name, state=state):
+                    shutil.rmtree(self.directory, ignore_errors=True)
+                    self._put("k", state)
+                    before = self.ledger.path.read_bytes()
+                    with self.assertRaises(LedgerError) as caught:
+                        operation()
+                    self.assertEqual(caught.exception.reason, "state")
+                    self.assertEqual(self.ledger.path.read_bytes(), before)
+                    self.assertEqual(self.stray_temp_files(), [])
+
+    def test_release_deletes_a_submitting_record_and_only_that_state(self) -> None:
+        self._put("k", "submitting")
+        self.ledger.release("k", now=_NOW)
+        self.assertIsNone(self.ledger.get("k"))
+
+    def test_mark_done_is_allowed_from_started_and_from_submitting(self) -> None:
+        for state in ("started", "submitting"):
+            with self.subTest(state=state):
+                shutil.rmtree(self.directory, ignore_errors=True)
+                self._put("k", state)
+                self.ledger.mark_done("k", result={"kind": "ran"}, now=_NOW)
+                record = self.ledger.get("k")
+                assert record is not None
+                self.assertEqual(record["state"], "done")
 
     def test_other_transitions_leave_no_latch_guid(self) -> None:
         self.claim("k")

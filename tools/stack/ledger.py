@@ -78,7 +78,8 @@ _T = TypeVar("_T")
 class LedgerError(Exception):
     """The ledger cannot be trusted or cannot be written. ``reason`` is one of
     ``unreadable``, ``corrupt``, ``unknownVersion``, ``unwritable``, ``busy``,
-    ``unsupported`` or ``missing``; ``path`` is the ledger file (or directory)
+    ``unsupported``, ``missing`` or ``state`` (a record is not in a state the
+    change is allowed from); ``path`` is the ledger file (or directory)
     concerned."""
 
     def __init__(self, reason: str, path: str) -> None:
@@ -354,7 +355,7 @@ class Ledger:
         stamp = _stamp(now)
 
         def change(records: dict[str, dict[str, Any]]) -> tuple[None, bool]:
-            record = self._existing(records, key)
+            record = self._existing(records, key, "submitting")
             record["state"] = "started"
             record["handle"] = handle
             record["updatedAt"] = stamp
@@ -365,13 +366,15 @@ class Ledger:
     def mark_done(self, key: str, *, result: dict[str, Any], now: datetime) -> None:
         """Record the terminal outcome. The record must exist. A-1: a result
         that is not terminal (``is_terminal``) raises ValueError and changes
-        nothing, so the record stays ``started``."""
+        nothing, so the record stays ``started``. Only a ``started`` record (or
+        a ``submitting`` one) can become ``done``: a ``done`` or
+        ``outcomeUnknown`` record is never overwritten."""
         if not is_terminal(result):
             raise ValueError("ledger: only a terminal result may be recorded as done")
         stamp = _stamp(now)
 
         def change(records: dict[str, dict[str, Any]]) -> tuple[None, bool]:
-            record = self._existing(records, key)
+            record = self._existing(records, key, "started", "submitting")
             record["state"] = "done"
             record["result"] = result
             record["updatedAt"] = stamp
@@ -384,11 +387,12 @@ class Ledger:
     ) -> None:
         """A-5: the submit outcome is unknown. The record is never deleted
         after this. ``latch_guid`` is what ``latch_status()`` named at that
-        moment (a string), or None when the core was not latched."""
+        moment (a string), or None when the core was not latched. Only a
+        ``submitting`` record can become ``outcomeUnknown``."""
         stamp = _stamp(now)
 
         def change(records: dict[str, dict[str, Any]]) -> tuple[None, bool]:
-            record = self._existing(records, key)
+            record = self._existing(records, key, "submitting")
             record["state"] = "outcomeUnknown"
             record["latchGuid"] = latch_guid
             record["updatedAt"] = stamp
@@ -398,12 +402,16 @@ class Ledger:
 
     def release(self, key: str, *, now: datetime) -> None:
         """XFR-04: delete ``key`` because nothing was sent. Only that key is
-        touched, and an absent key is a no-op that writes nothing."""
+        touched, and an absent key is a no-op that writes nothing. Only a
+        ``submitting`` record is ever deleted (05-SPIKE.md 6c): any other state
+        raises LedgerError("state") and the record stays, because a ``started``,
+        ``done`` or ``outcomeUnknown`` record is the guard against a second send."""
         _stamp(now)
 
         def change(records: dict[str, dict[str, Any]]) -> tuple[None, bool]:
             if key not in records:
                 return None, False
+            self._existing(records, key, "submitting")
             del records[key]
             return None, True
 
@@ -420,10 +428,17 @@ class Ledger:
                 return key
         return None
 
-    def _existing(self, records: dict[str, dict[str, Any]], key: str) -> dict[str, Any]:
+    def _existing(self, records: dict[str, dict[str, Any]], key: str,
+                  *allowed: str) -> dict[str, Any]:
+        """The record for ``key``. It must exist, and its state must be one of
+        ``allowed``: a transition the write order never makes is refused, so a
+        second tool server or a caller bug cannot regress or delete a record
+        the ledger relies on."""
         record = records.get(key)
         if record is None:
             raise LedgerError("missing", str(self.path))
+        if record["state"] not in allowed:
+            raise LedgerError("state", str(self.path))
         return record
 
     def _mutate(
