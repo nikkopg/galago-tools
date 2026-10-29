@@ -1090,12 +1090,13 @@ class TestRequirementsPin(unittest.TestCase):
 
 _STACK_SOURCES = sorted((_REPO_ROOT / "tools" / "stack").glob("*.py"))
 
-# D-20: no adapter code may reach any core motion, cancel, safe-position,
-# validate or acknowledge method (any receiver).
+# D-16 (replaces Phase 4 D-20): no adapter code may call these core methods,
+# on any receiver. The one motion submit (execute_transfer) and the plan call
+# are allowed at a single call site each, and acknowledge_failure in a single
+# handler; those narrower rules live in _stack_adapter_violations.
 _FORBIDDEN_SERVICE_CALLS = frozenset({
-    "plan_transfer", "execute_transfer", "start_transfer", "wait",
-    "wait_transfer", "cancel_transfer", "go_to_safe_position",
-    "wait_safe_position", "acknowledge_failure", "validate_transfer",
+    "start_transfer", "cancel_transfer", "go_to_safe_position",
+    "wait_safe_position", "validate_transfer",
 })
 # The core is reached only through open_service (never built by hand here).
 _FORBIDDEN_CONSTRUCTORS = frozenset({
@@ -1225,14 +1226,15 @@ class TestAdapterInvariant(unittest.TestCase):
         self.assertEqual(_stack_adapter_violations(self.trees), [])
 
     def test_every_forbidden_service_call_is_reported(self) -> None:
-        self.assertEqual(len(_FORBIDDEN_SERVICE_CALLS), 10)
+        self.assertEqual(len(_FORBIDDEN_SERVICE_CALLS), 5)
         for name in sorted(_FORBIDDEN_SERVICE_CALLS):
             with self.subTest(name=name):
                 self._assert_reported(
                     _plant(self.server, "GetManagerState", f"self.service.{name}()"), f".{name}()")
 
     def test_module_level_forbidden_call_is_reported(self) -> None:
-        self._assert_reported(_plant(self.server, None, "service.wait(None)"), ".wait()")
+        self._assert_reported(
+            _plant(self.server, None, "service.start_transfer()"), ".start_transfer()")
 
     def test_mcp_imports_are_reported(self) -> None:
         for statement in (
@@ -1777,7 +1779,7 @@ class TestOneToOneSurface(_StackTestCase):
             self.assertTrue(callable(getattr(server, name, None)), name)
         mapped = set(stack_server.COMMAND_TO_SERVICE_METHOD)
         self.assertEqual(mapped & stack_server.UNAVAILABLE_COMMANDS, set())
-        self.assertEqual(mapped | stack_server.UNAVAILABLE_COMMANDS, names)
+        self.assertEqual(mapped | stack_server.UNAVAILABLE_COMMANDS | {"Transfer"}, names)
 
     def test_every_key_is_a_server_method_and_every_value_a_service_method(self) -> None:
         server = StackServer()
@@ -2166,19 +2168,18 @@ class TestCheckArgs(unittest.TestCase):
 
 
 _REFUSALS = {
-    "Transfer": "stack: Transfer is not available in this build",
     "AcknowledgeFailure": "stack: AcknowledgeFailure is not available in this build",
     "GetFailureLatch": "stack: GetFailureLatch is not available in this build",
 }
 
 
 class TestRealModeRefusals(_RealModeGrpcTestCase):
-    """STK-05 / T-04-15: the three Phase 5 commands are refused in real mode
-    with no service call; adapter arguments are checked before the refusal."""
+    """STK-05 / T-04-15: the two not-yet-wired Phase 5 commands are refused in
+    real mode with no service call; adapter arguments are checked before the
+    refusal. Transfer is wired (plan 05-02) and has its own test classes."""
 
     def test_valid_phase_5_commands_are_refused_without_a_service_call(self) -> None:
         commands = {
-            "Transfer": self._stack(transfer=stack_pb2.Command.Transfer(step_key="k")),
             "AcknowledgeFailure": self._stack(
                 acknowledge_failure=stack_pb2.Command.AcknowledgeFailure(
                     guid="g", arm_inspected="yes")),
@@ -2206,7 +2207,8 @@ class TestRealModeRefusals(_RealModeGrpcTestCase):
 
 
 class TestRealModeRefusalsOrdering(_StackTestCase):
-    """D-14: with no service the three refusals still win over not-configured."""
+    """D-14: with no service the not-yet-wired refusals still win over
+    not-configured; an unconfigured Transfer is NOT_READY."""
 
     def setUp(self) -> None:
         super().setUp()
@@ -2222,11 +2224,14 @@ class TestRealModeRefusalsOrdering(_StackTestCase):
         self.assertEqual(reply.response, ERROR_FROM_TOOL)
         self.assertEqual(reply.error_message, _REFUSALS["GetFailureLatch"])
 
-    def test_transfer_and_ack_with_good_arguments_are_refused_not_unconfigured(self) -> None:
-        reply = self._dispatch("Transfer", step_key="k")
-        self.assertEqual(reply.error_message, _REFUSALS["Transfer"])
+    def test_ack_with_good_arguments_is_refused_not_unconfigured(self) -> None:
         reply = self._dispatch("AcknowledgeFailure", guid="g", arm_inspected="no")
         self.assertEqual(reply.error_message, _REFUSALS["AcknowledgeFailure"])
+
+    def test_an_unconfigured_transfer_with_a_step_key_is_not_ready(self) -> None:
+        reply = self._dispatch("Transfer", step_key="k")
+        self.assertEqual(reply.response, NOT_READY)
+        self.assertEqual(reply.error_message, "stack: not configured")
 
     def test_reads_and_estimate_are_not_ready(self) -> None:
         for name in ("GetManagerState", "GetRobotStates", "ListDevices", "ListLabwareProfiles",
@@ -2473,6 +2478,7 @@ class TestBusyReads(_RealModeGrpcTestCase):
         thread.join(10)
 
     def test_a_non_read_command_still_records_its_error(self) -> None:
+        self.service.plan_transfer.return_value = NeedsInput(missing=["robot"])
         self.server.last_error = "stale"
         reply = self.stub.ExecuteCommand(self._stack(
             transfer=stack_pb2.Command.Transfer(step_key="s-1")))
@@ -2578,6 +2584,7 @@ class TestReadBypassEdges(_RealModeGrpcTestCase):
                        "transfer_profiles", "labware_presence", "estimate_transfer"):
             getattr(self.service, method).return_value = ReadFailed(
                 error={"status": None, "name": "x"})
+        self.service.plan_transfer.return_value = NeedsInput(missing=["robot"])
         calls: list[Any] = []
         real_set_status = self.server.setStatus
 
