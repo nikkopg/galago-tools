@@ -5,11 +5,11 @@ titles: json
 findings:
   - id: WR-01
     severity: warning
-    disposition: open
+    disposition: fixed
     title: "Configure drains in-flight commands with no bound, and blocks every command including the BUSY-bypass reads while it does"
   - id: WR-02
     severity: warning
-    disposition: open
+    disposition: fixed
     title: "A command parked behind a Configure can leave status READY with no service, and could run against the wrong owner in Phase 5"
   - id: IN-01
     severity: info
@@ -31,7 +31,7 @@ findings:
     severity: info
     disposition: open
     title: "`_in_flight` is not reentrant, so a nested dispatch would deadlock against a waiting Configure"
-open: 7
+open: 5
 total: 7
 recorded: 2026-10-29T00:00:00.000Z
 ---
@@ -58,3 +58,11 @@ WR-01, so they are not the same findings as the first review's WR-01..WR-05 belo
 All seven findings above start `open`. Pass 2's WR-01 and WR-02 both come from the WR-03 fix's
 design (Configure waits, unbounded, for in-flight commands); the reviewer suggests refusing commands
 quickly while a Configure runs instead of parking them.
+
+### Pass 2 fix run (04-REVIEW-FIX.md, iteration 2)
+
+| ID | Disposition | Commit | Note |
+|----|-------------|--------|------|
+| WR-01 | fixed | d46fd4a | Drain bounded by `CONFIGURE_DRAIN_TIMEOUT_S = 5.0`; a busy refusal keeps the healthy owner, but base `Configure` still reports FAILED |
+| WR-02 | fixed | 6d46926 | Commands during a Configure get an immediate ERROR_FROM_TOOL "stack: reconfiguring"; handlers use the service captured at admission; `setStatus` holds READY at FAILED after a failed Configure (cosmetic: can keep FAILED showing in simulated mode until the next successful real Configure) |
+| IN-01..IN-05 | open | | Out of the default fix scope |
