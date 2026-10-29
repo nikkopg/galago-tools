@@ -13,9 +13,11 @@ in _SUCCESS_KINDS yields SUCCESS; every other result (a refusal, a failed
 read, an unknown shape) is an ERROR_FROM_TOOL carrying a one-line message.
 """
 import argparse
+import contextlib
 import logging
 import math
-from typing import Any, Optional, cast
+import threading
+from typing import Any, Iterator, Optional, cast
 
 import grpc
 from google.protobuf import message
@@ -279,6 +281,14 @@ class StackServer(ToolServer):
         self.service: Optional[StackService] = None
         self._transfer_timeout_s: float = 0.0
         self._ledger_dir: str = ""
+        # WR-03: serve() runs commands on a thread pool. _configure_lock
+        # serialises Configures; _state guards _readers/_reconfiguring so a
+        # Configure waits for in-flight commands to finish before it closes
+        # the owner, and commands wait while it swaps the owner and service.
+        self._configure_lock = threading.Lock()
+        self._state = threading.Condition()
+        self._readers = 0
+        self._reconfiguring = False
 
     def _teardown(self) -> None:
         """Drop the current owner, if any, so "no service" always holds after
@@ -304,11 +314,43 @@ class StackServer(ToolServer):
         status base Configure then reports always means "no service": a read
         can never keep answering from a previously configured STACK while
         GetStatus says the tool is not configured."""
+        with self._configure_lock, self._exclusive():
+            try:
+                self._apply_config(config)
+            except BaseException:
+                self._teardown()
+                raise
+
+    @contextlib.contextmanager
+    def _exclusive(self) -> Iterator[None]:
+        """WR-03: hold off new real-mode commands, wait for the in-flight ones
+        to finish, then run the body with no command touching the owner, so a
+        bypassed read never talks to a transport Configure just closed and
+        _owned/service change together. Waits for the in-flight commands
+        indefinitely: each is bounded by the core's transport timeouts."""
+        with self._state:
+            self._reconfiguring = True
+            try:
+                self._state.wait_for(lambda: not self._readers)
+                yield
+            finally:
+                self._reconfiguring = False
+                self._state.notify_all()
+
+    @contextlib.contextmanager
+    def _in_flight(self) -> Iterator[None]:
+        """WR-03: bracket one real-mode command. Waits while a Configure is
+        swapping the owner; the service cannot change until the command ends."""
+        with self._state:
+            self._state.wait_for(lambda: not self._reconfiguring)
+            self._readers += 1
         try:
-            self._apply_config(config)
-        except BaseException:
-            self._teardown()
-            raise
+            yield
+        finally:
+            with self._state:
+                self._readers -= 1
+                if not self._readers:
+                    self._state.notify_all()
 
     def _apply_config(self, config: Config) -> None:
         host = config.host.strip()
@@ -371,12 +413,15 @@ class StackServer(ToolServer):
             return _reply(
                 INVALID_ARGUMENTS,
                 message=_one_line("invalid arguments: " + "; ".join(problems), 500))
-        # D-14: the three refusals need no service and their text is
-        # operator-visible, so they win over not-configured.
-        if (not self.simulated and self.service is None
-                and type(command).__name__ not in UNAVAILABLE_COMMANDS):
-            return _reply(NOT_READY, message=_NOT_CONFIGURED_MESSAGE)
-        return super()._dispatchCommand(command)
+        if self.simulated:
+            return super()._dispatchCommand(command)
+        with self._in_flight():
+            # D-14: the three refusals need no service and their text is
+            # operator-visible, so they win over not-configured.
+            if (self.service is None
+                    and type(command).__name__ not in UNAVAILABLE_COMMANDS):
+                return _reply(NOT_READY, message=_NOT_CONFIGURED_MESSAGE)
+            return super()._dispatchCommand(command)
 
     def _require_service(self) -> StackService:
         if self.service is None:

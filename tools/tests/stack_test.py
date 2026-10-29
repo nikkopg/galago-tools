@@ -589,6 +589,104 @@ class TestConfigureFailureDropsService(_StackTestCase):
                     transport.get_manager_state.assert_not_called()
 
 
+class TestConfigureConcurrency(_StackTestCase):
+    """WR-03: Configure is serialised against in-flight commands and against
+    other Configures, and _owned/service always change together."""
+
+    def _read(self, stub: ToolDriverStub) -> tool_base_pb2.ExecuteCommandReply:
+        return stub.ExecuteCommand(tool_base_pb2.Command(  # type: ignore[no-any-return]
+            stack=stack_pb2.Command(get_manager_state=stack_pb2.Command.GetManagerState())))
+
+    def test_configure_waits_for_an_in_flight_read_before_closing(self) -> None:
+        port_a, port_b = _free_tcp_port(), _free_tcp_port()
+        while port_b == port_a:
+            port_b = _free_tcp_port()
+        transport = _fake_transport()
+        entered, release = threading.Event(), threading.Event()
+        closed_while_reading: list[bool] = []
+
+        def _slow_read() -> dict[str, str]:
+            entered.set()
+            release.wait(timeout=10)
+            # The transport must still be open: Configure has not closed it.
+            closed_while_reading.append(server_owned_closed())
+            return {"managerState": "Idle"}
+
+        transport.get_manager_state.side_effect = _slow_read
+        with patch("tools.stack.server.open_service", _fake_open_service(transport)):
+            server = StackServer()
+
+            def server_owned_closed() -> bool:
+                assert server._owned is not None
+                return bool(server._owned._closed)
+
+            stub = _serve_in_process(self, server)
+            self.assertEqual(stub.Configure(_real_config("127.0.0.1", port_a)).response, SUCCESS)
+
+            results: dict[str, Any] = {}
+            read_thread = threading.Thread(
+                target=lambda: results.__setitem__("read", self._read(stub)))
+            read_thread.start()
+            self.addCleanup(read_thread.join, 10)
+            self.addCleanup(release.set)
+            self.assertTrue(entered.wait(timeout=5))
+
+            configure_thread = threading.Thread(target=lambda: results.__setitem__(
+                "configure", stub.Configure(_real_config("127.0.0.1", port_b))))
+            configure_thread.start()
+            self.addCleanup(configure_thread.join, 10)
+            configure_thread.join(0.3)
+            # Configure is parked behind the read; the old owner is untouched.
+            self.assertTrue(configure_thread.is_alive())
+            self.assertNotIn("configure", results)
+            with self.assertRaises(StackOwnedError):
+                acquire_owner_lock("127.0.0.1", port_a, owner="mcp", lock_dir=self.lock_dir)
+
+            release.set()
+            read_thread.join(10)
+            configure_thread.join(10)
+            self.assertEqual(results["read"].response, SUCCESS, results["read"].error_message)
+            self.assertEqual(closed_while_reading, [False])
+            self.assertEqual(results["configure"].response, SUCCESS)
+            assert server._owned is not None
+            self.assertEqual(server._owned.endpoint, f"127.0.0.1:{port_b}")
+            self.assertIs(server.service, server._owned.service)
+
+    def test_concurrent_configures_leave_one_consistent_owner_and_no_leak(self) -> None:
+        ports = [_free_tcp_port(), _free_tcp_port()]
+        while ports[1] == ports[0]:
+            ports[1] = _free_tcp_port()
+        fake_open = _fake_open_service(_fake_transport())
+
+        def slow_open(host: str, port: int, *, owner: str) -> Any:
+            time.sleep(0.2)  # widen the window so unserialised Configures overlap
+            return fake_open(host, port, owner=owner)
+
+        with patch("tools.stack.server.open_service", MagicMock(side_effect=slow_open)):
+            server = StackServer()
+            stub = _serve_in_process(self, server)
+            replies: list[Any] = []
+            threads = [
+                threading.Thread(target=lambda p=p: replies.append(
+                    stub.Configure(_real_config("127.0.0.1", p))))
+                for p in ports
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(10)
+        self.assertEqual([r.response for r in replies], [SUCCESS, SUCCESS])
+        assert server._owned is not None
+        self.assertIs(server.service, server._owned.service)
+        final = int(server._owned.endpoint.rsplit(":", 1)[1])
+        self.assertIn(final, ports)
+        (other,) = [p for p in ports if p != final]
+        # The Configure that lost the race closed its owner: no leaked lock.
+        acquire_owner_lock("127.0.0.1", other, owner="mcp", lock_dir=self.lock_dir).release()
+        with self.assertRaises(StackOwnedError):
+            acquire_owner_lock("127.0.0.1", final, owner="mcp", lock_dir=self.lock_dir)
+
+
 class TestConfigureWarning(_StackTestCase):
     """D-09: a fresh open warns once that a restart clears the core's latch."""
 
