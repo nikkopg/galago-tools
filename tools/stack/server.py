@@ -34,7 +34,7 @@ from google.protobuf.struct_pb2 import Struct
 from stack_automation_layer.composition import OwnedService, open_service
 from stack_automation_layer.model import Location, TransferRequest
 from stack_automation_layer.owner_lock import endpoint_key
-from stack_automation_layer.results import TaskHandle, TransferPlan
+from stack_automation_layer.results import LatchStatus, TaskHandle, TransferPlan
 from stack_automation_layer.service import StackService
 
 from tools.base_server import ToolServer, serve
@@ -157,8 +157,18 @@ _EXECUTE_RAISED = (
     "stack: execute failed ({name}); outcome unknown; check the STACK Manager "
     "and GetFailureLatch; this step key will not be re-sent")
 _LATER_WRITE_FAILED = (
-    "stack: transfer {kind}, but the ledger could not record it; "
+    "stack: transfer {kind}, but the ledger could not record it; {latch}"
     "re-running this step key will not send a second transfer")
+
+# A-2 (05-SPIKE.md 6f): the latch clause names the guid AcknowledgeFailure must
+# be given. Fixed strings, built from latch_status() fields only.
+_LATCH_LATCHED = "latched guid {guid}{kind}; inspect the arm, then AcknowledgeFailure"
+_LATCH_NOT_LATCHED = "the core did not latch this; inspect the arm"
+_LATCH_UNAVAILABLE = "latch status unavailable; read GetFailureLatch"
+
+# Result kinds whose cause can latch in the core (failed, aborted and lost
+# results, and a refusal because a latch is already held).
+_LATCHING_KINDS = frozenset({"failed", "aborted", "lost"})
 
 
 def _utcnow() -> datetime:
@@ -351,6 +361,59 @@ def _ledger_error_reply(exc: Exception, path: str) -> ExecuteCommandReply:
     shown = exc.path if isinstance(exc, LedgerError) else path
     return _reply(ERROR_FROM_TOOL, message=_one_line(
         _LEDGER_UNREADABLE.format(reason=reason, path=shown), 300))
+
+
+def _can_latch(d: Any) -> bool:
+    """True for a result dict whose cause can leave a failure latch held."""
+    if not isinstance(d, dict):
+        return False
+    kind = d.get("kind")
+    return kind in _LATCHING_KINDS or (
+        kind == "refused" and d.get("reason") == "failureLatched")
+
+
+def _latch_clause(service: Any) -> str:
+    """A-2: what the operator must acknowledge, read from latch_status() (one
+    zero-I/O call) and never from the core's explanation text. Never raises:
+    an exception or an unexpected answer reads as "unavailable"."""
+    try:
+        status = service.latch_status()
+    except Exception:
+        return _LATCH_UNAVAILABLE
+    if not isinstance(status, LatchStatus):
+        return _LATCH_UNAVAILABLE
+    if status.latched is False:
+        return _LATCH_NOT_LATCHED
+    if status.latched is True and isinstance(status.guid, str) and status.guid.strip():
+        kind = status.result_kind
+        shown = f" ({kind})" if isinstance(kind, str) and kind else ""
+        return _one_line(_LATCH_LATCHED.format(guid=status.guid.strip(), kind=shown), 300)
+    return _LATCH_UNAVAILABLE
+
+
+def _transfer_error_reply(service: Any, result: Any) -> ExecuteCommandReply:
+    """A Transfer error reply. When the cause can latch, the line names the
+    guid from latch_status() first (ACK-02, A-2: the first latch wins in the
+    core, so the result's own guid may not be the one to acknowledge) and labels
+    the result's guid only as "task guid". The reason is capped inside the line
+    so the latched guid always sits within the 300-character cap. Meta is the
+    result's to_dict() unchanged. Every other result keeps _result_reply."""
+    to_dict = getattr(result, "to_dict", None)
+    d = to_dict() if callable(to_dict) else result
+    if not _can_latch(d):
+        return _result_reply(result)
+    line = f"stack: {d['kind']}"
+    reason = d.get("reason")
+    if isinstance(reason, str) and reason:
+        line += f" ({_one_line(reason, 60)})"
+    line += f"; {_latch_clause(service)}"
+    guid = _find_guid(d)
+    if guid:
+        line += f"; task guid {guid}"
+    hint = _hint(d)
+    if hint:
+        line += f"; {hint}"
+    return _reply(ERROR_FROM_TOOL, message=_one_line(line, 300), meta=d)
 
 
 def _result_reply(result: Any) -> ExecuteCommandReply:
@@ -705,7 +768,7 @@ class StackServer(ToolServer):
         (never absent), so a repeat of the key cannot reach execute_transfer."""
         plan = service.plan_transfer(request)
         if not isinstance(plan, TransferPlan):
-            return _result_reply(plan)
+            return _transfer_error_reply(service, plan)
         try:
             claimed = ledger.claim(key, fingerprint=fp, instance=self._instance, now=_utcnow())
         except LedgerError as exc:
@@ -729,9 +792,9 @@ class StackServer(ToolServer):
         except LedgerError:
             write_failed = True
         result = service.wait(outcome, timeout_s=budget)
-        return self._finish(ledger, key, result, write_failed)
+        return self._finish(service, ledger, key, result, write_failed)
 
-    def _finish(self, ledger: Ledger, key: str, result: Any,
+    def _finish(self, service: StackService, ledger: Ledger, key: str, result: Any,
                 write_failed: bool) -> ExecuteCommandReply:
         """Record a terminal wait result and map it to the reply. A ledger write
         failure never stops the wait (the transfer already ran), but it turns
@@ -745,12 +808,16 @@ class StackServer(ToolServer):
                 write_failed = True
         if write_failed:
             kind = d.get("kind") if isinstance(d, dict) else None
+            # The latch clause comes first: it is the guid the operator needs.
+            # A ran result has no latch to name, so it makes no latch_status call.
+            latch = f"{_latch_clause(service)}; " if d is None or _can_latch(d) else ""
             return _reply(
                 ERROR_FROM_TOOL,
                 message=_one_line(_LATER_WRITE_FAILED.format(
-                    kind=kind if isinstance(kind, str) and kind else "outcome unknown"), 300),
+                    kind=kind if isinstance(kind, str) and kind else "outcome unknown",
+                    latch=latch), 300),
                 meta=d if isinstance(d, dict) else None)
-        return _result_reply(result)
+        return _transfer_error_reply(service, result)
 
     def AcknowledgeFailure(self, params: "Command.AcknowledgeFailure") -> ExecuteCommandReply:
         # ACK-01: the one place the core's latch is cleared, and only for the
