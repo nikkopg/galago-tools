@@ -3221,6 +3221,23 @@ class TestLedgerDirPinned(_LedgerCase):
         self.core.plan_result = good_plan
         self._assert_directory_can_still_move(port)
 
+    def test_an_untrusted_ledger_file_pins_the_directory(self) -> None:
+        # The file may hold step keys: moving ledger_dir would forget them.
+        for reason in ("unreadable", "corrupt", "unknownVersion"):
+            with self.subTest(reason=reason):
+                self.server._ledger_pinned = None
+                port = _free_tcp_port()
+                self.assertEqual(self._configure(self.ledger_dir, port).response, SUCCESS)
+                with patch.object(Ledger, "get", side_effect=LedgerError(reason, "p")):
+                    reply = self._transfer()
+                self.assertEqual(reply.response, ERROR_FROM_TOOL)
+                self.assertEqual(self.core.execute_calls, 0)
+                self.assertIsNotNone(self.server._ledger_pinned)
+                self.assertEqual(
+                    self._configure(
+                        os.path.join(self._tmpdir.name, "another-ledger"), port).response,
+                    NOT_READY)
+
     def test_a_claim_that_returns_false_pins_the_directory(self) -> None:
         # Another tool server wrote a record there: the directory is in use.
         port = _free_tcp_port()

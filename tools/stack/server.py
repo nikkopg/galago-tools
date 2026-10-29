@@ -179,6 +179,11 @@ _LEDGER_DIR_PINNED = (
     "stack: Config.ledger_dir cannot change after a Transfer has used the step "
     "ledger; restart the tool server to move it")
 
+# A ledger file is there but cannot be trusted: it may hold step keys, so a
+# Transfer that meets one keeps the directory pinned (never steer onto an
+# empty ledger instead of repairing this one).
+_UNTRUSTED_LEDGER_REASONS = frozenset({"unreadable", "corrupt", "unknownVersion"})
+
 # D-12: a second Transfer while one is running is refused, not queued.
 _BUSY_MESSAGE = (
     "stack: busy; another Transfer is running in this tool; "
@@ -1093,6 +1098,10 @@ class StackServer(ToolServer):
                 if existing is not None:
                     self._ledger_used = True
             except (LedgerError, ValueError) as exc:
+                # A ledger file that exists but cannot be trusted may hold step
+                # keys: keep the pin so a Configure cannot steer onto an empty one.
+                if isinstance(exc, LedgerError) and exc.reason in _UNTRUSTED_LEDGER_REASONS:
+                    self._ledger_used = True
                 return _ledger_error_reply(exc, self._ledger_dir)
             decision = decide(existing, fingerprint=fp, instance=self._instance, now=_utcnow())
             if decision.action == FRESH:
