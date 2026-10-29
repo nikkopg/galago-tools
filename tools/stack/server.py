@@ -59,6 +59,7 @@ from stack_automation_layer.service import StackService
 from tools.base_server import ToolServer, serve
 from tools.grpc_interfaces.stack_pb2 import Command, Config
 from tools.grpc_interfaces.tool_base_pb2 import (
+    BUSY,
     DRIVER_ERROR,
     ERROR_FROM_TOOL,
     FAILED,
@@ -182,6 +183,12 @@ _LEDGER_DIR_PINNED = (
 _BUSY_MESSAGE = (
     "stack: busy; another Transfer is running in this tool; "
     "wait for it to finish, then re-run this step")
+
+# WR-01: an AcknowledgeFailure that arrives while a Transfer holds the motion
+# lock is refused, never run: the Transfer's own wait is what ends the task.
+_ACK_BUSY_MESSAGE = (
+    "stack: busy; a Transfer is running in this tool; wait for it to finish, "
+    "then acknowledge again")
 
 # D-04: operator-visible ledger messages (05-SPIKE.md section 6f).
 _LEDGER_UNREADABLE = (
@@ -720,6 +727,12 @@ class StackServer(ToolServer):
                 status = prior
         if status == READY and self._configure_failed and self.service is None:
             status = FAILED
+        # WR-01: a Transfer is running, so the tool is BUSY whatever tried to
+        # reset it (a same-endpoint Configure, or a second Transfer that lost
+        # the motion lock and still ran base ExecuteCommand's finally). The
+        # Transfer's own finally releases the lock before it asks for READY.
+        if status == READY and _MOTION_LOCK.locked():
+            status = BUSY
         super().setStatus(status)
 
     @contextlib.contextmanager
@@ -1187,7 +1200,17 @@ class StackServer(ToolServer):
         if params.arm_inspected != "yes":
             return _reply(INVALID_ARGUMENTS, message=_ACK_NOT_YES_MESSAGE)
         service = self._require_service()
-        return _result_reply(service.acknowledge_failure(params.guid.strip(), confirm=True))
+        # WR-01: the BUSY status is not a safe gate by itself (a same-endpoint
+        # Configure or a losing second Transfer resets it to READY), so the
+        # acknowledge takes the motion lock too, non-blocking, and is refused
+        # while a Transfer runs. It never touches the ledger, so it holds the
+        # lock only for the core call.
+        if not _MOTION_LOCK.acquire(blocking=False):
+            return _reply(ERROR_FROM_TOOL, message=_ACK_BUSY_MESSAGE)
+        try:
+            return _result_reply(service.acknowledge_failure(params.guid.strip(), confirm=True))
+        finally:
+            _MOTION_LOCK.release()
 
     def GetFailureLatch(self, params: "Command.GetFailureLatch") -> ExecuteCommandReply:
         # D-13: latch_status() 1:1, zero I/O; the guid AcknowledgeFailure must name.

@@ -3974,6 +3974,90 @@ class TestAcknowledgeLeavesTheLedgerAlone(_TransferTestCase):
         self.assertEqual(self.core.calls[0][2], {"confirm": True})
 
 
+class TestAcknowledgeDuringTransfer(_TransferTestCase):
+    """WR-01: the BUSY status is not what keeps an AcknowledgeFailure out of a
+    running Transfer, because a same-endpoint Configure resets it to READY. The
+    motion lock is: an acknowledge is refused while a Transfer holds it, and the
+    status stays BUSY whatever tries to reset it."""
+
+    def _park_a_transfer(self) -> threading.Event:
+        entered, release = threading.Event(), threading.Event()
+
+        def _blocking(*_a: Any, **_k: Any) -> Any:
+            entered.set()
+            release.wait(timeout=10)
+            return Ran(task=_ran_snapshot())
+
+        self.core.wait_result = _blocking
+        thread = threading.Thread(target=lambda: self._transfer("busy-1"))
+        thread.start()
+        self.addCleanup(thread.join, 10)
+        self.addCleanup(release.set)
+        self.assertTrue(entered.wait(timeout=5))
+        return release
+
+    def _ack(self) -> Any:
+        return self.stub.ExecuteCommand(self._stack(
+            acknowledge_failure=_ack_message(_GUID, arm_inspected="yes")))
+
+    def _configure_an_owner(self) -> tool_base_pb2.Config:
+        """Open an owner (before any Transfer runs: a first Configure drains),
+        with the fake core standing in for its service."""
+        config = _real_config("127.0.0.1", _free_tcp_port(), ledger_dir=self.ledger_dir)
+        opener = MagicMock(side_effect=_fake_open_service(_fake_transport()))
+        with patch("tools.stack.server.open_service", opener):
+            self.assertEqual(self.stub.Configure(config).response, SUCCESS)
+        self.server.service = self.core  # type: ignore[assignment]
+        return config
+
+    def _same_endpoint_configure(self, config: tool_base_pb2.Config) -> Any:
+        opener = MagicMock(side_effect=_fake_open_service(_fake_transport()))
+        with patch("tools.stack.server.open_service", opener):
+            reply = self.stub.Configure(config)
+        opener.assert_not_called()
+        self.core.calls.clear()
+        return reply
+
+    def test_the_handler_is_refused_busy_while_a_transfer_holds_the_motion_lock(self) -> None:
+        self._park_a_transfer()
+        self.core.calls.clear()
+        reply = self.server.AcknowledgeFailure(_ack_message(_GUID, arm_inspected="yes"))
+        self.assertEqual(reply.response, ERROR_FROM_TOOL)
+        self.assertIn("busy", reply.error_message)
+        self.assertNotIn("acknowledge_failure", self.core.call_names)
+        self.assertTrue(stack_server._MOTION_LOCK.locked())
+
+    def test_a_same_endpoint_configure_neither_resets_busy_nor_admits_an_acknowledge(
+            self) -> None:
+        config = self._configure_an_owner()
+        release = self._park_a_transfer()
+        self.assertEqual(self._health().status, tool_base_pb2.BUSY)
+        reply = self._same_endpoint_configure(config)
+        self.assertEqual(reply.response, SUCCESS, reply.error_message)
+        self.assertEqual(self._health().status, tool_base_pb2.BUSY)
+        ack = self._ack()
+        self.assertNotEqual(ack.response, SUCCESS)
+        self.assertNotIn("acknowledge_failure", self.core.call_names)
+        release.set()
+
+    def test_the_status_returns_to_ready_and_an_acknowledge_works_afterwards(self) -> None:
+        config = self._configure_an_owner()
+        release = self._park_a_transfer()
+        self.assertEqual(self._same_endpoint_configure(config).response, SUCCESS)
+        release.set()
+        deadline = time.monotonic() + 5
+        while stack_server._MOTION_LOCK.locked() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        deadline = time.monotonic() + 5
+        while self._health().status != READY and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertEqual(self._health().status, READY)
+        reply = self._ack()
+        self.assertEqual(reply.response, SUCCESS, reply.error_message)
+        self.assertEqual(self.core.call_names[-1], "acknowledge_failure")
+        self.assertFalse(stack_server._MOTION_LOCK.locked())
+
+
 class TestUnconfiguredOrdering(_StackTestCase):
     """D-14: with no service every real-mode command is NOT_READY (the Phase 4
     not-yet-available refusals are gone); adapter arguments are checked first."""
