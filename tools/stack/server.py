@@ -80,7 +80,7 @@ CONFIGURE_DRAIN_TIMEOUT_S = 5.0
 
 # D-01: every handler maps 1:1 onto one StackService method, except Transfer:
 # it is the one motion path and the one multi-call command (D-12), so it has no
-# single mapped method. AcknowledgeFailure and GetFailureLatch are wired later.
+# single mapped method.
 COMMAND_TO_SERVICE_METHOD = {
     "GetManagerState": "manager_state",
     "GetRobotStates": "robot_states",
@@ -90,6 +90,7 @@ COMMAND_TO_SERVICE_METHOD = {
     "GetLabwarePresence": "labware_presence",
     "GetTransferEstimate": "estimate_transfer",
     "GetFailureLatch": "latch_status",
+    "AcknowledgeFailure": "acknowledge_failure",
 }
 
 # D-19: every Estimate<Cmd> hook returns one of these local constants (seconds);
@@ -99,10 +100,6 @@ EST_TRANSFER_S = 35
 EST_TRANSFER_ESTIMATE_S = 3
 EST_READ_S = 2
 EST_ACK_S = 2
-
-# D-18: commands the real-mode adapter refuses without touching the service
-# (Phase 5 wires them). They win over the not-configured check (D-14).
-UNAVAILABLE_COMMANDS = frozenset({"AcknowledgeFailure"})
 
 # D-13: the eight read-only commands (oneof field names) that bypass the BUSY
 # gate so an operator can read STACK state while a motion command holds the
@@ -128,11 +125,17 @@ _HOST_RE = re.compile(r"[A-Za-z0-9._\-]+|\[[0-9A-Fa-f:.]+\]")
 # D-14: real mode with no service yet.
 _NOT_CONFIGURED_MESSAGE = "stack: not configured"
 
+# D-14 (ACK-01): clearing a latch needs the operator to have inspected the arm
+# and to say so with exactly "yes".
+_ACK_NOT_YES_MESSAGE = (
+    "arm_inspected must be exactly 'yes': inspect the arm and recover STACK in "
+    "the STACK Manager, then send yes")
+
 # WR-02: a command that arrives while a Configure is swapping the owner is
 # refused at once, never parked. ERROR_FROM_TOOL rather than NOT_READY because
 # galago-core hides the text of NOT_READY / INVALID_ARGUMENTS replies from the
-# operator (see _unavailable_reply), and this one is worth seeing: it is
-# transient and the controller should retry.
+# operator, and this one is worth seeing: it is transient and the controller
+# should retry.
 _RECONFIGURING_MESSAGE = "stack: reconfiguring"
 
 # D-12: a second Transfer while one is running is refused, not queued.
@@ -251,12 +254,6 @@ def _reply(code: ResponseCode, *, message: str = "",
         s.update(meta)
         reply.meta_data.CopyFrom(s)
     return reply
-
-
-def _unavailable_reply(name: str) -> ExecuteCommandReply:
-    """D-18: ERROR_FROM_TOOL, because galago-core hides the text of
-    INVALID_ARGUMENTS / NOT_READY replies from the operator."""
-    return _reply(ERROR_FROM_TOOL, message=f"stack: {name} is not available in this build")
 
 
 def _check_args(command: message.Message) -> list[str]:
@@ -597,6 +594,11 @@ class StackServer(ToolServer):
                 message=_one_line("invalid arguments: " + "; ".join(problems), 500))
         if self.simulated:
             return super()._dispatchCommand(command)
+        # D-14: the exact "yes" is checked before admission, so it wins over
+        # not-configured and reaches no core. The handler checks it again.
+        if (type(command).__name__ == "AcknowledgeFailure"
+                and cast(Any, command).arm_inspected != "yes"):
+            return _reply(INVALID_ARGUMENTS, message=_ACK_NOT_YES_MESSAGE)
         admitted, service = self._admit()
         if not admitted:
             return _reply(ERROR_FROM_TOOL, message=_RECONFIGURING_MESSAGE)
@@ -604,9 +606,7 @@ class StackServer(ToolServer):
         previous = (getattr(local, "active", False), getattr(local, "service", None))
         local.active, local.service = True, service
         try:
-            # D-14: the three refusals need no service and their text is
-            # operator-visible, so they win over not-configured.
-            if service is None and type(command).__name__ not in UNAVAILABLE_COMMANDS:
+            if service is None:
                 return _reply(NOT_READY, message=_NOT_CONFIGURED_MESSAGE)
             return super()._dispatchCommand(command)
         finally:
@@ -753,8 +753,12 @@ class StackServer(ToolServer):
         return _result_reply(result)
 
     def AcknowledgeFailure(self, params: "Command.AcknowledgeFailure") -> ExecuteCommandReply:
-        # D-18: refused in real mode; never touches the service.
-        return _unavailable_reply("AcknowledgeFailure")
+        # ACK-01: the one place the core's latch is cleared, and only for the
+        # operator's exact "yes". Never reads or writes the step ledger (D-15).
+        if params.arm_inspected != "yes":
+            return _reply(INVALID_ARGUMENTS, message=_ACK_NOT_YES_MESSAGE)
+        service = self._require_service()
+        return _result_reply(service.acknowledge_failure(params.guid.strip(), confirm=True))
 
     def GetFailureLatch(self, params: "Command.GetFailureLatch") -> ExecuteCommandReply:
         # D-13: latch_status() 1:1, zero I/O; the guid AcknowledgeFailure must name.
