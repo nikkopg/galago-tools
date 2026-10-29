@@ -4,17 +4,17 @@ milestone: v2
 milestone_name: STACK Tool & STACK↔F.A.S.T. Handoff
 current_phase: 5
 current_phase_name: F5-safe Transfer & Operator Acknowledge
-status: executing
-stopped_at: Completed 05-06-PLAN.md
-last_updated: "2026-10-29T13:28:10.208Z"
+status: verifying
+stopped_at: Completed 05-07-PLAN.md
+last_updated: "2026-10-29T13:33:11.413Z"
 last_activity: 2026-10-29
 last_activity_desc: Phase 5 execution started
-state_head: 3e92125bd59f14e2f1baf2d2c6782b5b5f73fec4
+state_head: 42607e15be08760d9e57fa83d91abd7c0a4ad47f
 progress:
   total_phases: 4
   completed_phases: 1
   total_plans: 12
-  completed_plans: 11
+  completed_plans: 12
   percent: 25
 ---
 
@@ -33,7 +33,7 @@ acknowledges on its own. For the STACK: a step never sends a second transfer.
 
 Phase: 5 (F5-safe Transfer & Operator Acknowledge) — EXECUTING
 Plan: 7 of 7
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-10-29 — Phase 5 execution started
 
 Progress: [███░░░░░░░] 25%
@@ -92,6 +92,7 @@ Progress: [███░░░░░░░] 25%
 | Phase 5 P04 | 14min | 3 tasks | 2 files |
 | Phase 05 P05 | 25min | 2 tasks | 2 files |
 | Phase 05 P06 | 40min | 3 tasks | 2 files |
+| Phase 5 P07 | 25 min | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -134,6 +135,7 @@ v2 roadmap-level decisions (2026-10-28, detail in PROJECT.md Key Decisions):
 - [Phase 05]: 05-05: step key released only by isinstance whitelist (Refused/Rejected/NeedsInput/ReadFailed); unknown shapes become outcomeUnknown
 - [Phase 05]: 05-06: D-09 kept (user-confirmed): a ran re-attached after a restart is SUCCESS flagged reattachedAfterRestart; any non-ran outcome adds the arm-inspection clause plus the current latch clause
 - [Phase 05]: 05-06: re-attach loop is read-only (wait_transfer only), first slice exactly min(budget,300), clock read only after a timedOut slice
+- [Phase 5]: 05-07: never-resend proven behaviourally (12-scenario matrix, execute_transfer total 1 per key incl. restarts; released-outcome exception pinned at 2) with no adapter behaviour change; STK-05 re-proven on the real Transfer
 
 ### Pending Todos
 
@@ -167,8 +169,8 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-29T13:28:10.165Z
-Stopped at: Completed 05-06-PLAN.md
+Last session: 2026-10-29T13:33:11.374Z
+Stopped at: Completed 05-07-PLAN.md
 Resume file: None
 
 ## Operator Next Steps
