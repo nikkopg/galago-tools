@@ -4,6 +4,7 @@ Every test reads scriptContent and the parameter defaults from
 docs/runbooks/gal-02-handoff.protocol.json. The stub mirrors only the documented galago-core
 script sandbox; the operator's real import and Preview (plan 06-03) stay the authority.
 """
+import os
 import re
 import tempfile
 import unittest
@@ -21,12 +22,14 @@ from tools.tests.gal02_harness import (
     NODE_SKIP_REASON,
     OPERATOR_ONLY_COMMANDS,
     PROTOCOL_PATH,
+    REQUIRE_ALL_ENV,
     ScriptResult,
     default_params,
     find_node,
     load_export,
     require_node,
     run_script,
+    skip_or_fail,
     stack_legs,
 )
 
@@ -115,12 +118,27 @@ class TestNodeLookup(unittest.TestCase):
         self.assertIsNone(find_node(which=lambda name: None, environ={}, home=home))
 
     def test_require_node_skips_with_the_stated_reason(self) -> None:
-        with patch.object(harness, "find_node", return_value=None):
+        with patch.dict(os.environ, {}), patch.object(harness, "find_node", return_value=None):
+            os.environ.pop(REQUIRE_ALL_ENV, None)
             with self.assertRaises(unittest.SkipTest) as caught:
                 require_node()
         self.assertEqual(str(caught.exception), NODE_SKIP_REASON)
         for place in ("PATH", "$NODE", "~/.nvm/versions/node/*/bin/node"):
             self.assertIn(place, NODE_SKIP_REASON)
+
+    def test_require_all_switch_turns_a_skip_into_a_failure(self) -> None:
+        # WR-05: with GAL02_REQUIRE_ALL set, a missing dependency fails instead of skipping.
+        with patch.dict(os.environ, {REQUIRE_ALL_ENV: "1"}):
+            with patch.object(harness, "find_node", return_value=None):
+                with self.assertRaises(AssertionError) as caught:
+                    require_node()
+            self.assertIn(NODE_SKIP_REASON, str(caught.exception))
+            with self.assertRaises(AssertionError):
+                skip_or_fail("some other missing dependency")
+        for off in ("", "0"):
+            with patch.dict(os.environ, {REQUIRE_ALL_ENV: off}):
+                with self.assertRaises(unittest.SkipTest):
+                    skip_or_fail("optional")
 
 
 class TestGal02Protocol(unittest.TestCase):
@@ -383,7 +401,7 @@ class TestGal02Protocol(unittest.TestCase):
             from tools.fast.server import _check_args
         except ModuleNotFoundError as exc:
             if exc.name and exc.name.split(".")[0] in ("fast_mcp", "httpx"):
-                self.skipTest(
+                skip_or_fail(
                     "fast_mcp core is not installed (private GitLab dependency, see "
                     "tools/fast/requirements.txt); F.A.S.T. _check_args not asserted")
             raise
@@ -451,7 +469,7 @@ class TestGal02Protocol(unittest.TestCase):
             from tools.fast.server import _check_args
         except ModuleNotFoundError as exc:
             if exc.name and exc.name.split(".")[0] in ("fast_mcp", "httpx"):
-                self.skipTest(
+                skip_or_fail(
                     "fast_mcp core is not installed (private GitLab dependency, see "
                     "tools/fast/requirements.txt); F.A.S.T. _check_args not asserted")
             raise

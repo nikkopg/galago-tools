@@ -103,7 +103,7 @@ Quick command:
 cd /home/formulatrix/data/nikko/galago-tools
 source ~/data/nikko/.venvs/galago-py310/bin/activate
 export PATH=$HOME/.nvm/versions/node/v24.14.1/bin:$PATH
-python -m pytest tools/tests/gal02_handoff_test.py tools/tests/gal02_replay_test.py tools/tests/gal02_runbook_test.py -q -rs -p no:cacheprovider
+GAL02_REQUIRE_ALL=1 python -m pytest tools/tests/gal02_handoff_test.py tools/tests/gal02_replay_test.py tools/tests/gal02_runbook_test.py -q -rs -p no:cacheprovider
 ```
 
 Full gate:
@@ -112,10 +112,10 @@ Full gate:
 cd /home/formulatrix/data/nikko/galago-tools
 source ~/data/nikko/.venvs/galago-py310/bin/activate
 export PATH=$HOME/.nvm/versions/node/v24.14.1/bin:$PATH
-bin/make proto test
+GAL02_REQUIRE_ALL=1 bin/make proto test
 ```
 
-Expect 0 skipped in the gal02 modules. A skip means node was not found, and then nothing was proven.
+Expect 0 skipped in the gal02 modules. A skip means node, a core library (stack_automation_layer, fast_mcp), bash or the sibling galago-core was not found, and then nothing was proven. `GAL02_REQUIRE_ALL=1` turns those skips into failures, so the run cannot pass with a hidden skip.
 
 Part 1 proves (D-06): the protocol script yields the four rows and run-unique keys; the out leg is the in
 leg swapped; a re-dispatch of the stored in-leg params through a real-mode StackServer on the fake core is

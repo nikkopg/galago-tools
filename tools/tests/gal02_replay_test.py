@@ -4,10 +4,11 @@ The protocol's scriptContent is evaluated in a node sandbox stub (gal02_harness)
 transfer param dicts it emits are parsed into the real stack.proto message and driven through a
 real-mode StackServer on the fake core over in-process gRPC. Nothing here contacts a STACK.
 """
-import unittest
 from datetime import timedelta
 from typing import Any
 from unittest.mock import patch
+
+from tools.tests.gal02_harness import skip_or_fail
 
 try:
     import httpx  # noqa: F401
@@ -18,10 +19,10 @@ try:
     from tools.stack.server import _check_args
 except ModuleNotFoundError as exc:
     if exc.name and exc.name.split(".")[0] in ("stack_automation_layer", "httpx"):
-        raise unittest.SkipTest(
+        skip_or_fail(
             "stack_automation_layer core is not installed (private GitLab dependency, see "
             "tools/stack/requirements.txt); the local Python 3.10 bin/make test run "
-            "is the authoritative gate") from exc
+            "is the authoritative gate")
     raise
 
 from google.protobuf.json_format import ParseDict

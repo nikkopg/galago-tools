@@ -14,7 +14,7 @@ import subprocess
 import unittest
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Mapping, Optional
+from typing import Any, Callable, Mapping, NoReturn, Optional
 
 PROTOCOL_PATH = (
     Path(__file__).resolve().parents[2] / "docs" / "runbooks" / "gal-02-handoff.protocol.json")
@@ -26,6 +26,11 @@ HARDWARE_DENY = frozenset({"10.150.1.125", "stack-server"})
 OPERATOR_ONLY_COMMANDS = frozenset({"acknowledge_failure", "pause", "resume", "abort"})
 
 NODE_SKIP_REASON = "node not found: tried PATH, $NODE, ~/.nvm/versions/node/*/bin/node"
+
+# Set to anything but "" or "0" to turn every environment skip in the gal02 modules (no node, no
+# stack_automation_layer / fast_mcp core, no bash, no sibling checkout) into a failure. The
+# verification run sets it, so "0 skipped" (D-16c) is enforced rather than just read off a summary.
+REQUIRE_ALL_ENV = "GAL02_REQUIRE_ALL"
 
 _VERSION_DIR = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
 
@@ -94,10 +99,17 @@ def find_node(
     return best[1] if best else None
 
 
+def skip_or_fail(reason: str) -> NoReturn:
+    """Skip with reason, or fail when GAL02_REQUIRE_ALL is set (see REQUIRE_ALL_ENV)."""
+    if os.environ.get(REQUIRE_ALL_ENV, "") not in ("", "0"):
+        raise AssertionError(f"{reason} ({REQUIRE_ALL_ENV} is set, so this skip is a failure)")
+    raise unittest.SkipTest(reason)
+
+
 def require_node() -> str:
     node = find_node()
     if node is None:
-        raise unittest.SkipTest(NODE_SKIP_REASON)
+        skip_or_fail(NODE_SKIP_REASON)
     return node
 
 

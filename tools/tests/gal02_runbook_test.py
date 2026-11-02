@@ -13,7 +13,7 @@ import unittest
 from pathlib import Path
 from typing import Optional
 
-from tools.tests.gal02_harness import load_export
+from tools.tests.gal02_harness import load_export, skip_or_fail
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RUNBOOK_PATH = REPO_ROOT / "docs" / "runbooks" / "gal-02-handoff.md"
@@ -149,7 +149,7 @@ class TestDep02Gate(unittest.TestCase):
     def setUpClass(cls) -> None:
         missing = [tool for tool in ("bash", "awk", "grep", "cmp") if shutil.which(tool) is None]
         if os.name == "nt" or missing:
-            raise unittest.SkipTest(
+            skip_or_fail(
                 "the DEP-02 gate is a POSIX shell script for the galago-tools Linux host; "
                 "bash, awk, grep and cmp are required")
 
@@ -286,7 +286,7 @@ class TestDep02Gate(unittest.TestCase):
 
     def test_dep02_gate_reports_a_revision_only_for_a_checkout_root(self) -> None:
         if shutil.which("git") is None:
-            self.skipTest("git is required for the revision check")
+            skip_or_fail("git is required for the revision check")
         git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid"]
         with tempfile.TemporaryDirectory() as tmp:
             outer = Path(tmp) / "outer"
@@ -336,7 +336,7 @@ class TestDep02Gate(unittest.TestCase):
 
     def test_dep02_gate_is_read_only_inside_a_real_git_repo_and_the_tools_tree(self) -> None:
         if shutil.which("git") is None:
-            self.skipTest("git is required")
+            skip_or_fail("git is required")
         git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid"]
 
         def porcelain() -> str:
@@ -366,7 +366,7 @@ class TestDep02Gate(unittest.TestCase):
         verdict line agrees with the exit code. The fixture-tree tests above are the authority."""
         sibling = REPO_ROOT.parent / "galago-core"
         if not (sibling / "controller").is_dir():
-            self.skipTest(f"no sibling galago-core checkout at {sibling}")
+            skip_or_fail(f"no sibling galago-core checkout at {sibling}")
         completed = subprocess.run(
             ["bash", str(GATE_PATH)],
             env={**os.environ, "GALAGO_CORE_DIR": str(sibling), "GALAGO_TOOLS_DIR": str(REPO_ROOT)},
