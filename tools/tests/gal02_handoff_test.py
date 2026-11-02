@@ -10,7 +10,7 @@ import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 from unittest.mock import patch
 
 from google.protobuf.descriptor import FieldDescriptor
@@ -32,6 +32,10 @@ from tools.tests.gal02_harness import (
     skip_or_fail,
     stack_legs,
 )
+
+FAST_CORE_MISSING = (
+    "fast_mcp core is not installed (private GitLab dependency, see "
+    "tools/fast/requirements.txt); F.A.S.T. _check_args cross-check not asserted")
 
 _EXPECTED_NAMES = [
     "batch_label", "stack_tool", "fast_tool",
@@ -365,15 +369,18 @@ class TestGal02Protocol(unittest.TestCase):
         invalid += [("fast_step_tip_reuse", v, True) for v in ("fresh2", "Fresh", "none", "reuse,fresh")]
         invalid += [("fast_step_expected_tray_id", v, False) for v in ("1.5", "abc", "2147483648")]
         self.assertGreater(len(invalid), 40)
+        check_args = self._fast_check_args_or_none()
         for name, value, buildable in invalid:
             with self.subTest(parameter=name, value=value):
                 result = self._run(**{name: value})
                 self.assertFalse(result.ok, f"{name}={value!r} was accepted")
                 self.assertIn(name, result.error)
                 self.assertEqual(result.calls, [])
-                if buildable and not name.endswith("expected_tray_id"):
-                    problems = self._fast_check_args({**self.defaults, name: value})
+                if check_args and buildable and not name.endswith("expected_tray_id"):
+                    problems = check_args({**self.defaults, name: value})
                     self.assertTrue(problems, f"_check_args accepts {name}={value!r}")
+        if check_args is None:
+            skip_or_fail(FAST_CORE_MISSING)
 
     def test_fast_step_boundary_values_are_accepted_and_agree_with_check_args(self) -> None:
         valid = [
@@ -384,6 +391,7 @@ class TestGal02Protocol(unittest.TestCase):
             ("fast_step_dest_start_row", "z"), ("fast_step_volume", "0.5"),
             ("fast_step_tip_reuse", "reuse"), ("fast_step_expected_tray_id", "0"),
         ]
+        check_args = self._fast_check_args_or_none()
         for name, value in valid:
             with self.subTest(parameter=name, value=value):
                 result = self._run(**{name: value})
@@ -392,19 +400,28 @@ class TestGal02Protocol(unittest.TestCase):
                     [(c["tool"], c["command"]) for c in result.calls],
                     [("Tool Box", "note"), ("STACK", "transfer"), ("FAST", "transfer"),
                      ("STACK", "transfer")])
-                self.assertEqual(self._fast_check_args({**self.defaults, name: value}), [])
+                if check_args:
+                    self.assertEqual(check_args({**self.defaults, name: value}), [])
+        if check_args is None:
+            skip_or_fail(FAST_CORE_MISSING)
 
-    def _fast_check_args(self, params: dict[str, str]) -> list[str]:
-        """Run the script with params (must succeed for valid input) or build the F.A.S.T. message
-        straight from them, and return tools.fast.server._check_args for it."""
+    def _fast_check_args_or_none(self) -> Optional[Callable[[dict[str, str]], list[str]]]:
+        """The _check_args cross-check, or None when the private fast_mcp core is missing. The
+        node-only assertions still run without it; the caller skips (or fails under
+        GAL02_REQUIRE_ALL) only after they have."""
         try:
-            from tools.fast.server import _check_args
+            from tools.fast.server import _check_args  # noqa: F401
         except ModuleNotFoundError as exc:
             if exc.name and exc.name.split(".")[0] in ("fast_mcp", "httpx"):
-                skip_or_fail(
-                    "fast_mcp core is not installed (private GitLab dependency, see "
-                    "tools/fast/requirements.txt); F.A.S.T. _check_args not asserted")
+                return None
             raise
+        return self._fast_check_args
+
+    def _fast_check_args(self, params: dict[str, str]) -> list[str]:
+        """Build the F.A.S.T. message straight from params and return
+        tools.fast.server._check_args for it."""
+        from tools.fast.server import _check_args
+
         message: dict[str, Any] = {}
         for field in fast_pb2.Command.Transfer.DESCRIPTOR.fields_by_name:
             raw = params.get("fast_step_" + field, "")
@@ -426,6 +443,14 @@ class TestGal02Protocol(unittest.TestCase):
             self.assertFalse(result.ok)
             self.assertIn("fast_tool", result.error)
             self.assertEqual(result.calls, [])
+        # galago-core resolves tool names through normalizeToolKey (lower-case, alphanumerics only),
+        # so names that differ only in case or punctuation are the same workcell tool.
+        for stack_tool, fast_tool in (("STACK", "stack"), ("FAST-SIM", "fastsim"), ("Tool X", "tool_x")):
+            with self.subTest(case="same tool after normalization", stack=stack_tool, fast=fast_tool):
+                result = self._run(stack_tool=stack_tool, fast_tool=fast_tool)
+                self.assertFalse(result.ok)
+                self.assertIn("fast_tool", result.error)
+                self.assertEqual(result.calls, [])
         same = {
             "fast_device": self.defaults["source_device"],
             "fast_deck": self.defaults["source_deck"],
