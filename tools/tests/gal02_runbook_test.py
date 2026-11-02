@@ -11,6 +11,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Optional
 
 from tools.tests.gal02_harness import load_export
 
@@ -80,8 +81,13 @@ def _make_core_tree(
     stack_fields: bool = True,
     ack: bool = False,
     proto: str = "same",
+    stack_lines: Optional[list[str]] = None,
 ) -> None:
-    """Write a minimal galago-core tree under root. proto is "same", "differs" or "missing"."""
+    """Write a minimal galago-core tree under root. proto is "same", "differs" or "missing".
+
+    stack_lines, when given, replaces the whole stack block (opener to closer) with those raw lines.
+    A trailing `zzz` tool block that does hold `transfer` follows it, so a block that fails to end
+    cleanly would be seen to spill into it."""
     gen = root / "controller" / "gen-interfaces"
     (gen / "tools" / "grpc_interfaces").mkdir(parents=True)
     controller_lines = ["export enum ToolType {", '  fast = "fast",']
@@ -103,7 +109,10 @@ def _make_core_tree(
         "    ],",
         "  },",
     ]
-    if stack_fields:
+    if stack_lines is not None:
+        constants.extend(stack_lines)
+        constants.extend(["  zzz: {", "    transfer: [],", "  },"])
+    elif stack_fields:
         constants.append("  stack: {")
         constants.append("    transfer: [],")
         if ack:
@@ -181,6 +190,76 @@ class TestDep02Gate(unittest.TestCase):
                 self.assertEqual(completed.returncode, 1, completed.stdout)
                 self.assertTrue(lines[-1].startswith("BLOCKED:"), lines)
                 self.assertEqual(len([x for x in lines if x.startswith("missing:")]), 1, lines)
+
+    def test_dep02_gate_does_not_count_substring_decoys_as_stack_transfer(self) -> None:
+        # CR-01: list_transfer_profiles / get_transfer_estimate contain "transfer" but are not it.
+        cases: dict[str, list[str]] = {
+            "decoy command names only": [
+                "  stack: {",
+                "    list_transfer_profiles: [{ name: \"refresh\", type: \"boolean\" }],",
+                "    get_transfer_estimate: [{ name: \"robot\", type: \"text\" }],",
+                "  },",
+            ],
+            "transfer only as a quoted field name": [
+                "  stack: {",
+                "    get_labware_presence: [{ name: \"transfer\", type: \"text\" }],",
+                "  },",
+            ],
+            "transfer indented one level too deep (nested)": [
+                "  stack: {",
+                "    get_manager_state: [",
+                "      transfer: [],",
+                "    ],",
+                "  },",
+            ],
+            "one-line block without transfer, next tool has it": [
+                "  stack: { get_manager_state: [] },",
+            ],
+            "one-line block with transfer second, next tool has it": [
+                "  stack: { get_manager_state: [], transfer: [] },",
+            ],
+        }
+        for label, lines in cases.items():
+            with self.subTest(case=label), tempfile.TemporaryDirectory() as tmp:
+                _make_core_tree(Path(tmp), stack_lines=lines)
+                completed = self._run(Path(tmp))
+                out = self._lines(completed)
+                self.assertEqual(completed.returncode, 1, completed.stdout)
+                self.assertTrue(out[-1].startswith("BLOCKED:"), out)
+                self.assertEqual(
+                    [x for x in out if x.startswith("missing:")],
+                    ["missing: commandFields.stack.transfer in "
+                     "controller/components/tools/constants.ts"], out)
+
+    def test_dep02_gate_accepts_the_transfer_key_with_decoys_and_a_one_line_block(self) -> None:
+        cases: dict[str, list[str]] = {
+            "key plus decoys": [
+                "  stack: {",
+                "    transfer: [{ name: \"step_key\", type: \"text\" }],",
+                "    list_transfer_profiles: [{ name: \"refresh\", type: \"boolean\" }],",
+                "    get_transfer_estimate: [],",
+                "  },",
+            ],
+            "one-line block with transfer first": [
+                "  stack: { transfer: [], get_manager_state: [] },",
+            ],
+        }
+        for label, lines in cases.items():
+            with self.subTest(case=label), tempfile.TemporaryDirectory() as tmp:
+                _make_core_tree(Path(tmp), stack_lines=lines)
+                completed = self._run(Path(tmp))
+                self.assertEqual(completed.returncode, 0, completed.stdout)
+                self.assertEqual(self._lines(completed)[-1], "DEP-02 OK")
+
+    def test_dep02_gate_reports_a_missing_stack_block_even_if_other_tools_have_transfer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _make_core_tree(Path(tmp), stack_fields=False)
+            completed = self._run(Path(tmp))
+        out = self._lines(completed)
+        self.assertEqual(completed.returncode, 1, completed.stdout)
+        self.assertEqual(
+            [x for x in out if x.startswith("missing:")],
+            ["missing: commandFields.stack block in controller/components/tools/constants.ts"], out)
 
     def test_dep02_gate_blocks_when_stack_fields_expose_acknowledge(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

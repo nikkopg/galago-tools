@@ -11,7 +11,8 @@
 #   1. a galago-core checkout exists (controller/ directory)
 #   2. ToolType.stack in controller/gen-interfaces/controller.ts
 #   3. generated controller/gen-interfaces/tools/grpc_interfaces/stack.ts
-#   4. commandFields.stack has `transfer` (controller/components/tools/constants.ts)
+#   4. commandFields.stack has the `transfer` key itself (controller/components/tools/constants.ts);
+#      list_transfer_profiles / get_transfer_estimate do not count
 #   5. commandFields.stack does NOT expose acknowledge_failure (forbidden in any protocol)
 #   6. vendored stack.proto is byte-equal to this repo's frozen interfaces/.../stack.proto
 #
@@ -61,12 +62,38 @@ if [ ! -f "$STACK_TS" ]; then
   failed=1
 fi
 
-# 4 and 5. the stack block of commandFields (two-space-indented tool block closed by `  },`)
+# 4 and 5. the stack block of commandFields (two-space-indented tool block closed by `  },`).
+# The block ends at the FIRST closing line, so a one-line `  stack: { ... },` can never spill into
+# the next tool's block. A one-line block is rewritten to its first key at four-space indent, so
+# the same anchored key match below applies (a one-line block whose first key is not `transfer`
+# fails closed).
+stack_open=0
 stack_block=""
 if [ -f "$CONSTANTS_TS" ]; then
-  stack_block="$(awk '/^  stack: \{/,/^  \},/' "$CONSTANTS_TS" 2>/dev/null)"
+  if grep -qE '^  stack: \{' "$CONSTANTS_TS" 2>/dev/null; then
+    stack_open=1
+  fi
+  stack_block="$(awk '
+    /^  stack: \{/ {
+      if ($0 ~ /\}[[:space:]]*,?[[:space:]]*$/) {
+        line = $0
+        sub(/^  stack: \{[[:space:]]*/, "    ", line)
+        print line
+        exit
+      }
+      f = 1
+      next
+    }
+    f && /^  \}[,;]?[[:space:]]*$/ { exit }
+    f
+  ' "$CONSTANTS_TS" 2>/dev/null)"
 fi
-if ! printf '%s\n' "$stack_block" | grep -q 'transfer'; then
+if [ "$stack_open" -eq 0 ]; then
+  echo "missing: commandFields.stack block in controller/components/tools/constants.ts"
+  failed=1
+elif ! printf '%s\n' "$stack_block" | grep -qE '^    transfer[[:space:]]*:'; then
+  # The key itself, at the block's own indent: list_transfer_profiles / get_transfer_estimate and
+  # nested field names must not satisfy it.
   echo "missing: commandFields.stack.transfer in controller/components/tools/constants.ts"
   failed=1
 fi
