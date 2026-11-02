@@ -39,7 +39,19 @@ REQUIRED_HEADINGS = [
     H1,
     "## Safety rules",
     "## Pre-flight",
+    "## Part 1: deploy (LIVE-08)",
+    "## Part 2: supervised live Transfer (LIVE-09)",
+    "## Part 3: supervised live GAL-02 handoff (LIVE-10)",
+    "## Recovery drill (D-11)",
+    "## Findings log",
 ]
+
+FINDINGS_ROWS = (
+    ["G0"]
+    + [f"1a-{n}" for n in range(1, 7)]
+    + [f"2a-{n}" for n in range(1, 4)]
+    + [f"3a-{n}" for n in range(1, 4)]
+)
 
 REQUIRED_PHRASES = [
     "bash docs/runbooks/gal-07-live-check.sh",
@@ -52,6 +64,28 @@ REQUIRED_PHRASES = [
     "docs/runbooks/gal-02-handoff.md",
     "remains in force",
     "never delete",
+    "stack2-6",
+    "GetFailureLatch",
+    "GetRobotStates",
+    "GetManagerState",
+    "GetLabwarePresence",
+    "ListDevices",
+    "ListLabwareProfiles",
+    "numberOfRuns",
+    "nest-1/deck1/A1",
+    "orange-nest/deck1/A1",
+    "rack/l1/A1",
+    "REPLAY_WINDOW_S",
+    "600 s",
+    "tool restarted mid-transfer; inspect the arm; the core may not have latched this failure",
+    "GAL07_REQUIRE_STACK_ENV=1",
+    "systemctl --user restart galago-tools",
+    "stack-ledger.json",
+    "not found in store",
+    "fast_status.py --port 40012",
+    "uv pip install --python .venv/bin/python -r tools/stack/requirements.txt",
+    "direct_url.json",
+    "TOOLBOX_PORT=11010 docker compose up -d --build",
 ]
 
 MANAGER_APPLICATION_JSON = json.dumps(
@@ -431,6 +465,30 @@ class TestRunbookContent(unittest.TestCase):
         for phrase in REQUIRED_PHRASES:
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, self.text)
+
+    def test_runbook_carries_one_go_gate_per_part(self) -> None:
+        """D-10: each live part waits for a typed go recorded with a UTC timestamp — exactly one
+        "Reply: literal go" line per part slice, never anywhere else."""
+        starts = [next(i for i, line in enumerate(self.lines)
+                       if line.startswith(f"## Part {n}:")) for n in (1, 2, 3)]
+        drill = next(i for i, line in enumerate(self.lines)
+                     if line.startswith("## Recovery drill"))
+        bounds = [(starts[0], starts[1]), (starts[1], starts[2]), (starts[2], drill)]
+        for n, (start, end) in enumerate(bounds, start=1):
+            with self.subTest(part=n):
+                section = "\n".join(self.lines[start:end])
+                self.assertEqual(section.count("Reply: literal go"), 1, section[-400:])
+                self.assertIn("UTC", section, section[-400:])
+        self.assertEqual(self.text.count("Reply: literal go"), 3, self.text)
+
+    def test_runbook_findings_log_has_every_row(self) -> None:
+        start = self.lines.index("## Findings log")
+        section = self.lines[start:]
+        for row_id in FINDINGS_ROWS:
+            with self.subTest(row=row_id):
+                self.assertTrue(
+                    any(line.startswith(f"| {row_id} |") for line in section),
+                    f"no Findings row {row_id}")
 
     def test_runbook_holds_no_credential_values(self) -> None:
         self.assertIsNone(re.search(r"STACK_(USER|PASSWORD)=[^\s$<\"']", self.text))
