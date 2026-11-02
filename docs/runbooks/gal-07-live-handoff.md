@@ -320,8 +320,8 @@ paste a credential or token.
 
 | Row | UTC timestamp | Requirement | Observation | Result |
 |-----|---------------|-------------|-------------|--------|
-| G0 | | LIVE-08, LIVE-09, LIVE-10 | | |
-| 1a-1 | | LIVE-08 | | |
+| G0 | 2026-11-02T11:16:00Z | LIVE-08, LIVE-09, LIVE-10 | Pre-deploy pre-flight (07-02 Task 1 precondition): `bash docs/runbooks/gal-07-live-check.sh` on the real host — exit 1, last line a `BLOCKED:` remedy; the failing checks are exactly the two expected pre-deploy gaps, `missing: stack_automation_layer pinned at 934a621… in the service venv` and `missing: a type fast tool` in the :3010 store, plus one advisory `warn:` (no stack credentials env file yet). The fail-closed pre-deploy gate state matched the 07-01-verified expectation exactly, which is this row's pass criterion (the gate's later PREFLIGHT OK verdicts are recorded by rows 1a-2 and 3a-1, not here) | PASS |
+| 1a-1 | 2026-11-02T11:16:00Z | LIVE-08 | OQ-1 install source: dry-run probe (`uv pip install --dry-run` on the pinned git+https requirements.txt) requires GitLab browser authentication — the git-credential-oauth helper launched an interactive OAuth device flow (scopes read_repository/write_repository at gitlab.formulatrix.com) and stalled waiting for the operator (Pitfall 1 reproduced). User chose **local-clone-waiver**: an explicit, session-recorded waiver of D-04 for this deploy, after Claude verified the local clone /home/formulatrix/data/nikko/stack-automation-layer HEAD equals the pinned commit 934a621ece116a8b263897c1e9b62b57374f4ef3 (branch feat/initial-layer, clean except untracked uv.lock). Nothing was installed by this task; the install runs only after Task 2's typed-go gate | PASS |
 | 1a-2 | | LIVE-08 | | |
 | 1a-3 | | LIVE-08 | | |
 | 1a-4 | | LIVE-08 | | |
