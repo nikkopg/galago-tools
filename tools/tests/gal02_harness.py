@@ -121,7 +121,7 @@ def run_script(script: str, params: Mapping[str, Any], *, strict: bool = False) 
         [node, "-e", _HARNESS_JS],
         input=json.dumps({"script": source, "params": dict(params)}),
         capture_output=True,
-        text=True,
+        encoding="utf-8",
         timeout=30,
         check=True,
     )
