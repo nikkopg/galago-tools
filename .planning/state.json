@@ -1,0 +1,33 @@
+{
+  "contract": "1.0.0",
+  "flavor": "core",
+  "milestone": "v2 — STACK Tool & STACK↔F.A.S.T. Handoff",
+  "phases": [
+    {
+      "number": "4",
+      "name": "STACK Tool Registration, Reads & Estimate",
+      "status": "complete"
+    },
+    {
+      "number": "5",
+      "name": "F5-safe Transfer & Operator Acknowledge",
+      "status": "complete"
+    },
+    {
+      "number": "6",
+      "name": "GAL-02 Workflow, Simulated Workcell & PAC-Simulator Run",
+      "status": "complete"
+    },
+    {
+      "number": "7",
+      "name": "Deploy & Supervised Live STACK + Handoff",
+      "status": "pending"
+    }
+  ],
+  "next": {
+    "command": "/gsd-progress --next",
+    "label": "Advance to the next step",
+    "reason": "Phase 4 of 4 · 75% · executing"
+  },
+  "updated_at": "2026-11-02T10:51:19.922Z"
+}

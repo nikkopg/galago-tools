@@ -65,7 +65,7 @@ milestone; stack-automation-layer core gaps are fixed there via `/gsd-quick`. Re
 
 ### Simulated workcell & handoff workflow (GAL-02)
 
-- [ ] **FLOW-01**: A script-mode GAL-02 protocol, kept as importable JSON beside its runbook, mints
+- [x] **FLOW-01**: A script-mode GAL-02 protocol, kept as importable JSON beside its runbook, mints
   per-run `step_key`s and runs STACK nest/hotel → F.A.S.T. deck, F.A.S.T. transfer, STACK back; nest
   triples are parameters
 - [x] **FLOW-02**: A fully Galago-simulated workcell run of GAL-02 completes all three steps
@@ -135,7 +135,7 @@ milestone; stack-automation-layer core gaps are fixed there via `/gsd-quick`. Re
 | XFR-06 | Phase 5 | Complete |
 | ACK-01 | Phase 5 | Complete |
 | ACK-02 | Phase 5 | Complete |
-| FLOW-01 | Phase 6 | Pending |
+| FLOW-01 | Phase 6 | Complete |
 | FLOW-02 | Phase 6 | Complete |
 | FLOW-03 | Phase 6 | Complete |
 | FLOW-04 | Phase 6 | Complete |

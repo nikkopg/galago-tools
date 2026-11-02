@@ -2,19 +2,19 @@
 gsd_state_version: "1.0"
 milestone: v2
 milestone_name: STACK Tool & STACK↔F.A.S.T. Handoff
-current_phase: 7
+current_phase: 07
 current_phase_name: Deploy & Supervised Live STACK + Handoff
 status: executing
-stopped_at: Phase 7 context gathered
-last_updated: "2026-11-02T10:11:56.560Z"
+stopped_at: Completed 07-01-PLAN.md
+last_updated: "2026-11-02T10:51:53.630Z"
 last_activity: 2026-11-02
-last_activity_desc: Phase 06 complete, transitioned to Phase 7
-state_head: 72294d38f07ad2d62f62ed92f98c7b4f7d080dbc
+last_activity_desc: Phase 07 execution started
+state_head: 4ca4112e8405b23ad2eefe2114a26923791c50ea
 progress:
   total_phases: 4
   completed_phases: 3
   total_plans: 20
-  completed_plans: 16
+  completed_plans: 17
   percent: 75
 ---
 
@@ -27,14 +27,14 @@ See: .planning/PROJECT.md (updated 2026-11-02)
 **Core value:** An operator running an instrument step from Galago can always see what the instrument
 is doing and recover it themselves; no adapter code path pauses, resumes, aborts, cancels, retries or
 acknowledges on its own. For the STACK: a step never sends a second transfer.
-**Current focus:** Phase 7 — Deploy & Supervised Live STACK + Handoff
+**Current focus:** Phase 07 — Deploy & Supervised Live STACK + Handoff
 
 ## Current Position
 
-Phase: 7 (Deploy & Supervised Live STACK + Handoff) — READY TO EXECUTE
-Plan: Not started
+Phase: 07 (Deploy & Supervised Live STACK + Handoff) — EXECUTING
+Plan: 2 of 4
 Status: Ready to execute
-Last activity: 2026-11-02 — Phase 06 complete, transitioned to Phase 7
+Last activity: 2026-11-02 — Phase 07 execution started
 
 Progress: [████████░░] 75%
 
@@ -99,6 +99,7 @@ Progress: [████████░░] 75%
 | Phase 6 P02 | 20min | 2 tasks | 3 files |
 | Phase 06 P03 | 20min | 3 tasks | 1 files |
 | Phase 06 P04 | operator-delegated | 3 tasks | 1 files |
+| Phase 07 P01 | 29 min | 3 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -147,6 +148,9 @@ v2 roadmap-level decisions (2026-10-28, detail in PROJECT.md Key Decisions):
 - [Phase 6]: 06-02: DEP-02 gate is a read-only script with an exit code (testable on fixture trees); it printed DEP-02 OK on 2026-11-02 (galago-core a5fa75f), so Part 2 is unblocked at the gate
 - [Phase 06]: Row 2a-3 credits the simulated re-dispatch per D-07 only; no-second-transfer is carried by the offline fake-core test and Part 2b
 - [Phase 06]: 06-04: FLOW-04 no-second-POST is a plain PASS; manager submit counter calibrated (+1 on in leg) before the +0 re-send readings
+- [Phase 07]: [Phase 07]: 07-01 credential handling is presence-only (assignment-line count + 0600 mode), advisory warn: by default and blocking under GAL07_REQUIRE_STACK_ENV=1, which the runbook's Parts 2-3 set — D-05's detection signal is reused through the pinned core's own owner-lock helpers, not a re-implemented lock name
+- [Phase 07]: gate tests use GAL07_REQUIRE_ALL as the REQUIRE_ALL_ENV variant; gal02_harness's shared constant is not mutated, so GAL02_REQUIRE_ALL promote semantics stay intact — a skip survives as a skip otherwise; GAL07_REQUIRE_ALL=1 in verification runs turns it into a failure
+- [Phase 07]: [Phase 07]: 07-01 the live pre-flight gate reads the production API shapes (STACK store config nested at .config.stack, run list as a {count,data} envelope) so the real-host pre-deploy run BLOCKs on exactly the two known gaps: the service-venv core pin and the missing F.A.S.T. store entry — the plan's interfaces section assumed a flat config.host and a bare-array runs list; both were probed live against production :3010 during Task 2 verification
 
 ### Pending Todos
 
@@ -181,9 +185,9 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-02T09:15:29.964Z
-Stopped at: Phase 7 context gathered
-Resume file: .planning/phases/07-deploy-supervised-live-stack-handoff/07-CONTEXT.md
+Last session: 2026-11-02T10:51:37.519Z
+Stopped at: Completed 07-01-PLAN.md
+Resume file: None
 
 ## Operator Next Steps
 
