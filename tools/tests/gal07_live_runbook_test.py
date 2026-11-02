@@ -25,6 +25,34 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 RUNBOOK_PATH = REPO_ROOT / "docs" / "runbooks" / "gal-07-live-handoff.md"
 GATE_PATH = REPO_ROOT / "docs" / "runbooks" / "gal-07-live-check.sh"
 
+_HOST_CORE_VENV = Path.home() / "data" / "nikko" / ".venvs" / "galago-py310" / "bin" / "python"
+
+
+def _imports_pinned_core(python: str) -> bool:
+    """True when `python -c "import stack_automation_layer.owner_lock"` succeeds from the repo
+    root — the exact probe gate check 2 performs on the candidates below."""
+    try:
+        return subprocess.run(
+            [python, "-c", "import stack_automation_layer.owner_lock"],
+            cwd=REPO_ROOT, capture_output=True, timeout=30).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def _lock_probe_python() -> str:
+    """A python that can import the pinned core for the fixture's check-2 override.
+
+    sys.executable first (fastest, fully offline), then the host service venv the real gate
+    probes by default; falling back to sys.executable keeps the previous behavior when no
+    candidate imports the core, and the gate itself emits its own `missing:` line — a loud
+    environment gap, never a silent skip.
+    """
+    for candidate in (sys.executable, str(_HOST_CORE_VENV)):
+        if _imports_pinned_core(candidate):
+            return candidate
+    return sys.executable
+
+
 # Requirement-only environment skips (bash, importable core) fail instead of silently skipping
 # when the verification run wants a full proof.
 GAL07_REQUIRE_ALL = "GAL07_REQUIRE_ALL"
@@ -254,7 +282,7 @@ class TestLiveGate(unittest.TestCase):
             env = {
                 "STACK_HOST": LIVE_HOST,
                 "STACK_PORT": LIVE_PORT,
-                "GAL07_LOCK_PROBE_PYTHON": sys.executable,
+                "GAL07_LOCK_PROBE_PYTHON": _lock_probe_python(),
                 "STACK_MCP_LOCK_DIR": str(lock_dir),
                 "GALAGO_SERVICES_VENV": str(venv_dir),
                 "GAL07_STACK_ENV": str(stack_env),
@@ -437,11 +465,22 @@ class TestLiveGate(unittest.TestCase):
 
 def _lock_file_path(lock_dir: Path) -> Path:
     """The real lock path for the live endpoint, computed with the pinned core's own helpers so
-    the fixture cannot drift from what open_service acquires."""
-    from stack_automation_layer.owner_lock import endpoint_key, lock_path
-
-    computed: Path = lock_path(endpoint_key(LIVE_HOST, int(LIVE_PORT)), lock_dir)
-    return computed
+    the fixture cannot drift from what open_service acquires. Computed through the resolved
+    core-importable python (see _lock_probe_python) so the invariant does not depend on the
+    interpreter running pytest importing the core itself."""
+    script = (
+        "import json\n"
+        "from stack_automation_layer.owner_lock import endpoint_key, lock_path\n"
+        f"print(json.dumps(str(lock_path(endpoint_key({LIVE_HOST!r}, {int(LIVE_PORT)}), {str(lock_dir)!r}))))"
+    )
+    completed = subprocess.run(
+        [_lock_probe_python(), "-c", script],
+        cwd=REPO_ROOT, capture_output=True, timeout=60)
+    if completed.returncode != 0:
+        raise AssertionError(
+            f"cannot import the pinned core through {_lock_probe_python()} "
+            f"({_HOST_CORE_VENV} also rejected): {completed.stderr.decode()}")
+    return Path(json.loads(completed.stdout.decode()))
 
 
 class TestRunbookContent(unittest.TestCase):
