@@ -5,12 +5,13 @@
 # so that Part 2 of docs/runbooks/gal-02-handoff.md may start. Part 2 never works around DEP-02.
 #
 # READ-ONLY: this script writes no file, makes no network call and changes no git state. The only
-# git command it runs is `git rev-parse --short HEAD`, to print the galago-core revision.
+# git commands it runs are `git rev-parse --show-toplevel` and `git rev-parse --short HEAD`, to
+# print the galago-core revision (only when $GALAGO_CORE_DIR is itself a checkout root).
 #
 # Checks (every check runs; there is no `set -e`):
 #   1. a galago-core checkout exists (controller/ directory)
-#   2. ToolType.stack in controller/gen-interfaces/controller.ts
-#   3. generated controller/gen-interfaces/tools/grpc_interfaces/stack.ts
+#   2. ToolType.stack inside the ToolType enum of controller/gen-interfaces/controller.ts
+#   3. generated controller/gen-interfaces/tools/grpc_interfaces/stack.ts exporting Command_Transfer
 #   4. commandFields.stack has the `transfer` key itself (controller/components/tools/constants.ts);
 #      list_transfer_profiles / get_transfer_estimate do not count
 #   5. commandFields.stack does NOT expose acknowledge_failure (forbidden in any protocol)
@@ -30,10 +31,19 @@ GC="${GALAGO_CORE_DIR:-$GT/../galago-core}"
 
 failed=0
 
+# The revision is only reported when $GC is itself the root of a git checkout. A plain directory
+# that merely sits inside some other repository would otherwise print that repository's HEAD.
 head_sha="unknown"
 if [ -d "$GC" ]; then
-  head_sha="$(git -C "$GC" rev-parse --short HEAD 2>/dev/null)" || head_sha="unknown"
-  [ -n "$head_sha" ] || head_sha="unknown"
+  gc_real="$(cd "$GC" 2>/dev/null && pwd -P)"
+  gc_top="$(git -C "$GC" rev-parse --show-toplevel 2>/dev/null)"
+  if [ -n "$gc_top" ]; then
+    gc_top="$(cd "$gc_top" 2>/dev/null && pwd -P)"
+  fi
+  if [ -n "$gc_real" ] && [ "$gc_real" = "$gc_top" ]; then
+    head_sha="$(git -C "$GC" rev-parse --short HEAD 2>/dev/null)" || head_sha="unknown"
+    [ -n "$head_sha" ] || head_sha="unknown"
+  fi
 fi
 echo "galago-core: $GC"
 echo "galago-core HEAD: $head_sha"
@@ -50,14 +60,19 @@ if [ ! -d "$GC/controller" ]; then
   failed=1
 fi
 
-# 2. ToolType.stack
-if ! grep -qE '^[[:space:]]+stack = "stack",' "$CONTROLLER_TS" 2>/dev/null; then
+# 2. ToolType.stack, inside the `export enum ToolType {` block only (another enum or map with a
+# `stack = "stack",` line must not satisfy it)
+tooltype_block=""
+if [ -f "$CONTROLLER_TS" ]; then
+  tooltype_block="$(awk '/^export enum ToolType \{/ { f = 1; next } f && /^\}/ { exit } f' "$CONTROLLER_TS" 2>/dev/null)"
+fi
+if ! printf '%s\n' "$tooltype_block" | grep -qE '^[[:space:]]+stack = "stack",'; then
   echo "missing: ToolType.stack in controller/gen-interfaces/controller.ts"
   failed=1
 fi
 
-# 3. generated message file
-if [ ! -f "$STACK_TS" ]; then
+# 3. generated message file, exporting the Transfer command message (an empty or stale file fails)
+if [ ! -f "$STACK_TS" ] || ! grep -qE '^export (interface|const) Command_Transfer\b' "$STACK_TS" 2>/dev/null; then
   echo "missing: generated controller/gen-interfaces/tools/grpc_interfaces/stack.ts"
   failed=1
 fi

@@ -82,6 +82,8 @@ def _make_core_tree(
     ack: bool = False,
     proto: str = "same",
     stack_lines: Optional[list[str]] = None,
+    tooltype_outside_enum: bool = False,
+    stack_ts_text: str = "export interface Command_Transfer {\n  step_key: string;\n}\n",
 ) -> None:
     """Write a minimal galago-core tree under root. proto is "same", "differs" or "missing".
 
@@ -94,10 +96,12 @@ def _make_core_tree(
     if tooltype:
         controller_lines.append('  stack = "stack",')
     controller_lines.append("}")
+    if tooltype_outside_enum:
+        # Same line, wrong enum: must not satisfy the ToolType check.
+        controller_lines.extend(["export enum Other {", '  stack = "stack",', "}"])
     (gen / "controller.ts").write_text("\n".join(controller_lines) + "\n", encoding="utf-8")
     if stack_ts:
-        (gen / "tools" / "grpc_interfaces" / "stack.ts").write_text(
-            "export const x = 1;\n", encoding="utf-8")
+        (gen / "tools" / "grpc_interfaces" / "stack.ts").write_text(stack_ts_text, encoding="utf-8")
 
     components = root / "controller" / "components" / "tools"
     components.mkdir(parents=True)
@@ -260,6 +264,48 @@ class TestDep02Gate(unittest.TestCase):
         self.assertEqual(
             [x for x in out if x.startswith("missing:")],
             ["missing: commandFields.stack block in controller/components/tools/constants.ts"], out)
+
+    def test_dep02_gate_scopes_tooltype_to_its_own_enum(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _make_core_tree(Path(tmp), tooltype=False, tooltype_outside_enum=True)
+            completed = self._run(Path(tmp))
+        out = self._lines(completed)
+        self.assertEqual(completed.returncode, 1, completed.stdout)
+        self.assertEqual(
+            [x for x in out if x.startswith("missing:")],
+            ["missing: ToolType.stack in controller/gen-interfaces/controller.ts"], out)
+
+    def test_dep02_gate_requires_the_generated_stack_file_to_export_transfer(self) -> None:
+        for label, text in (("empty", ""), ("stale", "export const x = 1;\n")):
+            with self.subTest(case=label), tempfile.TemporaryDirectory() as tmp:
+                _make_core_tree(Path(tmp), stack_ts_text=text)
+                completed = self._run(Path(tmp))
+                out = self._lines(completed)
+                self.assertEqual(completed.returncode, 1, completed.stdout)
+                self.assertEqual(len([x for x in out if x.startswith("missing:")]), 1, out)
+
+    def test_dep02_gate_reports_a_revision_only_for_a_checkout_root(self) -> None:
+        if shutil.which("git") is None:
+            self.skipTest("git is required for the revision check")
+        git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid"]
+        with tempfile.TemporaryDirectory() as tmp:
+            outer = Path(tmp) / "outer"
+            outer.mkdir()
+            subprocess.run([*git, "init", "-q", str(outer)], check=True, capture_output=True)
+            subprocess.run(
+                [*git, "-C", str(outer), "commit", "-q", "--allow-empty", "-m", "x"],
+                check=True, capture_output=True)
+            head = subprocess.run(
+                ["git", "-C", str(outer), "rev-parse", "--short", "HEAD"],
+                check=True, capture_output=True, text=True).stdout.strip()
+            inner = outer / "galago-core"
+            inner.mkdir()
+            _make_core_tree(inner)
+            nested = self._lines(self._run(inner))
+            at_root = self._lines(self._run(outer))  # the repository root itself reports it
+        self.assertIn("galago-core HEAD: unknown", nested)
+        self.assertNotIn(f"galago-core HEAD: {head}", nested)
+        self.assertIn(f"galago-core HEAD: {head}", at_root)
 
     def test_dep02_gate_blocks_when_stack_fields_expose_acknowledge(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
