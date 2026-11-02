@@ -5,16 +5,16 @@ milestone_name: STACK Tool & STACK↔F.A.S.T. Handoff
 current_phase: 6
 current_phase_name: GAL-02 Workflow, Simulated Workcell & PAC-Simulator Run
 status: executing
-stopped_at: Phase 6 context gathered
-last_updated: "2026-11-02T03:19:06.449Z"
+stopped_at: Completed 06-01-PLAN.md
+last_updated: "2026-11-02T03:25:39.404Z"
 last_activity: 2026-10-30
 last_activity_desc: Phase 5 complete, transitioned to Phase 6
-state_head: 477b0ed077aa3c292edd599d3daa24fc567c9d9a
+state_head: 3062b06b6fae7ac05d90e29266c58c4077e94cf0
 progress:
   total_phases: 4
   completed_phases: 2
   total_plans: 16
-  completed_plans: 12
+  completed_plans: 13
   percent: 50
 ---
 
@@ -94,6 +94,7 @@ Progress: [█████░░░░░] 50%
 | Phase 05 P05 | 25min | 2 tasks | 2 files |
 | Phase 05 P06 | 40min | 3 tasks | 2 files |
 | Phase 5 P07 | 25 min | 2 tasks | 2 files |
+| Phase 06 P01 | 16 min | 3 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -137,6 +138,8 @@ v2 roadmap-level decisions (2026-10-28, detail in PROJECT.md Key Decisions):
 - [Phase 05]: 05-06: D-09 kept (user-confirmed): a ran re-attached after a restart is SUCCESS flagged reattachedAfterRestart; any non-ran outcome adds the arm-inspection clause plus the current latch clause
 - [Phase 05]: 05-06: re-attach loop is read-only (wait_transfer only), first slice exactly min(budget,300), clock read only after a timedOut slice
 - [Phase 5]: 05-07: never-resend proven behaviourally (12-scenario matrix, execute_transfer total 1 per key incl. restarts; released-outcome exception pinned at 2) with no adapter behaviour change; STK-05 re-proven on the real Transfer
+- [Phase 06]: Phase 6 plan 01: GAL-02 parameter vocabulary locked at 27 names (fast_step_ prefix, deck fields); script has no fallback values and throws on blank required input — Names become operator saved-run inputs and Phase 7 runbook vocabulary; defaults live only in parameters[].defaultValue so sim names cannot reach hardware silently
+- [Phase 06]: REPLAY_WINDOW_S is imported from tools.stack.ledger, not tools.stack.server — Constant is defined in ledger.py; adapter unchanged
 
 ### Pending Todos
 
@@ -170,9 +173,9 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-02T02:35:43.539Z
-Stopped at: Phase 6 context gathered
-Resume file: .planning/phases/06-gal-02-workflow-simulated-workcell-pac-simulator-run/06-CONTEXT.md
+Last session: 2026-11-02T03:25:39.357Z
+Stopped at: Completed 06-01-PLAN.md
+Resume file: None
 
 ## Operator Next Steps
 
