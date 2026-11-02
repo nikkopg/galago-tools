@@ -159,6 +159,46 @@ Not in this phase:
   - The Part 2 plans are human-action checkpoints. The executor never starts Docker, the sim or the
     run itself (SAL runbook A.0/A.10 operator rule).
 
+### Amendments after research (2026-11-02, `--auto`; see 06-RESEARCH.md Pitfalls 1-6). Flag for user review.
+These amend the text above. Where they conflict with it, these win.
+- **D-13 (amends D-04): F.A.S.T. parameter prefix.**
+  - Every F.A.S.T. parameter is named `fast_step_<proto field>`, e.g. `fast_step_source_deck` (int as a
+    string).
+  - Why: STACK's `source_deck` (string) collides with the F.A.S.T. proto's `source_deck` (int32), both
+    in the flat `params` and in galago-core's per-parameter workcell variables.
+  - The STACK names in D-04 stay as written.
+  - — **Reversibility:** costly — parameter names are operator saved-run inputs.
+- **D-14 (amends D-04): deck fields.**
+  - Each STACK triple also carries a deck: `source_deck` and `fast_deck` (STACK strings).
+  - Sim defaults: source `sim-nest-a`/`sim-deck-a`/`sim-A1`, F.A.S.T.-side `sim-nest-b`/`sim-deck-b`/`sim-B1`.
+  - Transfer profiles default to blank, and a blank optional key is **omitted** from the emitted params,
+    never sent as `""`.
+  - Numbers are emitted as real numbers.
+- **D-15 (amends D-09/D-11): PAC sim port.**
+  - Port 5005 is already taken on this host by an unrelated container (`scoringservice`).
+  - The sim is published on an operator-chosen loopback port (`STACK_SIM_PORT`), and the STACK tool is
+    configured with that port.
+  - The runbook preflight checks the port is free and is never 5006, the Device master API.
+- **D-16 (amends D-02, D-08, D-12):**
+  - **(a) Import path.** galago-core's Protocols-page Import button drops `mode`/`scriptContent`
+    (`ProtocolPageComponent.tsx:137-146`). The runbook imports via `POST /api/protocols` (the `.protocol`
+    object of the JSON). It then checks that Mode is Script and Preview shows 4 rows: the note plus 3
+    steps. The import defect itself is a galago-core follow-up, out of scope here.
+  - **(b) Tool instances.** FLOW-02 (STACK simulated) and FLOW-04 (STACK real against the sim) use
+    **separate tool-server processes and separate Galago tool instances**, because sim -> real Configure
+    on one process never connects (`base_server.py:98-101`).
+  - **(c) Node lookup.** The D-08 harness finds `node` via PATH, then a `NODE` env override, then
+    `~/.nvm/versions/node/*/bin/node`, and skips with a stated reason only if none exists. Phase
+    verification must run it with node found and 0 skipped.
+  - **(d) "No second POST" evidence.** The PAC sim manager has no list-tasks endpoint, so the
+    task-count evidence is calibrated first: the chosen counter must move by +1 on the first leg before
+    a +0 on the re-send is trusted. Fallback evidence:
+    - the replay reply carries the same guid, `replayed: true` and `ledgerState`;
+    - the reply is immediate and the robot stays idle;
+    - the ledger holds exactly one record for the key.
+  - **(e) Dev Galago only.** Part 2 uses a separate dev galago-core instance, never the production
+    `galago-web` (:3010) or its DB.
+
 ### Claude's Discretion
 - The runbook's internal layout and wording, and the exact F.A.S.T. parameter defaults (taken from the
   v1 F.A.S.T. runbook).
