@@ -556,25 +556,35 @@ curl -sf http://localhost:3010/api/tools | jq -e '[.[] | .type] | contains(["sta
 | A5 | `fast_status.py` GetStatus works identically against a stack tool server (same ToolDriver service, no fast-specific fields) | Standard Stack | If wrong, only the health check breaks — Configure/read results from the tool page remain authoritative; a thin `stack_status.py` alias is a trivial fallback |
 | A6 | The F.A.S.T. tool can be (re-)added to the production workcell with the v1 config (host `10.150.1.170`, port 5003, `expected_tray_id` 90) by the operator at LIVE-10 prep | Deploy Facts #3 / LIVE-10 | LIVE-10 blocked until the store holds both tools — which is exactly what D-12 asserts, so the failure mode is a clean BLOCKED, not a hazard |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
-1. **How will the pinned git+https install authenticate on forb01? (OQ-1 — blocks Step 1)**
+All three questions raised during research are dispositioned below; none remains open.
+
+1. **How will the pinned git+https install authenticate on forb01? (OQ-1 — blocks Step 1) — (RESOLVED)**
    - What we know: pin URL + auth failure + zero stored gitlab credentials + all prior installs were
      local-clone (all [VERIFIED] this session). D-04 says "not a local-clone install".
    - What's unclear: whether the user will add working GitLab credentials or explicitly waive D-04.
-   - Recommendation: plan a `checkpoint:human-verify` at Step 1 with a dry-run install probe; both
-     outcomes are one user decision recorded in the findings log.
+   - **Disposition (RESOLVED):** carried as plan 07-02 Task 1 — a blocking user checkpoint before
+     deploy Step 1, with a read-only dry-run install probe first: the user either adds working
+     GitLab credentials (honoring D-04 exactly) or explicitly waives D-04 for a verified
+     local-clone install; the choice is recorded verbatim in findings row 1a-1 with a UTC
+     timestamp, and nothing is installed until the separate typed-go gate in 07-02 Task 2.
 2. **Where does stack-mcp run, and do lock/state dirs need explicit `STACK_MCP_LOCK_DIR` /
-   `STACK_STATE_DIR` values for LIVE-08's parity clause? (OQ-2)**
+   `STACK_STATE_DIR` values for LIVE-08's parity clause? (OQ-2) — (RESOLVED)**
    - What we know: defaults on forb01 (service user) are `/tmp/stack-automation-layer-locks` and
      `~/.local/state/stack-automation-layer`; no stack-mcp installation/config found on forb01.
    - What's unclear: the user's stack-mcp setup (host, user, env) — only the user knows.
-   - Recommendation: runbook documents both front ends' resolved dirs and asks the user to confirm
-     parity (or that stack-mcp is simply closed) as a pre-flight checklist item; the lock probe on
-     the galago side remains the hard gate either way.
-3. **Configuration order for the D-12 pre-store check** (discretion): recommend FAST first, then
-   STACK (STACK last so its real-mode Configure is the final action before runs) — planner decides
-   and fixes it in the runbook.
+   - **Disposition (RESOLVED):** the lock-probe pre-flight (D-05, plan 07-01) is the hard gate
+     either way — the session refuses if any holder owns the `10.150.1.125:5005` lock; the runbook
+     documents both front ends' resolved default dirs and asks the user to confirm stack-mcp is
+     closed as a pre-flight checklist item. No explicit `STACK_MCP_LOCK_DIR`/`STACK_STATE_DIR`
+     values are introduced.
+3. **Configuration order for the D-12 pre-store check (OQ-3, planner discretion) — (RESOLVED)**
+   - What we know: planner discretion per CONTEXT.md; the recommendation was FAST first, then
+     STACK.
+   - **Disposition (RESOLVED):** planner decision — FAST is created and Configured first, then the
+     STACK real-mode Configure LAST so the final store action before any run is the STACK
+     Configure; pinned in 07-01 Task 3 (runbook Part 1 Step 2b) and executed by 07-02 Task 3.
 
 ## Environment Availability
 
