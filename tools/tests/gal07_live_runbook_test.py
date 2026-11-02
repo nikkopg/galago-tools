@@ -1,10 +1,13 @@
 """GAL-07 live runbook tests (LIVE-08): the pre-flight gate script and the runbook text.
 
 TestLiveGate runs docs/runbooks/gal-07-live-check.sh against a fixture HTTP server, fixture
-trees and stubbed helpers, so the gate is proven unable to pass falsely. TestRunbookContent
-pins the runbook text.
+trees and stubbed helpers, so the gate is proven unable to pass falsely (one missing piece at a
+time, plus the complete set passing, the read-only proof and the fail-closed degenerate inputs).
+TestRunbookContent pins the runbook text.
 """
 import contextlib
+import fcntl
+import hashlib
 import json
 import os
 import re
@@ -16,7 +19,7 @@ import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Iterator
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RUNBOOK_PATH = REPO_ROOT / "docs" / "runbooks" / "gal-07-live-handoff.md"
@@ -64,6 +67,33 @@ def skip_or_fail(reason: str) -> None:
     raise unittest.SkipTest(reason)
 
 
+def _tools_json(stored_stack_host: str, fast_present: bool = True) -> str:
+    """The production-store shape as probed 2026-11-02: a stack tool entry whose config carries
+    the snake_case host/port/ledger_dir keys, plus (for the complete fixture) a fast tool."""
+    tools: list[dict[str, Any]] = [
+        {
+            "id": 11,
+            "type": "stack",
+            "name": "Stack",
+            "port": "40012",
+            "config": {"host": stored_stack_host, "port": "5005", "ledger_dir": ""},
+        },
+    ]
+    if fast_present:
+        tools.append({"id": 12, "type": "fast", "name": "Fast", "port": "40001", "config": {}})
+    return json.dumps(tools)
+
+
+def _snapshot(root: Path) -> dict[str, tuple[str, int]]:
+    """Relative path -> (sha256, mtime_ns) for every file under root."""
+    result: dict[str, tuple[str, int]] = {}
+    for path in sorted(root.rglob("*")):
+        if path.is_file():
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            result[str(path.relative_to(root))] = (digest, path.stat().st_mtime_ns)
+    return result
+
+
 def _fixture_handler(routes: dict[str, tuple[int, str]]) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
@@ -92,9 +122,8 @@ class TestLiveGate(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         if os.name == "nt" or shutil.which("bash") is None:
-            skip_or_fail(
-                "the GAL-07 pre-flight is a POSIX shell script for the galago-tools Linux host; "
-                "bash is required")
+            skip_or_fail("the GAL-07 pre-flight is a POSIX shell script for the galago-tools "
+                         "Linux host; bash is required")
 
     def _run(self, extra_env: dict[str, str]) -> subprocess.CompletedProcess[str]:
         env = {**os.environ, **extra_env}
@@ -117,41 +146,268 @@ class TestLiveGate(unittest.TestCase):
             thread.join()
 
     @contextlib.contextmanager
-    def _identity_env(
-        self, app_json: str = MANAGER_APPLICATION_JSON
+    def _complete_env(
+        self,
+        *,
+        application_json: str = MANAGER_APPLICATION_JSON,
+        tools_json: str = _tools_json(LIVE_HOST),
+        runs_json: str = "[]",
+        core_commit: str = PINNED_CORE_SHA,
+        direct_url_missing: bool = False,
+        dep02_ok: bool = True,
+        dep02_missing: bool = False,
+        docker_ok: bool = True,
+        docker_empty_output: bool = False,
+        with_holder: bool = False,
+        credentials_file: bool = True,
+        credentials_mode: int = 0o600,
+        credentials_assignments: int = 1,
+        require_stack_env: bool = False,
+        extra_env: dict[str, str] | None = None,
     ) -> Iterator[dict[str, str]]:
-        """A fixture HTTP manager plus a lock dir holding no lock file, so check 2 is free and
-        check 1 (the manager identity) is the only variable."""
-        with tempfile.TemporaryDirectory() as lock_dir, self._fixture_web({
-            "/api/general/application": (200, app_json),
-        }) as mgr_url:
-            yield {
-                "STACK_MANAGER_URL": mgr_url,
+        """Every check's target is a fixture, so one gate run in the sandbox either passes or
+        fails for one named reason. Set a single piece wrong to prove its own refusal line."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lock_dir = root / "locks"
+            lock_dir.mkdir()
+            venv_dir = root / "services-venv"
+            dist_info = (
+                venv_dir / "lib" / "python3.10" / "site-packages"
+                / "stack_automation_layer-1.0.0.dist-info")
+            dist_info.mkdir(parents=True)
+            if not direct_url_missing:
+                (dist_info / "direct_url.json").write_text(
+                    json.dumps({"dir_info": {}, "url": "https://fixture.invalid/core",
+                                "vcs_info": {"vcs": "git", "commit_id": core_commit}}),
+                    encoding="utf-8")
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            if not dep02_missing:
+                dep02 = bin_dir / "dep02-stub.sh"
+                dep02.write_text(
+                    'echo "DEP-02 OK"\nexit 0\n' if dep02_ok else
+                    'echo "still missing the DEP-02 build pieces"\nexit 1\n',
+                    encoding="utf-8")
+                dep02.chmod(0o755)
+            if docker_ok and not docker_empty_output:
+                docker_body = "echo /app/gen-interfaces/tools/grpc_interfaces/stack.ts\nexit 0\n"
+            elif docker_empty_output:
+                docker_body = "exit 0\n"
+            else:
+                docker_body = 'echo "cannot reach the container" >&2\nexit 1\n'
+            docker_stub = bin_dir / "docker-stub"
+            docker_stub.write_text(docker_body, encoding="utf-8")
+            docker_stub.chmod(0o755)
+            stack_env = root / "stack.env"
+            if credentials_file:
+                stack_env.write_text("STACK_USER=operator-fixture\n" * credentials_assignments,
+                                     encoding="utf-8")
+                stack_env.chmod(credentials_mode)
+            holder_fd: int | None = None
+            if with_holder:
+                # The probe cannot see content without a live holder: the test process holds the
+                # non-blocking flock and the 256-byte holder record for the whole run below.
+                path = _lock_file_path(lock_dir)
+                fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                record = json.dumps(
+                    {"owner": "mcp", "pid": os.getpid(), "endpoint": f"{LIVE_HOST}:{LIVE_PORT}"})
+                data = record.ljust(256).encode("utf-8")
+                os.lseek(fd, 0, os.SEEK_SET)
+                os.write(fd, data)
+                holder_fd = fd
+            env = {
                 "STACK_HOST": LIVE_HOST,
                 "STACK_PORT": LIVE_PORT,
                 "GAL07_LOCK_PROBE_PYTHON": sys.executable,
-                "STACK_MCP_LOCK_DIR": lock_dir,
+                "STACK_MCP_LOCK_DIR": str(lock_dir),
+                "GALAGO_SERVICES_VENV": str(venv_dir),
+                "GAL07_STACK_ENV": str(stack_env),
+                "GAL07_DOCKER": str(bin_dir / "docker-stub"),
             }
+            if not dep02_missing:
+                env["GAL07_DEP02_GATE"] = str(bin_dir / "dep02-stub.sh")
+            else:
+                env["GAL07_DEP02_GATE"] = str(root / "absent" / "dep02-check.sh")
+            if require_stack_env:
+                env["GAL07_REQUIRE_STACK_ENV"] = "1"
+            if extra_env:
+                env.update(extra_env)
+            try:
+                with self._fixture_web({
+                    "/api/general/application": (200, application_json),
+                    "/api/tools": (200, tools_json),
+                    "/api/runs": (200, runs_json),
+                }) as url:
+                    env["STACK_MANAGER_URL"] = url
+                    env["GALAGO_WEB_URL"] = url
+                    self._current_root: Path | None = root
+                    yield env
+            finally:
+                if holder_fd is not None:
+                    fcntl.flock(holder_fd, fcntl.LOCK_UN)
+                    os.close(holder_fd)
+            self._current_root = None
 
     def test_gate_refuses_a_wrong_manager_identity(self) -> None:
-        with self._identity_env(
-            json.dumps({"productVersion": "0.12.0-beta.1+1157", "productName": "Other"})
+        with self._complete_env(
+            application_json=json.dumps(
+                {"productVersion": "0.12.0-beta.1+1157", "productName": "Other"})
         ) as env:
             completed = self._run(env)
         lines = self._lines(completed)
         self.assertEqual(completed.returncode, 1, completed.stdout)
         self.assertTrue(lines[-1].startswith("BLOCKED:"), lines)
-        self.assertGreaterEqual(
-            len([x for x in lines if x.startswith("missing:")]), 1, lines)
+        self.assertIn("STACK manager identity", "\n".join(lines), lines)
+        self.assertEqual(len([x for x in lines if x.startswith("missing:")]), 1, lines)
 
     def test_gate_accepts_the_good_manager_identity(self) -> None:
-        with self._identity_env() as env:
+        with self._complete_env() as env:
             completed = self._run(env)
         lines = self._lines(completed)
         self.assertEqual(completed.returncode, 0, completed.stdout)
         self.assertEqual(lines[-1], "PREFLIGHT OK")
-        self.assertIsNone(
-            re.search(r"missing:.*manager identity", "\n".join(lines)), lines)
+        self.assertEqual([x for x in lines if x.startswith(("missing:", "forbidden:"))], [])
+        self.assertEqual([x for x in lines if x.startswith("warn:")], [], lines)
+        self.assertIsNone(re.search(r"missing:.*manager identity", "\n".join(lines)), lines)
+
+    def test_gate_accepts_the_production_store_and_runs_shapes(self) -> None:
+        """The production galago-web store nests the STACK config under `.config.stack`, and the
+        run list is a {"count": n, "data": [...]} envelope; both must satisfy the checks."""
+        nested_tools = json.dumps([
+            {"id": 11, "type": "stack", "name": "Stack", "port": 40012,
+             "config": {"stack": {"host": LIVE_HOST, "port": "5005", "ledger_dir": ""}}},
+            {"id": 12, "type": "fast", "name": "Fast", "port": 40001, "config": {}},
+        ])
+        environments_runs = json.dumps({"count": 0, "data": []})
+        with self._complete_env(tools_json=nested_tools, runs_json=environments_runs) as env:
+            completed = self._run(env)
+        lines = self._lines(completed)
+        self.assertEqual(completed.returncode, 0, completed.stdout)
+        self.assertEqual(lines[-1], "PREFLIGHT OK")
+        self.assertEqual([x for x in lines if x.startswith(("missing:", "forbidden:"))], [], lines)
+
+    def test_gate_blocks_each_single_removed_piece(self) -> None:
+        cases: dict[str, dict[str, Any]] = {
+            "identity": {
+                "application_json": json.dumps(
+                    {"productVersion": "0.12.0-beta.1+1157", "productName": "Other"}),
+                "needle": "STACK manager identity"},
+            "held_lock": {
+                "with_holder": True,
+                "needle": "only one front end may hold it",
+                "also": "mcp"},
+            "venv_pin": {"core_commit": "0" * 40, "needle": "stack_automation_layer pinned"},
+            "dep02_stub_fails": {"dep02_ok": False, "needle": "DEP-02 gate re-run"},
+            "dep02_missing": {"dep02_missing": True, "needle": "DEP-02 gate re-run"},
+            "web_bundle": {"docker_ok": False, "needle": "Command_Transfer"},
+            "docker_empty_output": {"docker_empty_output": True, "needle": "Command_Transfer"},
+            "store_no_fast": {"tools_json": _tools_json(LIVE_HOST, fast_present=False),
+                              "needle": "type fast"},
+            "stored_host": {"tools_json": _tools_json("stack-server"),
+                            "needle": "byte-exactly", "also": "different lock/state key"},
+            "running_run": {"runs_json": json.dumps([{"state": "RUNNING"}]),
+                            "needle": "state RUNNING"},
+            "running_run_envelope": {
+                "runs_json": json.dumps({"count": 1, "data": [{"state": "RUNNING"}]}),
+                "needle": "state RUNNING"},
+            "creds_required": {"credentials_file": False, "require_stack_env": True,
+                               "needle": "stack credentials env file"},
+        }
+        for piece, case in cases.items():
+            with self.subTest(piece=piece):
+                kwargs = {k: v for k, v in case.items() if k not in ("needle", "also")}
+                with self._complete_env(**kwargs) as env:
+                    completed = self._run(env)
+                lines = self._lines(completed)
+                self.assertEqual(completed.returncode, 1, (piece, completed.stdout))
+                self.assertTrue(lines[-1].startswith("BLOCKED:"), (piece, lines[-1]))
+                joined = "\n".join(lines)
+                self.assertIn(case["needle"], joined, (piece, joined))
+                if "also" in case:
+                    self.assertIn(case["also"], joined, (piece, joined))
+                self.assertGreaterEqual(
+                    len([x for x in lines if x.startswith(("missing:", "forbidden:"))]),
+                    1, (piece, lines))
+
+    def test_gate_fails_closed_on_degenerate_inputs(self) -> None:
+        cases: dict[str, dict[str, Any]] = {
+            "empty_application": {"application_json": "", "needle": "STACK manager identity"},
+            "non_json_application": {"application_json": "<html>gateway</html>",
+                                     "needle": "STACK manager identity"},
+            "empty_tools": {"tools_json": "", "needle": "JSON tool array"},
+            "non_json_tools": {"tools_json": "gateway error", "needle": "JSON tool array"},
+            "empty_runs": {"runs_json": "", "needle": "parsable runs list"},
+            "non_json_runs": {"runs_json": "gateway error", "needle": "parsable runs list"},
+            "runs_unexpected_envelope": {
+                "runs_json": json.dumps({"count": 0}), "needle": "parsable runs list"},
+            "missing_direct_url": {"direct_url_missing": True,
+                                   "needle": "stack_automation_layer pinned"},
+        }
+        for label, case in cases.items():
+            with self.subTest(case=label):
+                kwargs = {k: v for k, v in case.items() if k != "needle"}
+                with self._complete_env(**kwargs) as env:  # type: ignore[arg-type]
+                    completed = self._run(env)
+                lines = self._lines(completed)
+                self.assertEqual(completed.returncode, 1, (label, completed.stdout))
+                self.assertTrue(lines[-1].startswith("BLOCKED:"), (label, lines[-1]))
+                self.assertIn(case["needle"], "\n".join(lines), (label, lines))
+
+    def test_gate_credential_env_is_advisory_when_unrequired(self) -> None:
+        cases: dict[str, dict[str, Any]] = {
+            "missing file": {"credentials_file": False},
+            "no assignment line": {"credentials_assignments": 0},
+            "too-open mode": {"credentials_mode": 0o644},
+        }
+        for label, kwargs in cases.items():
+            with self.subTest(case=label), self._complete_env(**kwargs) as env:
+                completed = self._run(env)
+            lines = self._lines(completed)
+            self.assertEqual(completed.returncode, 0, (label, completed.stdout))
+            self.assertEqual(lines[-1], "PREFLIGHT OK")
+            self.assertEqual(len([x for x in lines if x.startswith("warn:")]), 1, (label, lines))
+            self.assertEqual([x for x in lines if x.startswith("missing:")], [], (label, lines))
+
+    def test_gate_credential_env_blocks_when_required(self) -> None:
+        cases: dict[str, dict[str, Any]] = {
+            "missing file": {"credentials_file": False},
+            "no assignment line": {"credentials_assignments": 0},
+            "too-open mode": {"credentials_mode": 0o644},
+        }
+        for label, kwargs in cases.items():
+            with self.subTest(case=label), self._complete_env(
+                **kwargs, require_stack_env=True,
+            ) as env:
+                completed = self._run(env)
+            lines = self._lines(completed)
+            self.assertEqual(completed.returncode, 1, (label, completed.stdout))
+            self.assertTrue(lines[-1].startswith("BLOCKED:"), (label, lines[-1]))
+            self.assertGreaterEqual(
+                len([x for x in lines if x.startswith("missing:")]), 1, (label, lines))
+
+    def test_gate_is_read_only(self) -> None:
+        with self._complete_env() as env:
+            root = self._current_root
+            assert root is not None
+            before = _snapshot(root)
+            first = self._run(env)
+            second = self._run(env)
+            after = _snapshot(root)
+        for completed in (first, second):
+            self.assertEqual(completed.returncode, 0, completed.stdout)
+            self.assertEqual(self._lines(completed)[-1], "PREFLIGHT OK")
+        self.assertEqual(before, after)
+
+
+def _lock_file_path(lock_dir: Path) -> Path:
+    """The real lock path for the live endpoint, computed with the pinned core's own helpers so
+    the fixture cannot drift from what open_service acquires."""
+    from stack_automation_layer.owner_lock import endpoint_key, lock_path
+
+    computed: Path = lock_path(endpoint_key(LIVE_HOST, int(LIVE_PORT)), lock_dir)
+    return computed
 
 
 class TestRunbookContent(unittest.TestCase):
