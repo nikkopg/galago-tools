@@ -189,13 +189,13 @@ the offline half of FLOW-03) can start before DEP-02 lands; FLOW-02..04 need it.
      (runbook Part A preconditions, sim account credentials, sim lab names) and the F.A.S.T. simulated
      completes, including a forced re-dispatch that sends no second POST; it never targets
      `10.150.1.125` / `stack-server`.
-**Plans**: 1/4 plans executed
+**Plans**: 2/4 plans executed
 Plans:
 **Wave 1**
 - [x] 06-01-PLAN.md — Protocol JSON (FLOW-01), node sandbox harness tests, offline re-dispatch proof on the fake core (FLOW-03 offline)
 
 **Wave 2** *(blocked on Wave 1 completion)*
-- [ ] 06-02-PLAN.md — GAL-02 runbook beside the protocol, read-only DEP-02 gate script, runbook and gate tests
+- [x] 06-02-PLAN.md — GAL-02 runbook beside the protocol, read-only DEP-02 gate script, runbook and gate tests
 
 **Wave 3** *(blocked on Wave 2 completion)*
 - [ ] 06-03-PLAN.md — Part 2a, operator-run, gated on DEP-02: Galago-simulated workcell run (FLOW-02) and the simulated re-dispatch (FLOW-03 sim half, D-07 wording)
@@ -255,7 +255,7 @@ Phases execute in numeric order: 4 → 5 → 6 → 7 (DEP-01 is met, so Phase 5 
 |-------|-----------|----------------|--------|-----------|
 | 4. STACK Tool Registration, Reads & Estimate | v2 | 5/5 | Complete    | 2026-10-29 |
 | 5. F5-safe Transfer & Operator Acknowledge | v2 | 7/7 | Complete    | 2026-10-30 |
-| 6. GAL-02 Workflow, Simulated Workcell & PAC-Simulator Run | v2 | 1/4 | In Progress | - |
+| 6. GAL-02 Workflow, Simulated Workcell & PAC-Simulator Run | v2 | 2/4 | In Progress | - |
 | 7. Deploy & Supervised Live STACK + Handoff | v2 | 0/TBD | Not started | - |
 
 ## Backlog
