@@ -5,11 +5,14 @@ directory, so the gate is proven unable to pass falsely. TestRunbookContent pins
 """
 import hashlib
 import os
+import re
 import shutil
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+
+from tools.tests.gal02_harness import load_export
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RUNBOOK_PATH = REPO_ROOT / "docs" / "runbooks" / "gal-02-handoff.md"
@@ -25,6 +28,48 @@ D07_STATEMENT = (
 )
 
 _H1 = "# GAL-02 handoff runbook: STACK -> F.A.S.T. -> STACK (simulation only)"
+
+REQUIRED_HEADINGS = [
+    _H1,
+    "## Safety rules",
+    "## What each part proves",
+    "## The protocol",
+    "## Part 1: offline proof (any session)",
+    "## Part 2 gate: DEP-02",
+    "## Part 2 shared setup (operator)",
+    "## Part 2a: Galago-simulated workcell run (FLOW-02, FLOW-03 simulated half)",
+    "## Part 2b: STACK real mode against the PAC simulator (FLOW-04)",
+    "### Hardware-refusal preflight",
+    "### Forced re-dispatch and the no-second-POST evidence",
+    "## If something goes wrong",
+    "## Known limitations",
+    "## Teardown (operator only; the executor never runs it)",
+    "## Upstream follow-ups",
+    "## Findings log",
+]
+
+FINDINGS_ROWS = ["G0", "2a-1", "2a-2", "2a-3", "2b-0", "2b-1", "2b-2", "2b-3", "2b-4", "2b-5"]
+
+REQUIRED_PHRASES = [
+    "jq .protocol docs/runbooks/gal-02-handoff.protocol.json",
+    "/api/protocols",
+    "galago-gal06",
+    "STACK-SIM",
+    "STACK-PACSIM",
+    "STACK_SIM_PORT",
+    "GetRobotStates",
+    "sim-arm-1",
+    "Stack manager",
+    "10.150.1.125",
+    "stack-server",
+    "REPLAY_WINDOW_S",
+    "replayed",
+    "step key already completed",
+    "numberOfRuns",
+    "/home/formulatrix/.local/state/galago-tools/stack-sim",
+    "scripts/sim_up.sh down",
+    "ProtocolPageComponent.tsx",
+]
 
 
 def _make_core_tree(
@@ -203,6 +248,39 @@ class TestRunbookContent(unittest.TestCase):
         for phrase in ("bash docs/runbooks/gal-02-dep02-check.sh", "DEP-02 OK", "BLOCKED:"):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, self.text)
+
+    def test_runbook_has_every_section_heading(self) -> None:
+        positions = []
+        for heading in REQUIRED_HEADINGS:
+            with self.subTest(heading=heading):
+                self.assertIn(heading, self.lines)
+                positions.append(self.lines.index(heading))
+        self.assertEqual(positions, sorted(positions), "headings are out of order")
+
+    def test_runbook_names_every_protocol_parameter(self) -> None:
+        names = [p["name"] for p in load_export()["protocol"]["parameters"]]
+        self.assertEqual(len(names), 27)
+        for name in names:
+            with self.subTest(parameter=name):
+                self.assertIn(f"`{name}`", self.text)
+
+    def test_runbook_carries_the_required_procedure_phrases(self) -> None:
+        for phrase in REQUIRED_PHRASES:
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, self.text)
+
+    def test_runbook_findings_log_has_every_row(self) -> None:
+        start = self.lines.index("## Findings log")
+        section = self.lines[start:]
+        for row_id in FINDINGS_ROWS:
+            with self.subTest(row=row_id):
+                self.assertTrue(
+                    any(line.startswith(f"| {row_id} |") for line in section),
+                    f"no Findings row {row_id}")
+
+    def test_runbook_holds_no_credential_values(self) -> None:
+        self.assertIsNone(re.search(r"STACK_(USER|PASSWORD)=[^\s$<\"']", self.text))
+        self.assertIsNone(re.search(r"Bearer [A-Za-z0-9._-]{8,}", self.text))
 
 
 if __name__ == "__main__":
