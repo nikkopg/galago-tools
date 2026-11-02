@@ -401,6 +401,29 @@ class TestGal02Protocol(unittest.TestCase):
                 message[field] = raw
         return list(_check_args(ParseDict(message, fast_pb2.Command.Transfer())))
 
+    def test_throws_on_a_degenerate_handoff_before_any_command(self) -> None:
+        # WR-02: same tool on both sides, or the same device/deck/nest on both sides.
+        with self.subTest(case="same tool"):
+            result = self._run(stack_tool="TOOL-X", fast_tool="TOOL-X")
+            self.assertFalse(result.ok)
+            self.assertIn("fast_tool", result.error)
+            self.assertEqual(result.calls, [])
+        same = {
+            "fast_device": self.defaults["source_device"],
+            "fast_deck": self.defaults["source_deck"],
+            "fast_nest": self.defaults["source_nest"],
+        }
+        with self.subTest(case="same location"):
+            result = self._run(**same)
+            self.assertFalse(result.ok)
+            self.assertIn("fast_nest", result.error)
+            self.assertEqual(result.calls, [])
+        for part in ("fast_device", "fast_deck", "fast_nest"):
+            with self.subTest(case="one part differs", part=part):
+                result = self._run(**{**same, part: "elsewhere"})
+                self.assertTrue(result.ok, result.error)
+                self.assertEqual(len(result.calls), 4)
+
     def test_script_style_uses_only_the_documented_sandbox_api(self) -> None:
         script = self.script
         self.assertIsNone(re.search(r"\b(let|const)\b", script))
