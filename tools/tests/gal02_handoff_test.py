@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Optional
 from unittest.mock import patch
 
+from google.protobuf.descriptor import FieldDescriptor
 from google.protobuf.json_format import ParseDict
 
 from tools.grpc_interfaces import fast_pb2, stack_pb2
@@ -326,6 +327,79 @@ class TestGal02Protocol(unittest.TestCase):
             self.assertFalse(result.ok)
             self.assertIn("stack_timeout_s", result.error)
             self.assertEqual(result.calls, [])
+
+    def test_fast_step_invalid_values_throw_at_queue_time_with_zero_commands(self) -> None:
+        # WR-01: each of these is rejected by tools/fast/server.py _check_args, so it must throw
+        # before the STACK in-leg is queued, not come back as INVALID_ARGUMENTS after the plate moved.
+        # The last element says whether the value can be built into a fast_pb2 message to cross-check.
+        invalid: list[tuple[str, str, bool]] = []
+        for name in ("source_deck", "dest_deck"):
+            invalid += [(f"fast_step_{name}", v, True) for v in ("0", "-1", "7", "99")]
+            invalid += [(f"fast_step_{name}", "2147483648", False)]
+        for name in ("source_plate_id", "dest_plate_id", "source_start_col", "dest_start_col",
+                     "num_rows", "num_cols"):
+            invalid += [(f"fast_step_{name}", v, True) for v in ("0", "-3")]
+            invalid += [(f"fast_step_{name}", v, False) for v in ("2147483648", "1e12", "Infinity")]
+        for name in ("source_start_row", "dest_start_row"):
+            invalid += [(f"fast_step_{name}", v, True) for v in ("ABC", "1", "A1", "A-", "a b", "\u00c9")]
+        invalid += [("fast_step_volume", v, True) for v in ("-5", "0")]
+        invalid += [("fast_step_volume", v, False) for v in ("Infinity", "NaN", "abc")]
+        invalid += [("fast_step_tip_reuse", v, True) for v in ("fresh2", "Fresh", "none", "reuse,fresh")]
+        invalid += [("fast_step_expected_tray_id", v, False) for v in ("1.5", "abc", "2147483648")]
+        self.assertGreater(len(invalid), 40)
+        for name, value, buildable in invalid:
+            with self.subTest(parameter=name, value=value):
+                result = self._run(**{name: value})
+                self.assertFalse(result.ok, f"{name}={value!r} was accepted")
+                self.assertIn(name, result.error)
+                self.assertEqual(result.calls, [])
+                if buildable and not name.endswith("expected_tray_id"):
+                    problems = self._fast_check_args({**self.defaults, name: value})
+                    self.assertTrue(problems, f"_check_args accepts {name}={value!r}")
+
+    def test_fast_step_boundary_values_are_accepted_and_agree_with_check_args(self) -> None:
+        valid = [
+            ("fast_step_source_deck", "1"), ("fast_step_source_deck", "6"),
+            ("fast_step_dest_deck", "6"), ("fast_step_num_rows", "1"),
+            ("fast_step_num_cols", "2147483647"), ("fast_step_source_plate_id", "1"),
+            ("fast_step_source_start_col", "1"), ("fast_step_source_start_row", "AB"),
+            ("fast_step_dest_start_row", "z"), ("fast_step_volume", "0.5"),
+            ("fast_step_tip_reuse", "reuse"), ("fast_step_expected_tray_id", "0"),
+        ]
+        for name, value in valid:
+            with self.subTest(parameter=name, value=value):
+                result = self._run(**{name: value})
+                self.assertTrue(result.ok, result.error)
+                self.assertEqual(
+                    [(c["tool"], c["command"]) for c in result.calls],
+                    [("Tool Box", "note"), ("STACK", "transfer"), ("FAST", "transfer"),
+                     ("STACK", "transfer")])
+                self.assertEqual(self._fast_check_args({**self.defaults, name: value}), [])
+
+    def _fast_check_args(self, params: dict[str, str]) -> list[str]:
+        """Run the script with params (must succeed for valid input) or build the F.A.S.T. message
+        straight from them, and return tools.fast.server._check_args for it."""
+        try:
+            from tools.fast.server import _check_args
+        except ModuleNotFoundError as exc:
+            if exc.name and exc.name.split(".")[0] in ("fast_mcp", "httpx"):
+                self.skipTest(
+                    "fast_mcp core is not installed (private GitLab dependency, see "
+                    "tools/fast/requirements.txt); F.A.S.T. _check_args not asserted")
+            raise
+        message: dict[str, Any] = {}
+        for field in fast_pb2.Command.Transfer.DESCRIPTOR.fields_by_name:
+            raw = params.get("fast_step_" + field, "")
+            if raw == "":
+                continue
+            kind = fast_pb2.Command.Transfer.DESCRIPTOR.fields_by_name[field].type
+            if kind == FieldDescriptor.TYPE_INT32:
+                message[field] = int(raw)
+            elif kind == FieldDescriptor.TYPE_DOUBLE:
+                message[field] = float(raw)
+            else:
+                message[field] = raw
+        return list(_check_args(ParseDict(message, fast_pb2.Command.Transfer())))
 
     def test_script_style_uses_only_the_documented_sandbox_api(self) -> None:
         script = self.script
