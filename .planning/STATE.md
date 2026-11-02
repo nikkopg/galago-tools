@@ -5,16 +5,16 @@ milestone_name: STACK Tool & STACK↔F.A.S.T. Handoff
 current_phase: 6
 current_phase_name: GAL-02 Workflow, Simulated Workcell & PAC-Simulator Run
 status: executing
-stopped_at: Completed 06-03-PLAN.md
-last_updated: "2026-11-02T03:56:36.075Z"
+stopped_at: Completed 06-04-PLAN.md
+last_updated: "2026-11-02T04:32:29.305Z"
 last_activity: 2026-10-30
 last_activity_desc: Phase 5 complete, transitioned to Phase 6
-state_head: 5d8fe74ff3d537e1b848bc23b145af6eb861f114
+state_head: 3f0d3a471f451eac5983c449bec2fdf7046d4a0d
 progress:
   total_phases: 4
   completed_phases: 2
   total_plans: 16
-  completed_plans: 15
+  completed_plans: 16
   percent: 50
 ---
 
@@ -97,6 +97,7 @@ Progress: [█████░░░░░] 50%
 | Phase 06 P01 | 16 min | 3 tasks | 4 files |
 | Phase 6 P02 | 20min | 2 tasks | 3 files |
 | Phase 06 P03 | 20min | 3 tasks | 1 files |
+| Phase 06 P04 | operator-delegated | 3 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -144,6 +145,7 @@ v2 roadmap-level decisions (2026-10-28, detail in PROJECT.md Key Decisions):
 - [Phase 06]: REPLAY_WINDOW_S is imported from tools.stack.ledger, not tools.stack.server — Constant is defined in ledger.py; adapter unchanged
 - [Phase 6]: 06-02: DEP-02 gate is a read-only script with an exit code (testable on fixture trees); it printed DEP-02 OK on 2026-11-02 (galago-core a5fa75f), so Part 2 is unblocked at the gate
 - [Phase 06]: Row 2a-3 credits the simulated re-dispatch per D-07 only; no-second-transfer is carried by the offline fake-core test and Part 2b
+- [Phase 06]: 06-04: FLOW-04 no-second-POST is a plain PASS; manager submit counter calibrated (+1 on in leg) before the +0 re-send readings
 
 ### Pending Todos
 
@@ -177,8 +179,8 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-02T03:56:36.022Z
-Stopped at: Completed 06-03-PLAN.md
+Last session: 2026-11-02T04:32:29.258Z
+Stopped at: Completed 06-04-PLAN.md
 Resume file: None
 
 ## Operator Next Steps
