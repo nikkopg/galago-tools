@@ -68,8 +68,8 @@ milestone; stack-automation-layer core gaps are fixed there via `/gsd-quick`. Re
 - [ ] **FLOW-01**: A script-mode GAL-02 protocol, kept as importable JSON beside its runbook, mints
   per-run `step_key`s and runs STACK nest/hotel → F.A.S.T. deck, F.A.S.T. transfer, STACK back; nest
   triples are parameters
-- [ ] **FLOW-02**: A fully Galago-simulated workcell run of GAL-02 completes all three steps
-- [ ] **FLOW-03**: A forced re-dispatch of a completed STACK step sends no second transfer — proven
+- [x] **FLOW-02**: A fully Galago-simulated workcell run of GAL-02 completes all three steps
+- [x] **FLOW-03**: A forced re-dispatch of a completed STACK step sends no second transfer — proven
   offline on a fake core and in a simulated run
 - [ ] **FLOW-04**: A GAL-02 run with the STACK tool in real mode against the loopback PAC simulator
   (runbook Part A preconditions, sim account credentials, sim lab names) and the F.A.S.T. simulated
@@ -136,8 +136,8 @@ milestone; stack-automation-layer core gaps are fixed there via `/gsd-quick`. Re
 | ACK-01 | Phase 5 | Complete |
 | ACK-02 | Phase 5 | Complete |
 | FLOW-01 | Phase 6 | Pending |
-| FLOW-02 | Phase 6 | Pending |
-| FLOW-03 | Phase 6 | Pending |
+| FLOW-02 | Phase 6 | Complete |
+| FLOW-03 | Phase 6 | Complete |
 | FLOW-04 | Phase 6 | Pending |
 | LIVE-08 | Phase 7 | Pending |
 | LIVE-09 | Phase 7 | Pending |
