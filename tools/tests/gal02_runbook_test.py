@@ -334,7 +334,36 @@ class TestDep02Gate(unittest.TestCase):
             after = _snapshot(root)
         self.assertEqual(before, after)
 
-    def test_dep02_gate_on_the_real_sibling_tree_prints_one_verdict(self) -> None:
+    def test_dep02_gate_is_read_only_inside_a_real_git_repo_and_the_tools_tree(self) -> None:
+        if shutil.which("git") is None:
+            self.skipTest("git is required")
+        git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid"]
+
+        def porcelain() -> str:
+            return subprocess.run(
+                ["git", "-C", str(REPO_ROOT), "status", "--porcelain"],
+                capture_output=True, text=True, check=False).stdout
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _make_core_tree(root)
+            subprocess.run([*git, "init", "-q", str(root)], check=True, capture_output=True)
+            subprocess.run([*git, "-C", str(root), "add", "-A"], check=True, capture_output=True)
+            subprocess.run(
+                [*git, "-C", str(root), "commit", "-q", "-m", "x"], check=True, capture_output=True)
+            before = _snapshot(root)
+            tools_before = porcelain()
+            completed = self._run(root)
+            self._run(root)
+            after = _snapshot(root)
+            tools_after = porcelain()
+        self.assertEqual(completed.returncode, 0, completed.stdout)
+        self.assertEqual(before, after)
+        self.assertEqual(tools_before, tools_after)
+
+    def test_dep02_gate_on_the_real_sibling_tree_prints_one_consistent_verdict(self) -> None:
+        """Informational only: the sibling checkout is environment dependent, so this asserts the
+        verdict line agrees with the exit code. The fixture-tree tests above are the authority."""
         sibling = REPO_ROOT.parent / "galago-core"
         if not (sibling / "controller").is_dir():
             self.skipTest(f"no sibling galago-core checkout at {sibling}")
@@ -342,12 +371,14 @@ class TestDep02Gate(unittest.TestCase):
             ["bash", str(GATE_PATH)],
             env={**os.environ, "GALAGO_CORE_DIR": str(sibling), "GALAGO_TOOLS_DIR": str(REPO_ROOT)},
             capture_output=True, text=True, timeout=30)
-        last = completed.stdout.splitlines()[-1]
+        lines = completed.stdout.splitlines()
         if completed.returncode == 0:
-            self.assertEqual(last, "DEP-02 OK")
+            self.assertEqual(lines[-1], "DEP-02 OK")
+            self.assertEqual([x for x in lines if x.startswith(("missing:", "forbidden:"))], [])
         else:
             self.assertEqual(completed.returncode, 1)
-            self.assertTrue(last.startswith("BLOCKED:"), last)
+            self.assertTrue(lines[-1].startswith("BLOCKED:"), lines[-1])
+            self.assertTrue(any(x.startswith(("missing:", "forbidden:")) for x in lines), lines)
 
 
 class TestRunbookContent(unittest.TestCase):
