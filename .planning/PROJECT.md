@@ -82,15 +82,22 @@ refusal of `Configure` mid-run; hard pause (D5); pushing branches (user's action
   `<p>`%" with the queue FAILED — v1
 - ✓ LIVE-07: Supervised live `galago-web` restart mid-run, operator recovers through the tool page — v1
 
+- ✓ STK-01..STK-07: STACK gRPC tool registered with `Transfer`-in-flight reads, estimate, simulated
+  mode, and success/failure result mapping — Phases 4–5 (v2)
+- ✓ XFR-01..XFR-06: F5-safe Transfer — step-key ledger on the DEP-01 core (`934a621`), re-attach
+  instead of re-submit, no adapter-initiated retries — Phase 5 (v2)
+- ✓ ACK-01..ACK-02: Operator acknowledge of a latched core failure with visible guid — Phase 5 (v2)
+- ✓ FLOW-01..FLOW-04: GAL-02 STACK → F.A.S.T. → STACK handoff in full simulation plus real-mode
+  STACK against the loopback PAC simulator; forced re-dispatch of a completed step sends no second
+  transfer — Phase 6 (v2)
+
 ### Active
 
 v2 requirements in `.planning/REQUIREMENTS.md` (v1 traceability:
 `.planning/milestones/v1-REQUIREMENTS.md`).
 
-- [ ] GAL-01 STACK gRPC tool (`tools/stack/`) on the frozen contract v1 core
-- [ ] F5-safe Transfer (step-key ledger, re-attach instead of re-submit)
-- [ ] Simulated workcell run and supervised live STACK run
-- [ ] GAL-02 STACK → F.A.S.T. → STACK plate-handoff workflow
+- [ ] Supervised live STACK deployment & run (LIVE-08..LIVE-10) — safe-order deploy on `stack2-6`,
+  runbook-gated live STACK Transfer, supervised live GAL-02 handoff on hardware
 
 ### Out of Scope
 
@@ -231,4 +238,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-10-28 after starting milestone v2*
+*Last updated: 2026-11-02 after Phase 6*

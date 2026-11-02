@@ -2,46 +2,46 @@
 gsd_state_version: "1.0"
 milestone: v2
 milestone_name: STACK Tool & STACK↔F.A.S.T. Handoff
-current_phase: 6
-current_phase_name: GAL-02 Workflow, Simulated Workcell & PAC-Simulator Run
-status: executing
-stopped_at: Completed 06-04-PLAN.md
-last_updated: "2026-11-02T04:32:29.305Z"
-last_activity: 2026-10-30
-last_activity_desc: Phase 5 complete, transitioned to Phase 6
-state_head: 3f0d3a471f451eac5983c449bec2fdf7046d4a0d
+current_phase: 7
+current_phase_name: Deploy & Supervised Live STACK + Handoff
+status: planning
+stopped_at: Phase 06 complete, ready to plan Phase 7
+last_updated: "2026-11-02T09:00:59.073Z"
+last_activity: 2026-11-02
+last_activity_desc: Phase 06 complete, transitioned to Phase 7
+state_head: e566c9cf49ca84103fb1ad65cdb539169f7c7c72
 progress:
   total_phases: 4
-  completed_phases: 2
+  completed_phases: 3
   total_plans: 16
   completed_plans: 16
-  percent: 50
+  percent: 75
 ---
 
 # Project State
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-10-28)
+See: .planning/PROJECT.md (updated 2026-11-02)
 
 **Core value:** An operator running an instrument step from Galago can always see what the instrument
 is doing and recover it themselves; no adapter code path pauses, resumes, aborts, cancels, retries or
 acknowledges on its own. For the STACK: a step never sends a second transfer.
-**Current focus:** Phase 5 — F5-safe Transfer & Operator Acknowledge
+**Current focus:** Phase 7 — Deploy & Supervised Live STACK + Handoff
 
 ## Current Position
 
-Phase: 6 (GAL-02 Workflow, Simulated Workcell & PAC-Simulator Run) — READY TO EXECUTE
+Phase: 7 — Deploy & Supervised Live STACK + Handoff
 Plan: Not started
-Status: Ready to execute
-Last activity: 2026-10-30 — Phase 5 complete, transitioned to Phase 6
+Status: Ready to plan
+Last activity: 2026-11-02 — Phase 06 complete, transitioned to Phase 7
 
-Progress: [█████░░░░░] 50%
+Progress: [████████░░] 75%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 30 (v1, archived); v2: 0 of TBD
+- Total plans completed: 34 (v1, archived); v2: 0 of TBD
 - Average duration: -
 - Total execution time: 0 hours
 
@@ -54,6 +54,7 @@ Progress: [█████░░░░░] 50%
 | 03 | 8 | - | - |
 | 4 | 5 | - | - |
 | 5 | 7 | - | - |
+| 06 | 4 | - | - |
 
 **Recent Trend:**
 - Last 5 plans: none yet in v2
@@ -162,10 +163,11 @@ None yet.
 - Branches on both repos are not pushed (deferred D-02) — pushing is the user's own action; push
   only to the `nikkopg` fork remote.
 - DEP-01 is met (2026-10-29): core `934a621` closes G1-G3, contract still v1; pinned in the fork
-  (`237268c`), D-09 restart warning corrected (`fe8aee8`). Phase 5 can start; its design spike must
-  cover a re-attach after a mid-transfer restart (core limit 1). Phase 6 and Phase 7 are gated on DEP-02 (galago-core codegen +
-  `commandFields.stack`); DEP-02 consumes Phase 4's `stack.proto`, so keep that proto complete.
-- v2 Phase 6: confirm Docker + the PAC simulator can run on the galago-tools host (loopback only).
+  (`237268c`), D-09 restart warning corrected (`fe8aee8`). DEP-02 is met (2026-11-02, galago-core
+  `a5fa75f`): Phase 6 ran unblocked. Phase 7 is DEP-02-met with DEP-03 recommended.
+- ⚠ [Phase 6 UAT watch item] dev-galago tool-store state: after STACK-SIM was reconfigured in real
+  mode, the GAL-02 out-leg (STACK-PACSIM) failed in galago-core with 'Tool STACK-PACSIM not found in
+  store. Must be configured first.' — carries into the Phase 7 supervised checklist.
 - v2 hard constraint: no STACK motion in default tests; live motion only in Phase 7, supervised and
   runbook-gated; never `10.150.1.125` / `stack-server` before Phase 7.
 
@@ -179,13 +181,12 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-02T04:32:29.258Z
-Stopped at: Completed 06-04-PLAN.md
+Last session: 2026-11-02 (Phase 6 verification canonicalized to passed; transitioned)
+Stopped at: Phase 06 complete, ready to plan Phase 7
 Resume file: None
 
 ## Operator Next Steps
 
-- Plan Phase 4 with /gsd-plan-phase 4 (or /gsd-discuss-phase 4 first); Phase 4 has no cross-repo gate
-- DEP-01 done (core `934a621` pinned); next: /gsd-discuss-phase 5
-- On forb01, run galago-tools and stack-mcp as the same OS user (or share `STACK_STATE_DIR`) so the
-  persisted failure latch is shared across a hand-over (LIVE-08)
+- Plan Phase 7 with /gsd-plan-phase 7 (or /gsd-discuss-phase 7 first); no CONTEXT.md exists yet
+- Supervised live run gating: DEP-02 met; DEP-03 (PAC-simulator supervised preview) recommended before hardware
+- Carry the Phase 6 tool-store watch item (STACK-PACSIM "not found in store" after STACK-SIM reconfigured) into the Phase 7 runbook/checklist
