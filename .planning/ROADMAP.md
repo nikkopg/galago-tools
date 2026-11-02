@@ -189,7 +189,20 @@ the offline half of FLOW-03) can start before DEP-02 lands; FLOW-02..04 need it.
      (runbook Part A preconditions, sim account credentials, sim lab names) and the F.A.S.T. simulated
      completes, including a forced re-dispatch that sends no second POST; it never targets
      `10.150.1.125` / `stack-server`.
-**Plans**: TBD
+**Plans**: 4 plans
+Plans:
+**Wave 1**
+- [ ] 06-01-PLAN.md — Protocol JSON (FLOW-01), node sandbox harness tests, offline re-dispatch proof on the fake core (FLOW-03 offline)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [ ] 06-02-PLAN.md — GAL-02 runbook beside the protocol, read-only DEP-02 gate script, runbook and gate tests
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [ ] 06-03-PLAN.md — Part 2a, operator-run, gated on DEP-02: Galago-simulated workcell run (FLOW-02) and the simulated re-dispatch (FLOW-03 sim half, D-07 wording)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+- [ ] 06-04-PLAN.md — Part 2b, operator-run, gated on DEP-02: STACK real mode against the loopback PAC sim (FLOW-04), calibrated no-second-POST evidence
+
 **Notes**: Research flag: confirm Docker and the PAC simulator build can run on the galago-tools host
 (the sim publishes on loopback only, so the tool server must run on that host with the sim account in
 its environment). The F.A.S.T. has no simulator in scope, so "simulated" there means Galago-simulated.
