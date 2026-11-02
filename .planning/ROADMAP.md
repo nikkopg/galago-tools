@@ -39,7 +39,7 @@ Companion: galago-core's own parallel milestone (codegen, command forms, operato
   the arm.
 - [x] **Phase 5: F5-safe Transfer & Operator Acknowledge** - The only motion path: a `Transfer` that (completed 2026-10-30)
   can never send a second transfer for the same step, plus an operator-only failure acknowledge.
-- [ ] **Phase 6: GAL-02 Workflow, Simulated Workcell & PAC-Simulator Run** - Prove the STACK ->
+- [x] **Phase 6: GAL-02 Workflow, Simulated Workcell & PAC-Simulator Run** - Prove the STACK -> (completed 2026-11-02)
   F.A.S.T. -> STACK handoff end to end, and that a re-dispatch sends nothing, before any hardware.
 - [ ] **Phase 7: Deploy & Supervised Live STACK + Handoff** - Deploy in the safe order, then prove a
   live STACK Transfer and the live handoff on the instrument with the user present.
@@ -189,7 +189,7 @@ the offline half of FLOW-03) can start before DEP-02 lands; FLOW-02..04 need it.
      (runbook Part A preconditions, sim account credentials, sim lab names) and the F.A.S.T. simulated
      completes, including a forced re-dispatch that sends no second POST; it never targets
      `10.150.1.125` / `stack-server`.
-**Plans**: 4/4 plans executed
+**Plans**: 4/4 plans complete
 Plans:
 **Wave 1**
 - [x] 06-01-PLAN.md — Protocol JSON (FLOW-01), node sandbox harness tests, offline re-dispatch proof on the fake core (FLOW-03 offline)
@@ -226,7 +226,20 @@ recommended before live runs for the full operator experience but is not a hard 
      `10.150.1.125:5005`) with the user present and the operator's explicit go-ahead.
   3. A supervised live GAL-02 handoff runs STACK -> F.A.S.T. -> STACK to SUCCESS on the hardware.
 
-**Plans**: TBD
+**Plans**: 4 plans (waves 1-4, strictly sequential: the deploy needs the runbook, each live event needs the deployed stack and its predecessor per D-09)
+
+Plans:
+**Wave 1**
+- [ ] 07-01-PLAN.md — Live pre-flight gate script + live runbook + fixture-test module, authored and pinned offline (LIVE-08 scriptable half)
+
+**Wave 2** *(blocked on Wave 1; operator-run, blocking-human checkpoints)*
+- [ ] 07-02-PLAN.md — Safe-order deploy on forb01: OQ-1 install-source checkpoint, core into the service `.venv`, env file, log backup, restart, reconnect, `galago-web` rebuild (LIVE-08)
+
+**Wave 3** *(blocked on Wave 2; operator-run, supervised)*
+- [ ] 07-03-PLAN.md — Supervised live single Transfer rehearsal to `ran` on stack2-6 (LIVE-09)
+
+**Wave 4** *(blocked on Wave 3; operator-run, supervised)*
+- [ ] 07-04-PLAN.md — Supervised live GAL-02 handoff STACK → F.A.S.T. → STACK to SUCCESS + findings completion (LIVE-10)
 **Notes**: Runbook authoring, not research. This is the only phase that may send live STACK motion or
 target `10.150.1.125` / `stack-server`. Back up logs before any restart; the manager page can restart a
 single tool server without a service restart, so track the tool-server listener PID, not only the
@@ -255,7 +268,7 @@ Phases execute in numeric order: 4 → 5 → 6 → 7 (DEP-01 is met, so Phase 5 
 |-------|-----------|----------------|--------|-----------|
 | 4. STACK Tool Registration, Reads & Estimate | v2 | 5/5 | Complete    | 2026-10-29 |
 | 5. F5-safe Transfer & Operator Acknowledge | v2 | 7/7 | Complete    | 2026-10-30 |
-| 6. GAL-02 Workflow, Simulated Workcell & PAC-Simulator Run | v2 | 4/4 | In Progress | - |
+| 6. GAL-02 Workflow, Simulated Workcell & PAC-Simulator Run | v2 | 4/4 | Complete    | 2026-11-02 |
 | 7. Deploy & Supervised Live STACK + Handoff | v2 | 0/TBD | Not started | - |
 
 ## Backlog
