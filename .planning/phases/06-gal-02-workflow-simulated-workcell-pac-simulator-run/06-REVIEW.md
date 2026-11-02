@@ -2,159 +2,150 @@
 phase: 06-gal-02-workflow-simulated-workcell-pac-simulator-run
 reviewed: 2026-11-02T00:00:00Z
 depth: standard
-files_reviewed: 6
+iteration: 2
+diff_base: fe0c5aa
+files_reviewed: 7
 files_reviewed_list:
-  - docs/runbooks/gal-02-handoff.protocol.json
   - docs/runbooks/gal-02-dep02-check.sh
+  - docs/runbooks/gal-02-handoff.protocol.json
+  - docs/runbooks/gal-02-handoff.md
   - tools/tests/gal02_harness.py
   - tools/tests/gal02_handoff_test.py
   - tools/tests/gal02_replay_test.py
   - tools/tests/gal02_runbook_test.py
 findings:
-  critical: 1
-  warning: 5
-  info: 5
-  total: 11
+  critical: 0
+  warning: 2
+  info: 7
+  total: 9
 status: issues_found
 ---
 
-# Phase 6: Code Review Report
+# Phase 6: Code Review Report (iteration 2)
 
 **Reviewed:** 2026-11-02
 **Depth:** standard
-**Files Reviewed:** 6
+**Files Reviewed:** 7
 **Status:** issues_found
 
 ## Summary
 
-The protocol script is correct on the points the phase set out to prove. Step keys are minted once per run and suffixed `-in` and `-out`. Blank optionals are omitted. The out leg is a correct swap, including the per-location transfer profiles. Only `transfer` and the Tool Box `note` are emitted. The sandbox globals the script uses (`Math`, `Date`, `Array`, `Number`, `String`, `isFinite`, `Error`) all exist in galago-core's `protocol-script-executor.ts` context. All three parameter objects are built before the first `galago` call, so the checks that exist do throw with nothing queued. The 45 GAL-02 tests pass in this environment.
+I re-reviewed the fix commits a56927d..d22fd4c and 03f09e8 against the iteration-1 findings. I ran the
+suite with `GAL02_REQUIRE_ALL=1` and got 56 passed, 0 skipped. I also ran the gate against the real
+sibling checkout. It prints `DEP-02 OK` (HEAD a799627, exit 0). It does not fail closed on the real
+galago-core layout: the real `commandFields.stack` block has a multi-line opener, `transfer:` at
+four-space indent, and the `ToolType` enum and the generated `stack.ts` match the new patterns.
 
-Main concerns:
+Iteration-1 findings:
 
-1. The DEP-02 gate can print `DEP-02 OK` when `commandFields.stack.transfer` is absent. This is a proven false-OK path.
-2. The "everything is validated before anything is queued" claim does not hold for the F.A.S.T. step. Values the F.A.S.T. adapter rejects pass the script, so such a run fails after the STACK in-leg has already moved the plate.
-3. Several test gaps leave both of the above unpinned.
+| ID | Verdict |
+|----|---------|
+| CR-01 | Resolved. Check 4 now needs the `transfer` key at the block's indent. The block ends at its first closing line, and a missing `stack:` opener is reported on its own. The decoy, nested, quoted-name and one-line fixtures all behave as the commit says. |
+| WR-01 | Resolved. The script mirrors every `_check_args` rule (decks 1-6, ids and columns and rows at least 1, one or two letters, volume above 0, `tip_reuse` fresh or reuse), plus int32 bounds. `expected_tray_id` is not checked by the adapter, and the script only requires a whole int32, which is the correct subset. No valid F.A.S.T. value is rejected. The boundary test shows the accepted values agree with `_check_args`. All checks run before the first `galago` call. |
+| WR-02 | Partly resolved. See WR-01 below: tool names are compared with `===`, but galago-core matches them with `normalizeToolKey`. |
+| WR-03 | Resolved. Check 2 is scoped to the enum block. Check 3 requires an exported `Command_Transfer`. The revision is printed only at a checkout root, with `pwd -P` handling symlinks. |
+| WR-04 | Resolved. The read-only test runs on a real git repo and compares galago-tools `git status --porcelain` before and after. The sibling-tree test now checks that the verdict agrees with the exit code and the missing/forbidden lines. |
+| WR-05 | Partly resolved. `GAL02_REQUIRE_ALL` turns every environment skip into a failure. The default (non-strict) behaviour still silently drops the new WR-01 and WR-02 script-side coverage. See WR-02 below. |
+| IN-01..IN-05 | Still open, carried forward. |
 
-## Critical Issues
-
-### CR-01: DEP-02 gate can report OK without `commandFields.stack.transfer`
-
-**File:** `docs/runbooks/gal-02-dep02-check.sh:67-72`
-**Issue:** Check 4 is `printf '%s\n' "$stack_block" | grep -q 'transfer'`. That is a bare substring match over the whole stack block. The real block in galago-core's `constants.ts` (lines 346-381) also contains `list_transfer_profiles` and `get_transfer_estimate`. The check therefore passes even if the `transfer:` key is missing or renamed. I reproduced this with a fixture whose stack block holds only those two keys. The awk range yields them and `grep -c transfer` returns 2, so the gate would print `DEP-02 OK`. Part 2 is gated on this verdict ("no false OK").
-
-The awk range `/^  stack: \{/,/^  \},/` has a second hole. A one-line block such as `  stack: { get_manager_state: [] },` never matches the end pattern on its own line. The range then spills into the following tool's block, and that block's `transfer` satisfies the check. I reproduced this with a fixture where a later `zzz:` block holds `transfer`.
-
-`TestDep02Gate` does not cover either case. Its fixture is always the clean `transfer: [],` shape.
-
-**Fix:** Match the key itself, anchored at the block's indent, and stop the awk range at the first closing line:
-```bash
-stack_block="$(awk '/^  stack: \{/{f=1; next} f && /^  \},?$/{exit} f' "$CONSTANTS_TS")"
-if ! printf '%s\n' "$stack_block" | grep -qE '^    transfer: \['; then
-  echo "missing: commandFields.stack.transfer in controller/components/tools/constants.ts"
-  failed=1
-fi
-```
-Also treat a missing `stack:` opener as a failure of its own. Add tests where the block holds only `get_transfer_estimate`/`list_transfer_profiles`, and where `stack: {` is a one-liner followed by another tool that has `transfer`.
+No Critical issues were found. Two Warnings and the carried-forward Info items remain.
 
 ## Warnings
 
-### WR-01: F.A.S.T. inputs are only partly validated, so a bad value fails after the STACK in-leg has moved the plate
+### WR-01: Degenerate-handoff guard compares tool names with `===`, but galago-core matches them case- and punctuation-insensitively
 
-**File:** `docs/runbooks/gal-02-handoff.protocol.json:7` (scriptContent: `whole`, `fastStep`, and the header comment)
-**Issue:** The header comment says "Every input is validated ... so a bad input throws with nothing queued". For the F.A.S.T. step that is false.
-- `whole()` only checks that the value is integral. It accepts `0`, negatives, hex strings such as `0x10`, and values beyond int32.
-- `positive()` is used only for `volume` and `stack_timeout_s`.
-- `start_row` and `tip_reuse` are only checked for non-blank. A select option is not enforced on the script side.
-
-`tools/fast/server.py:_check_args` (lines 199-226) rejects all of these:
-- decks outside `1.._DECK_SLOTS`;
-- plate ids, start cols, `num_rows` and `num_cols` below 1;
-- a row that is not 1-2 letters;
-- a `tip_reuse` outside `_TIP_REUSE_MODES`.
-
-The run is queued as three steps. A value like `fast_step_num_rows=0` or `tip_reuse=fresh2` therefore queues normally. The STACK in-leg runs and moves the plate to the F.A.S.T. position. The F.A.S.T. step then returns `INVALID_ARGUMENTS`, and the run stops with the plate stranded mid-handoff. The default-parameter test run never exercises this.
-
-**Fix:** Mirror the F.A.S.T. rules in the script before the first `galago` call:
+**File:** `docs/runbooks/gal-02-handoff.protocol.json:7` (scriptContent, `if (stackTool === fastTool)`)
+**Issue:** This is the iteration-1 WR-02 fix, and it is incomplete. galago-core resolves a tool name with
+`normalizeToolKey` (`controller/server/toolKey.ts`: `toLowerCase().replace(/[^a-z0-9]/g, "")`). The
+runbook's own Findings row 2a-1 records this as the reason `FAST` could not be used (it resolved to the
+real `Fast` tool). So `stack_tool="STACK"` with `fast_tool="Stack"`, or `"FAST-SIM"` with `"fastsim"`,
+is the same tool in galago-core but passes the `===` check. The queue then holds a STACK `transfer`
+addressed to the F.A.S.T. tool (or the reverse), which is the case the guard was added to stop. The
+default values are `STACK` and `FAST`, and the operator edits them by hand in Phase 7, so a case
+variation is a plausible typo. The location check (`source_*` vs `fast_*`) has the same exact-string
+weakness, but hardware names may be case-sensitive there, so it is less clear.
+**Fix:** Compare the normalized names:
 ```js
-function atLeast(name, min) { var n = whole(name); if (n < min) { throw new Error("GAL-02: parameter '" + name + "' must be at least " + min); } return n; }
-// deck: 1..8 (match _DECK_SLOTS), ids/cols/rows/cols: atLeast(..., 1)
-if (!/^[A-Za-z]{1,2}$/.test(p.source_start_row)) { throw new Error("GAL-02: parameter 'fast_step_source_start_row' must be one or two letters"); }
-if (["fresh", "reuse"].indexOf(p.tip_reuse) < 0) { throw new Error("GAL-02: parameter 'fast_step_tip_reuse' must be fresh or reuse"); }
+function toolKey(s) { return s.toLowerCase().replace(/[^a-z0-9]/g, ""); }
+if (toolKey(stackTool) === toolKey(fastTool)) { throw new Error("GAL-02: parameter 'fast_tool' must differ from 'stack_tool'"); }
 ```
-Add a test per field that checks `result.calls == []`. A cross-check against `tools.fast.server._check_args` would also keep the script and the adapter from drifting.
+Add a test with `stack_tool="STACK"`, `fast_tool="stack"` and one with `"FAST-SIM"`/`"fastsim"`, each
+asserting `result.calls == []`.
 
-### WR-02: No guard against a degenerate handoff (same tool, or same location on both sides)
+### WR-02: Without the strict switch, the new queue-time validation tests are skipped as a whole when `fast_mcp` is missing
 
-**File:** `docs/runbooks/gal-02-handoff.protocol.json:7` (scriptContent, the `stackTool`/`fastTool` and `legIn` lines)
-**Issue:** Nothing checks that `stack_tool !== fast_tool`. Nothing checks that the F.A.S.T.-side `device/deck/nest` differs from the source triple. In Phase 7 the operator types hardware names by hand, and a copy-paste error gives an in leg with source equal to destination. It would be issued as a real STACK transfer. Only the tool's own rules stop it, and they may not. The same-tool case sends a STACK `transfer` to the F.A.S.T. tool name, or the reverse.
-**Fix:** Throw at queue time when `stackTool === fastTool`. Also throw when `source_device`, `source_deck` and `source_nest` all equal the `fast_*` triple. Add tests for both.
-
-### WR-03: Gate checks 2 and 3 are weaker than the runbook claims
-
-**File:** `docs/runbooks/gal-02-dep02-check.sh:53-62`
-**Issue:**
-- Check 2 greps the whole `controller.ts` for `stack = "stack",`. It is not scoped to the `ToolType` enum, so any other enum or map with the same line satisfies it.
-- Check 3 only tests that `stack.ts` exists. An empty or stale file passes.
-- Check 1 reports the HEAD of any enclosing git repo when `$GC` is a plain directory inside another repo (`git -C "$GC" rev-parse`). That would put a wrong revision in the Findings log (G0).
-
-All three lean toward a false OK. The result is lower assurance than D-01 describes ("galago-core builds with `ToolType.stack`").
-**Fix:** Scope check 2 with awk to the `export enum ToolType {` block. For check 3, grep `stack.ts` for an exported `Command_Transfer`/`Transfer` symbol. For the revision, require `git -C "$GC" rev-parse --show-toplevel` to equal `$GC`, or label the value as best effort.
-
-### WR-04: Test coverage does not pin the validation or the gate decoy cases
-
-**File:** `tools/tests/gal02_handoff_test.py:312-328`, `tools/tests/gal02_runbook_test.py:169-225`
-**Issue:**
-- `test_throws_on_invalid_numbers` covers only `num_rows="1.5"`, `volume="0"`, `stack_timeout_s="abc"` and `"-1"`. There is no case for `num_rows` of 0 or negative, a non-letter start row, a bad `tip_reuse`, a deck outside the slot range, or an overflowing int. This is why WR-01 is not caught.
-- `test_dep02_gate_blocks_each_single_missing_piece` removes whole pieces only (see CR-01). It has no decoy-substring case.
-- `test_dep02_gate_on_the_real_sibling_tree_prints_one_verdict` accepts both exit 0 and exit 1. It can never fail on the gate's verdict, and it is environment dependent.
-- `test_dep02_gate_is_read_only` snapshots only the fixture core tree. It does not snapshot `REPO_ROOT` or the cwd, and `git` is never run inside a real repo.
-
-**Fix:** Add the cases above. Drop or demote the sibling-tree test to an informational skip. Extend the snapshot to the galago-tools tree, or at least `git status --porcelain` before and after.
-
-### WR-05: Replay and F.A.S.T. contract tests can skip silently, so the "0 skipped" requirement is only enforced for node
-
-**File:** `tools/tests/gal02_replay_test.py:12-25`, `tools/tests/gal02_handoff_test.py:353-360`
-**Issue:**
-- Module-level `unittest.SkipTest` skips every FLOW-03 offline test when `stack_automation_layer` or `httpx` is missing.
-- In `test_proto_contract_...`, a missing `fast_mcp` skips the F.A.S.T. `_check_args` assertion. That assertion is the one that would otherwise have caught WR-01.
-- D-16c requires the verification run to have 0 skipped, but nothing fails when these two skips fire. `TestNodeLookup` guards only the node path.
-
-**Fix:** Add an opt-in strict switch, for example `GAL02_REQUIRE_ALL=1`, that turns these skips into failures. The verification command would set it. Alternatively, move the F.A.S.T. rule check into a pure test that does not need `fast_mcp`.
+**File:** `tools/tests/gal02_handoff_test.py:349-420` (`test_fast_step_invalid_values_throw_...`, the boundary test at 378, and `_fast_check_args` at 397)
+**Issue:** `_fast_check_args` calls `skip_or_fail` when `fast_mcp` cannot be imported. It is called from
+inside the first buildable `subTest`. Under pytest 7.4.3 (the version in this venv, no subtests plugin) a
+`SkipTest` raised in a `subTest` propagates and aborts the whole test method. I reproduced it by blocking
+the `fast_mcp` import: both tests skip, and no script-side assertion runs. About 50 of the invalid-value
+assertions and all the boundary assertions need only node and the script, not `fast_mcp`. The result is
+that WR-01's and WR-02's script-side checks (throws, `calls == []`, accepted values) are not run in any
+environment without the private F.A.S.T. core. That is the default developer or CI setup. Strict mode
+(`GAL02_REQUIRE_ALL=1`) does catch it, but it is opt-in. The same defect that WR-05 targeted survives for
+the checks added by the fixes.
+**Fix:** Make the cross-check optional inside the loop so the script assertions always run. For example,
+compute `check_args = self._load_check_args()` once (returning `None` when unavailable and calling
+`skip_or_fail` only if strict) and guard only the `_check_args` assertion on it. Or split the cross-check
+into its own test method.
 
 ## Info
 
-### IN-01: `find_node` lets PATH win over the `$NODE` "override"
+### IN-01: `find_node` lets PATH win over the `$NODE` "override" (carried forward)
 
-**File:** `tools/tests/gal02_harness.py:76-82`
-**Issue:** Lookup order is PATH, then `$NODE`, then nvm. D-16c calls `$NODE` an override, but it is consulted only when no `node` is on PATH. An operator setting `NODE` to pin a version is silently ignored. A set but invalid `$NODE` also falls through quietly to nvm instead of saying so.
-**Fix:** Check `$NODE` first, or rename it in the docs and comment as a fallback. Report an invalid `$NODE` explicitly.
+**File:** `tools/tests/gal02_harness.py:81-88`
+**Issue:** Lookup order is PATH, then `$NODE`, then nvm. `$NODE` is consulted only when no `node` is on
+PATH. An invalid `$NODE` falls through silently. Unchanged since iteration 1.
+**Fix:** Check `$NODE` first, or call it a fallback in the docs and comment. Report an invalid `$NODE`.
 
-### IN-02: The harness `galago.timer` stub does not match galago-core's signature
+### IN-02: The harness `galago.timer` stub does not match galago-core's signature (carried forward)
 
-**File:** `tools/tests/gal02_harness.py:39`
-**Issue:** The stub takes `timer(seconds)`. The real executor takes `timer({minutes, seconds, message})` and emits Tool Box `timer`. The script does not use timer today, so nothing breaks. The stub claims to mirror the documented API but does not, and `console` is the full node console instead of the log/warn/error trio.
-**Fix:** Mirror the documented signature, or remove the stub members the script does not need.
+**File:** `tools/tests/gal02_harness.py:44`
+**Issue:** The stub takes `timer(seconds)`. The real executor takes `timer({minutes, seconds, message})`.
+The script does not use `timer`, so nothing breaks. Unchanged.
+**Fix:** Mirror the documented signature, or remove stub members the script does not use.
 
-### IN-03: The hardware deny assertion is a tautology
+### IN-03: The hardware deny assertion is a tautology (carried forward)
 
-**File:** `tools/tests/gal02_replay_test.py:49`, `tools/tests/gal02_harness.py:23`
-**Issue:** `assertNotIn(self.server.config.host, HARDWARE_DENY)` checks a value hard-coded elsewhere (`"127.0.0.1"` in `stack_test.py:1692`). The comparison is exact and case-sensitive, so `STACK-SERVER` or a trailing-dot name would pass. D-10 asks for the deny-set on "any real-mode Configure fixture", but this fixture injects the service directly and never calls Configure.
-**Fix:** Normalise before comparing (`host.strip().lower().rstrip(".")`). Optionally assert the ledger dir is under a temp root.
+**File:** `tools/tests/gal02_replay_test.py:50`
+**Issue:** `assertNotIn(self.server.config.host, HARDWARE_DENY)` is an exact, case-sensitive check on a
+hard-coded fixture host. Unchanged.
+**Fix:** Normalise before comparing (`host.strip().lower().rstrip(".")`).
 
-### IN-04: `stack_legs` uses bare `assert` in a helper module
+### IN-04: `stack_legs` uses bare `assert` in a helper module (carried forward)
 
-**File:** `tools/tests/gal02_harness.py:135-137`
-**Issue:** Under `python -O` these checks vanish, and the helper then indexes `result.calls[1]` and `[3]` without validation, producing IndexError/KeyError instead of a clear failure.
-**Fix:** Raise `AssertionError` explicitly, or use `unittest.TestCase.fail`.
+**File:** `tools/tests/gal02_harness.py:147-149`
+**Issue:** The checks vanish under `python -O`, after which the helper indexes `result.calls[1]` and
+`[3]` unvalidated. Unchanged.
+**Fix:** Raise `AssertionError` explicitly.
 
-### IN-05: Magic numbers and a non-strict zero rule in the script and tests
+### IN-05: Magic numbers and the `stack_timeout_s=0` rule (carried forward)
 
-**File:** `tools/tests/gal02_handoff_test.py:303`, `tools/tests/gal02_runbook_test.py:262`, `tools/tests/gal02_handoff_test.py:231`; script `positive("stack_timeout_s")`
-**Issue:**
-- The tests hard-code `23` required parameters, `27` total parameters and a key length of `58`. Adding an optional parameter breaks them for a non-behavioural reason.
-- The tool form documents "blank/0 = adapter default" for `timeout_s` (`constants.ts`), but the script throws on `stack_timeout_s=0`. That is an inconsistency with the tool page vocabulary, not a bug.
+**File:** `tools/tests/gal02_handoff_test.py:250,260,322`, `tools/tests/gal02_runbook_test.py:418`; script `positive("stack_timeout_s")`
+**Issue:** The tests hard-code 23 required parameters, 27 total parameters and a key length of 58. The
+tool form documents "blank/0 = adapter default" for `timeout_s`, but the script throws on 0 (the
+parameter description only says "blank uses the adapter default", so this is consistent with the
+protocol, not with the tool page). Unchanged.
+**Fix:** Derive the counts from the export. Document that 0 is rejected, or treat `"0"` as blank.
 
-**Fix:** Derive the counts from the export (`len([p for p in params if p["required"]])`). Compute 58 from the label cap and the fixed suffixes. Either document that 0 is rejected, or treat `"0"` as blank.
+### IN-06: The valid deck range (1-6) and the `tip_reuse` choices are not stated where the operator enters them
+
+**File:** `docs/runbooks/gal-02-handoff.protocol.json:7` (parameters `fast_step_source_deck`, `fast_step_dest_deck`; descriptions say only "deck slot number")
+**Issue:** The script now rejects a deck outside 1-6 and the start-row description says "one or two
+letters", but the deck descriptions do not give the range. The hard-coded `6` in the script duplicates
+`_DECK_SLOTS` in `tools/fast/server.py`. The test cross-check covers drift only when `fast_mcp` is
+installed (see WR-02).
+**Fix:** Add "1-6" to the two deck descriptions, and note the coupling to `_DECK_SLOTS` in the header
+comment (the comment already points at `_check_args`).
+
+### IN-07: The gate's `acknowledge` check matches comments in the stack block
+
+**File:** `docs/runbooks/gal-02-dep02-check.sh:115`
+**Issue:** `grep -q 'acknowledge'` runs over the whole stack block, including comment lines. A comment
+such as "acknowledge_failure is deliberately not exposed" inside the block would make the gate print
+`forbidden:` and block Part 2. It fails closed, so this is a nuisance, not a false OK. The real
+galago-core block has no such comment today.
+**Fix:** Match the key shape: `grep -qE '^    acknowledge[A-Za-z_]*[[:space:]]*:'`.
 
 ---
 

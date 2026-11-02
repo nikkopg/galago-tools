@@ -1,13 +1,13 @@
 ---
 phase: 06
 review: 06-REVIEW.md
-iteration: 1
+iteration: 2
 fix_scope: critical_warning
 status: all_fixed
 fixed: 6
 skipped: 0
 out_of_scope: 5
-commits: [a56927d, 817587f, b056152, beb22d8, 40a9dd7, d22fd4c, 03f09e8]
+commits: [a56927d, 817587f, b056152, beb22d8, 40a9dd7, d22fd4c, 03f09e8, d21936d, 7acbfc2]
 verification: "GAL02_REQUIRE_ALL=1 bin/make proto test -> 566 passed (baseline 555), ruff + mypy clean; gal02 modules 56 passed, 0 skipped under -rs; gate prints DEP-02 OK against ../galago-core feat/stack-tool; frozen files (tools/stack, tools/fast, base_server.py, interfaces, requirements.txt) unchanged since 477b0ed"
 ---
 
@@ -43,3 +43,14 @@ None.
 ## Out of scope (Info, `fix_scope: critical_warning`)
 
 IN-01, IN-02, IN-03, IN-04, IN-05: still open.
+
+## Iteration 2
+
+The iteration-2 re-review confirmed CR-01, WR-01, WR-03 and WR-04 resolved, and WR-02/WR-05 partly. It raised two new warnings, both fixed:
+
+| ID (iter 2) | Commit | Fix |
+|---|---|---|
+| WR-01 | d21936d | The same-tool guard compares names the way galago-core's `normalizeToolKey` does (lower-case, alphanumerics only), so `STACK`/`stack` and `FAST-SIM`/`fastsim` are refused. Tests added. |
+| WR-02 | 7acbfc2 | The F.A.S.T. validation tests run every node-only assertion even when `fast_mcp` is missing. Only the `_check_args` cross-check skips, at the end, or fails under `GAL02_REQUIRE_ALL`. This was reproduced with the `fast_mcp` import blocked. |
+
+Re-verified: `GAL02_REQUIRE_ALL=1 bin/make proto test` gives 566 passed, and ruff and mypy are clean.
