@@ -226,11 +226,11 @@ recommended before live runs for the full operator experience but is not a hard 
      `10.150.1.125:5005`) with the user present and the operator's explicit go-ahead.
   3. A supervised live GAL-02 handoff runs STACK -> F.A.S.T. -> STACK to SUCCESS on the hardware.
 
-**Plans**: 4 plans (waves 1-4, strictly sequential: the deploy needs the runbook, each live event needs the deployed stack and its predecessor per D-09)
+**Plans**: 1/4 plans executed (waves 1-4, strictly sequential: the deploy needs the runbook, each live event needs the deployed stack and its predecessor per D-09)
 
 Plans:
 **Wave 1**
-- [ ] 07-01-PLAN.md — Live pre-flight gate script + live runbook + fixture-test module, authored and pinned offline (LIVE-08 scriptable half)
+- [x] 07-01-PLAN.md — Live pre-flight gate script + live runbook + fixture-test module, authored and pinned offline (LIVE-08 scriptable half)
 
 **Wave 2** *(blocked on Wave 1; operator-run, blocking-human checkpoints)*
 - [ ] 07-02-PLAN.md — Safe-order deploy on forb01: OQ-1 install-source checkpoint, core into the service `.venv`, env file, log backup, restart, reconnect, `galago-web` rebuild (LIVE-08)
@@ -269,7 +269,7 @@ Phases execute in numeric order: 4 → 5 → 6 → 7 (DEP-01 is met, so Phase 5 
 | 4. STACK Tool Registration, Reads & Estimate | v2 | 5/5 | Complete    | 2026-10-29 |
 | 5. F5-safe Transfer & Operator Acknowledge | v2 | 7/7 | Complete    | 2026-10-30 |
 | 6. GAL-02 Workflow, Simulated Workcell & PAC-Simulator Run | v2 | 4/4 | Complete    | 2026-11-02 |
-| 7. Deploy & Supervised Live STACK + Handoff | v2 | 0/TBD | Not started | - |
+| 7. Deploy & Supervised Live STACK + Handoff | v2 | 1/4 | In Progress | - |
 
 ## Backlog
 
