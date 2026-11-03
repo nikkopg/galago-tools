@@ -1,24 +1,21 @@
 ---
-status: testing
+status: complete
 phase: 07-deploy-supervised-live-stack-handoff
 source: [07-VERIFICATION.md]
 started: 2026-11-03T14:58:00Z
-updated: 2026-11-03T14:58:00Z
+updated: 2026-11-03T07:28:34.941Z
 ---
 
 ## Current Test
 
-number: 1
-name: Operator vouch — presence and the typed go for BOTH live events (LIVE-09 + LIVE-10)
-expected: |
-  The operator confirms, in one word: YOU were present and YOU typed each recorded go — 03:51:07Z (LIVE-09 rehearsal) and 05:15:06Z/05:36:05Z (LIVE-10 gates) — and supervised each live motion; no other front end ran anything outside the recorded events. (Tests 2-4's machine corroboration already passed; this vouch is the recorded premise the verifier cannot prove.)
-awaiting: user response
+[testing complete]
 
 ## Tests
 
-### 1. Operator vouches presence and the typed go for the LIVE-09 event
-expected: go 03:51:07Z was typed by the operator in a supervised session
-result: [pending]
+### 1. Operator vouch - presence and the typed go for BOTH live events (LIVE-09 + LIVE-10)
+expected: the operator was present and typed each recorded go (03:51:07Z; 05:15:06Z/05:36:05Z), each live motion supervised
+result: pass
+reported: "pass" (operator's typed vouch at the UAT checkpoint, 2026-11-03 - both gates and supervision vouched)
 
 ### 2. Operator vouches presence and the typed go for the LIVE-10 event, and that the reported queue rows match the manager UI
 expected: go recorded in row 3a-1 was typed; five legs ran under supervision
@@ -41,9 +38,9 @@ note: fix-now applied 2026-11-03 (commit ff8aac6): H-01 runbook wording reconcil
 ## Summary
 
 total: 4
-passed: 3
+passed: 4
 issues: 0
-pending: 1
+pending: 0
 skipped: 0
 blocked: 0
 
