@@ -272,6 +272,15 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _mint_step_key() -> str:
+    """A fresh per-call step key for a caller that omitted one (the review's
+    option A, 2026-11-03): UTC timestamp in microseconds first, then 8 hex
+    random digits. No model prefix; the ledger needs one-shot uniqueness per
+    key and nothing else. Mints are recorded in the ledger like any explicit
+    key, so the caller reconciles through the ledger and the reply meta."""
+    return _utcnow().strftime("%Y%m%dT%H%M%S%f") + "-" + uuid.uuid4().hex[:8]
+
+
 def _monotonic() -> float:
     """The clock of the re-attach budget. A wrapper so a test can patch it."""
     return time.monotonic()
@@ -452,8 +461,10 @@ def _check_args(command: message.Message) -> list[str]:
     problems: list[str] = []
     cmd = cast(Any, command)
     if type(command).__name__ == "Transfer":
-        if not (cmd.HasField("step_key") and cmd.step_key.strip()):
-            problems.append("step_key is required")
+        # A blank step_key is no longer a problem: the handler mints a fresh
+        # one (option A, _mint_step_key), so every run stays one-shot safe and
+        # the authoring surface can omit the key entirely (visual protocols,
+        # manual tool-page sends). A non-blank key is used byte-exact (D-06).
         if cmd.HasField("timeout_s"):
             value = cmd.timeout_s
             if not math.isfinite(value) or value < 0:
@@ -1080,8 +1091,12 @@ class StackServer(ToolServer):
         tentative = False
         self._ledger_used = False
         try:
-            # The key is used byte-exact: no strip, no case folding (D-06).
-            key = params.step_key
+            # The key is used byte-exact for a provided key: no strip, no case
+            # folding (D-06). A blank (or unset) step_key is minted instead:
+            # every call stays one-shot safe and the authoring surface can omit
+            # the key entirely (visual protocols, manual tool-page sends).
+            provided = params.step_key if params.HasField("step_key") else ""
+            key = provided if provided.strip() else _mint_step_key()
             request = _transfer_request(params)
             fp = fingerprint(self._endpoint(), request)
             budget = self._wait_budget(params)

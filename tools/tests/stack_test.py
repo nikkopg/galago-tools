@@ -1817,6 +1817,47 @@ class _TransferTestCase(_RealModeGrpcTestCase):
         return dict(document["records"])
 
 
+class TestTransferMintedKey(_TransferTestCase):
+    """A blank (or absent) step_key is minted by the handler: UTC timestamp in
+    microseconds, then 8 hex random digits. Two minted calls can never collide
+    with each other (the whole point), and a provided key is still used byte
+    exact (D-06)."""
+
+    def test_a_blank_step_key_is_minted_and_recorded(self) -> None:
+        reply = self._transfer(step_key="")
+        self.assertEqual(reply.response, SUCCESS)
+        self.assertEqual(self.core.execute_calls, 1)
+        records = self._records()
+        self.assertEqual(len(records), 1)
+        minted = next(iter(records))
+        self.assertRegex(minted, r"^\d{8}T\d{12}-[0-9a-f]{8}$")
+        self.assertEqual(records[minted]["state"], "done")
+
+    def test_two_minted_calls_get_two_distinct_keys_and_actually_move(self) -> None:
+        self._transfer(step_key="")
+        self._transfer(step_key="")
+        self.assertEqual(self.core.execute_calls, 2)
+        records = self._records()
+        self.assertEqual(len(records), 2)
+        first, second = sorted(records)
+        self.assertNotEqual(first, second)
+        for key in (first, second):
+            self.assertEqual(records[key]["state"], "done")
+
+    def test_an_explicit_key_is_used_byte_exact(self) -> None:
+        self._transfer(step_key="  padded key  ")
+        records = self._records()
+        self.assertIn("  padded key  ", records)
+
+    def test_a_whitespace_only_key_is_minted_not_stored_literally(self) -> None:
+        self._transfer(step_key="   ")
+        records = self._records()
+        minted = next(iter(records))
+        self.assertNotEqual(minted, "   ")
+        self.assertRegex(minted, r"^\d{8}T\d{12}-[0-9a-f]{8}$")
+
+
+
 class TestTransferFreshPath(_TransferTestCase):
     """XFR-01 / XFR-02 tracer: plan, write-ahead, execute, started, wait, done."""
 
@@ -4064,13 +4105,15 @@ class TestSimulatedTransferOverGrpc(_SimulatedGrpcTestCase):
         self.assertEqual(self.sleeps, [35.0])
         self._assert_core_free()
 
-    def test_missing_or_blank_step_key_is_invalid_and_does_not_sleep(self) -> None:
+    def test_missing_or_blank_step_key_is_minted_and_runs_in_simulated_mode(self) -> None:
+        # Option A: a blank/unset step_key is minted by the real handler; the
+        # simulated path has no ledger and runs its fake motion straight away,
+        # so the old INVALID_ARGUMENTS refusal no longer fires.
         for label, fields in (("unset", {}), ("blank", {"step_key": "   "})):
             with self.subTest(label):
                 reply = self._transfer(**fields)
-                self.assertEqual(reply.response, tool_base_pb2.INVALID_ARGUMENTS)
-                self.assertIn("step_key", reply.error_message)
-                self.assertEqual(self.sleeps, [])
+                self.assertEqual(reply.response, tool_base_pb2.SUCCESS)
+                self.assertNotIn("step_key", reply.error_message)
         self._assert_core_free()
 
     def test_nan_timeout_is_invalid(self) -> None:
@@ -4100,10 +4143,12 @@ class TestCheckArgs(unittest.TestCase):
         return stack_server._check_args(getattr(stack_pb2.Command, name)(**fields))
 
     def test_transfer_step_key(self) -> None:
+        # Option A: a blank/unset key is minted by the handler, so the check
+        # reports no problem for any key input; an explicit key is unchanged.
         for label, fields in (("unset", {}), ("empty", {"step_key": ""}),
                               ("blank", {"step_key": "   "})):
             with self.subTest(label):
-                self.assertEqual(len(self._problems("Transfer", **fields)), 1)
+                self.assertEqual(self._problems("Transfer", **fields), [])
         self.assertEqual(self._problems("Transfer", step_key="k"), [])
 
     def test_transfer_timeout(self) -> None:
@@ -4118,7 +4163,9 @@ class TestCheckArgs(unittest.TestCase):
         self.assertEqual(self._problems("Transfer", step_key="k"), [])
 
     def test_transfer_with_both_problems_reports_both(self) -> None:
-        self.assertEqual(len(self._problems("Transfer", timeout_s=-1.0)), 2)
+        # A blank step_key is no longer one of the reportable problems (the
+        # handler mints it), so only the bad timeout is reported.
+        self.assertEqual(len(self._problems("Transfer", timeout_s=-1.0)), 1)
 
     def test_acknowledge_guid(self) -> None:
         for label, fields in (("unset", {}), ("empty", {"guid": ""}), ("blank", {"guid": "  "})):
@@ -4426,8 +4473,13 @@ class TestUnconfiguredOrdering(_StackTestCase):
                 self.assertEqual(reply.response, NOT_READY)
                 self.assertEqual(reply.error_message, "stack: not configured")
 
-    def test_transfer_without_step_key_is_invalid_arguments(self) -> None:
-        self.assertEqual(self._dispatch("Transfer").response, tool_base_pb2.INVALID_ARGUMENTS)
+    def test_transfer_without_step_key_reaches_the_not_configured_refusal(self) -> None:
+        # Option A: the blank key is minted inside the handler, so the arg
+        # gate no longer refuses first — the not-configured ordering (D-14)
+        # still holds and answers NOT_READY as before.
+        reply = self._dispatch("Transfer")
+        self.assertEqual(reply.response, tool_base_pb2.NOT_READY)
+        self.assertEqual(reply.error_message, "stack: not configured")
 
     def test_the_refusal_machinery_is_gone(self) -> None:
         self.assertFalse(hasattr(stack_server, "UNAVAILABLE_COMMANDS"))
