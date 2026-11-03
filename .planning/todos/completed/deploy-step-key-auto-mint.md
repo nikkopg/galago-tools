@@ -1,7 +1,7 @@
 ---
 created: 2026-11-03
 source: 【gsd-quick candidate — v2.1】
-resolves_phase: ""
+resolves_phase: "07"
 ---
 
 # Deploy the adapter's step-key auto-mint to the live service
@@ -20,12 +20,12 @@ sends one-shot safe without the authoring knob.
 
 ## Steps (the 07-02 safe-order dance, per D-03/D-04/D-06/D-10)
 
-- [ ] Type-go gate: present '' + the redeploy decision (the operator's literal go recorded with a UTC timestamp — D-10)
-- [ ] D-06 pre-restart backup: newest trace_logs folder + journal + MainPID.record + `ss -ltnp` listener baseline into ~/.local/share/galago/log-backups/pre-stepkey-<ts>/
+- [x] Type-go gate: present '' + the redeploy decision (the operator's literal go recorded with a UTC timestamp — D-10)
+- [x] D-06 pre-restart backup: newest trace_logs folder + journal + MainPID.record + `ss -ltnp` listener baseline into ~/.local/share/galago/log-backups/pre-stepkey-<ts>/
 - [x]SIMPLIFIED (verified 2026-11-03}: the unit already runs an editable install (ExecStart galago-tools/.venv/bin/galago; __editable__.galago_tools-0.19.10.pth; import resolves to the repo's tools/stack/server.py) — NO reinstall: a service restart alone picks up commit 0604348. Nothing to reinstall; no uv dance. (The safe-order gate flow stays.)
-- [ ] Operator restarts `systemctl --user restart galago-tools` (after the D-06 backup gate below); checks: is-active✓, new MainPID, no traceback in journal, listeners re-baselined (the five ports), both tool servers READY
-- [ ] Live GO-gated proof: one tool-page Transfer with the step_key field LEFT BLANK → reply SUCCESS with the minted key visible in the new ledger record (the record's key matches timestamp format) — and a second blank-key transfer minutes later with a DIFFERENT minted key (no same-key refusal, part of it expected)
-- [ ] Findings: record the evidence in docs/runbooks/gal-07-live-handoff.md (a new findings row family or the 3a-n sequence follow-on) and the README's tool-page note: the field may be left blank to auto-mint
+- [x] Operator restarts `systemctl --user restart galago-tools` (after the D-06 backup gate below); checks: is-active✓, new MainPID, no traceback in journal, listeners re-baselined (the five ports), both tool servers READY
+- [x] Live GO-gated proof: one tool-page Transfer with the step_key field LEFT BLANK → reply SUCCESS with the minted key visible in the new ledger record (the record's key matches timestamp format) — and a second blank-key transfer minutes later with a DIFFERENT minted key (no same-key refusal, part of it expected)
+- [x] Findings: record the evidence in docs/runbooks/gal-07-live-handoff.md (a new findings row family or the 3a-n sequence follow-on) and the README's tool-page note: the field may be left blank to auto-mint
 
 ## Done
 
