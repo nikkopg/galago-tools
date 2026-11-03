@@ -104,7 +104,23 @@ done
 if [ -z "$lock_probe_path" ]; then
   echo "missing: a python that can import stack_automation_layer.owner_lock (tried: ${_lock_candidates[*]})"
   failed=1
-else
+fi
+if [ -n "$lock_probe_path" ] && [ -z "${GAL07_LOCK_PROBE_PYTHON:-}" ] && [ "$lock_probe_path" != "$SERVICES_VENV/bin/python" ]; then
+  # H-02 corroboration (review fix): the host fallback python must prove its core resolves the
+  # SAME lock dir the service venv's core resolves — an unpinned interpreter could read a
+  # different namespace and never see a live holder. A fallback with no service-venv
+  # corroboration at all refuses: an uncorroborated lock path must not answer LOCK-FREE.
+  _sv_dir=$("$SERVICES_VENV/bin/python" -c "import stack_automation_layer.owner_lock as ol; print(ol.default_lock_dir())" 2>/dev/null)
+  _fb_dir=$("$lock_probe_path" -c "import stack_automation_layer.owner_lock as ol; print(ol.default_lock_dir())" 2>/dev/null)
+  if [ -z "$_sv_dir" ] || [ -z "$_fb_dir" ]; then
+    echo "forbidden: the fallback lock-probe interpreter ($lock_probe_path) is uncorroborated — the service venv core does not resolve a lock dir to compare against, so a live holder could go unseen (review H-02)"
+    failed=1
+  elif [ "$_fb_dir" != "$_sv_dir" ]; then
+    echo "forbidden: the fallback lock-probe interpreter resolves a different lock dir ($_fb_dir) than the service venv core ($_sv_dir) — the probe would look at the wrong lock file (review H-02)"
+    failed=1
+  fi
+fi
+if [ -n "$lock_probe_path" ] && [ "$failed" != "1" ]; then
   lock_probe_out="$(
     "$lock_probe_path" - "$STACK_HOST_PORT" "$STACK_PORT_PORT" <<'STACK_LOCK_PROBE'
 import fcntl, os, sys, json

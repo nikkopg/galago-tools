@@ -18,8 +18,11 @@ there. This runbook is the only file of the two that points at the live STACK.
   trailing space) is, by core design, a different endpoint key with its own lock and state files,
   and would silently split the single-owner guarantee (D-05).
 - stack-mcp is closed during Galago runs. The pre-flight's lock probe refuses the session whenever
-  another front end holds the owner lock; the runbook does not stop stack-mcp, it only refuses to
-  run while it is open (D-05).
+  another front end (`mcp` / `stack-mcp` / an unknown owner) holds the owner lock; the galago tool
+  server's own holder is the expected single-owner state while it is up and passes as the
+  LOCK-FREE-equivalent `ok:` case (the 9344957 exemption); the fallback lock-probe interpreter is
+  corroborated against the service venv's own core lock resolution, and an uncorroborated probe
+  refuses (D-05). The runbook does not stop stack-mcp, it only refuses to run while it is open.
 - A state file, a stack ledger file or a lock file is never deleted — not to clean up, not to
   recover, not after a failure. A missing state file reads as a clean start and silently clears a
   failure latch; a deleted ledger file defeats the no-second-transfer guarantee. Recovery is
@@ -49,7 +52,10 @@ bash docs/runbooks/gal-07-live-check.sh
   pieces missing at once are visible in one run; the checks with issues print their own
   `missing:`/`forbidden:`/`warn:` lines above the verdict. Check 1 requires the manager to answer
   GET `/api/general/application` with productName `Stack manager`; check 2 refuses the session
-  when the owner lock for `10.150.1.125:5005` is already held.
+  when a foreign front end (owner `mcp` / `stack-mcp` / unknown) holds the owner lock for
+  `10.150.1.125:5005` — the galago tool server's own holder is the expected single-owner state and
+  passes, and the fallback lock-probe interpreter must corroborate the service venv's lock-dir
+  resolution or the check refuses (uncorroborated fail-closed).
 - Any `BLOCKED:` verdict (exit 1) stops the session. Never hand-edit a config, hand-write a store
   entry or drive the queue another way to clear a `BLOCKED:` line; resolve the named piece
   through this runbook's own operator steps and re-run the script.
