@@ -41,7 +41,7 @@ Companion: galago-core's own parallel milestone (codegen, command forms, operato
   can never send a second transfer for the same step, plus an operator-only failure acknowledge.
 - [x] **Phase 6: GAL-02 Workflow, Simulated Workcell & PAC-Simulator Run** - Prove the STACK -> (completed 2026-11-02)
   F.A.S.T. -> STACK handoff end to end, and that a re-dispatch sends nothing, before any hardware.
-- [ ] **Phase 7: Deploy & Supervised Live STACK + Handoff** - Deploy in the safe order, then prove a
+- [x] **Phase 7: Deploy & Supervised Live STACK + Handoff** - Deploy in the safe order, then prove a (completed 2026-11-03)
   live STACK Transfer and the live handoff on the instrument with the user present.
 
 ## Phase Details
@@ -226,7 +226,7 @@ recommended before live runs for the full operator experience but is not a hard 
      `10.150.1.125:5005`) with the user present and the operator's explicit go-ahead.
   3. A supervised live GAL-02 handoff runs STACK -> F.A.S.T. -> STACK to SUCCESS on the hardware.
 
-**Plans**: 4/4 plans executed (waves 1-4, strictly sequential: the deploy needs the runbook, each live event needs the deployed stack and its predecessor per D-09)
+**Plans**: 4/4 plans complete (waves 1-4, strictly sequential: the deploy needs the runbook, each live event needs the deployed stack and its predecessor per D-09)
 
 Plans:
 **Wave 1**
@@ -269,7 +269,7 @@ Phases execute in numeric order: 4 → 5 → 6 → 7 (DEP-01 is met, so Phase 5 
 | 4. STACK Tool Registration, Reads & Estimate | v2 | 5/5 | Complete    | 2026-10-29 |
 | 5. F5-safe Transfer & Operator Acknowledge | v2 | 7/7 | Complete    | 2026-10-30 |
 | 6. GAL-02 Workflow, Simulated Workcell & PAC-Simulator Run | v2 | 4/4 | Complete    | 2026-11-02 |
-| 7. Deploy & Supervised Live STACK + Handoff | v2 | 4/4 | In Progress | - |
+| 7. Deploy & Supervised Live STACK + Handoff | v2 | 4/4 | Complete    | 2026-11-03 |
 
 ## Backlog
 
