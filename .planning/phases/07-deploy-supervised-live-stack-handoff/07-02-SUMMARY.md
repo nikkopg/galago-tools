@@ -167,3 +167,9 @@ Resolved — see [07-USER-SETUP.md](./07-USER-SETUP.md). No external accounts, e
 ---
 *Phase: 07-deploy-supervised-live-stack-handoff*
 *Completed: 2026-11-03*
+
+## Self-Check: PASSED
+
+All key files exist on disk; all five plan commits (f13ec3d, f4c9f02, b9011f6, d9488c0, 1b26186)
+are ancestors of HEAD. Measured 4 task commits from the plan ledger (b7c6ab7..d9488c0) plus this
+metadata commit.

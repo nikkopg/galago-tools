@@ -5,16 +5,16 @@ milestone_name: STACK Tool & STACK↔F.A.S.T. Handoff
 current_phase: 07
 current_phase_name: Deploy & Supervised Live STACK + Handoff
 status: executing
-stopped_at: Completed 07-01-PLAN.md
-last_updated: "2026-11-02T10:51:53.630Z"
+stopped_at: Completed 07-02-PLAN.md
+last_updated: "2026-11-03T01:41:41.585Z"
 last_activity: 2026-11-02
 last_activity_desc: Phase 07 execution started
-state_head: 4ca4112e8405b23ad2eefe2114a26923791c50ea
+state_head: 1b261866458eb7139d9383ec280945a22302e101
 progress:
   total_phases: 4
   completed_phases: 3
   total_plans: 20
-  completed_plans: 17
+  completed_plans: 18
   percent: 75
 ---
 
@@ -32,7 +32,7 @@ acknowledges on its own. For the STACK: a step never sends a second transfer.
 ## Current Position
 
 Phase: 07 (Deploy & Supervised Live STACK + Handoff) — EXECUTING
-Plan: 2 of 4
+Plan: 4 of 4
 Status: Ready to execute
 Last activity: 2026-11-02 — Phase 07 execution started
 
@@ -100,6 +100,7 @@ Progress: [████████░░] 75%
 | Phase 06 P03 | 20min | 3 tasks | 1 files |
 | Phase 06 P04 | operator-delegated | 3 tasks | 1 files |
 | Phase 07 P01 | 29 min | 3 tasks | 3 files |
+| Phase 07 P02 | ~14h 21m elapsed (two sessions; active ~75min + supervised rebuild cycle) | 3 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -151,6 +152,9 @@ v2 roadmap-level decisions (2026-10-28, detail in PROJECT.md Key Decisions):
 - [Phase 07]: [Phase 07]: 07-01 credential handling is presence-only (assignment-line count + 0600 mode), advisory warn: by default and blocking under GAL07_REQUIRE_STACK_ENV=1, which the runbook's Parts 2-3 set — D-05's detection signal is reused through the pinned core's own owner-lock helpers, not a re-implemented lock name
 - [Phase 07]: gate tests use GAL07_REQUIRE_ALL as the REQUIRE_ALL_ENV variant; gal02_harness's shared constant is not mutated, so GAL02_REQUIRE_ALL promote semantics stay intact — a skip survives as a skip otherwise; GAL07_REQUIRE_ALL=1 in verification runs turns it into a failure
 - [Phase 07]: [Phase 07]: 07-01 the live pre-flight gate reads the production API shapes (STACK store config nested at .config.stack, run list as a {count,data} envelope) so the real-host pre-deploy run BLOCKs on exactly the two known gaps: the service-venv core pin and the missing F.A.S.T. store entry — the plan's interfaces section assumed a flat config.host and a bare-array runs list; both were probed live against production :3010 during Task 2 verification
+- [Phase 07]: 07-02 OQ-1: install source is a user-recorded local-clone-waiver of D-04 (git+https pin stalls in GitLab OAuth device flow); bundle installed from the verified local clone HEAD 934a621…, evidence in runbook row 1a-1/1a-2 — the only acceptable core build is the pinned 934a621…; the waiver is session-scoped and recorded verbatim so future installs do not silently fall back
+- [Phase 07]: 07-02 deliver order held on real hardware: install → restart → reconnect → rebuild, proven by four strictly-increasing UTC timestamps in findings row 1a-6 (2026-11-02T11:20:00Z / 11:24:34Z / 12:18:28Z / 2026-11-03T01:31:16Z) — LIVE-08 safe-order guarantee: a newer UI must never run against an ungated core (D-03)
+- [Phase 07]: 07-02: galago-web rollback anchor galago-core-galago-web:rollback-pre-gal07 = sha256:938217230697… (tagged before the rebuild); rebuilt image sha256:2f609032c0e3… — an image-ID rollback path with a real tag beats a summary note; Pitfall 3's cache-hit STOP was compared live and did not fire
 
 ### Pending Todos
 
@@ -160,7 +164,7 @@ None yet.
 
 - fast-mcp `fix/run-recovery-gate` (holding `76f8c3f` and `b30b38d`) is not on GitLab; a clean
   install from the pin fails until it is pushed. Install from the local clone meanwhile.
-- WR-02 (`_is_no_error`'s loose `in (None, 0)` check) — v2 debt, medium, reporting only.
+- WR-02 (`_is_no_error`'s loose `in (, 0)` check) — v2 debt, medium, reporting only.
 - galago-core debt out of this repo's scope: run-page Gantt bar draws past an abort; "Connect all
   tools" sends empty configs; "Item N not found" when the queue clears mid-abort; F.A.S.T. tool-page
   status can render stale after a reconnect.
@@ -174,6 +178,7 @@ None yet.
   store. Must be configured first.' — carries into the Phase 7 supervised checklist.
 - v2 hard constraint: no STACK motion in default tests; live motion only in Phase 7, supervised and
   runbook-gated; never `10.150.1.125` / `stack-server` before Phase 7.
+- GAL-07 pre-flight owner-lock probe (gal-07-live-check.sh check 2, 07-01 artifact) blocks PREFLIGHT OK while the session's own galago tool server holds the STACK owner lock (expected single-owner state after real-mode Configure); fixes needed before plan 07-03 Part 2's entry gate — see .planning/phases/07-.../deferred-items.md (logged by 07-02 per the scope boundary)
 
 ## Deferred Items
 
@@ -185,8 +190,8 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-02T10:51:37.519Z
-Stopped at: Completed 07-01-PLAN.md
+Last session: 2026-11-03T01:41:26.293Z
+Stopped at: Completed 07-02-PLAN.md
 Resume file: None
 
 ## Operator Next Steps
