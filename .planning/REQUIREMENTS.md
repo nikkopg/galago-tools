@@ -84,7 +84,7 @@ milestone; stack-automation-layer core gaps are fixed there via `/gsd-quick`. Re
   shares the persisted failure latch; the state file is never deleted
 - [x] **LIVE-09**: A supervised, runbook-gated live STACK Transfer reaches `ran` on `stack2-6` with the
   user present
-- [ ] **LIVE-10**: A supervised live GAL-02 handoff runs STACK → F.A.S.T. → STACK to SUCCESS on hardware
+- [x] **LIVE-10**: A supervised live GAL-02 handoff runs STACK → F.A.S.T. → STACK to SUCCESS on hardware
 
 ### Cross-repo dependencies (tracked here, built elsewhere)
 
@@ -141,7 +141,7 @@ milestone; stack-automation-layer core gaps are fixed there via `/gsd-quick`. Re
 | FLOW-04 | Phase 6 | Complete |
 | LIVE-08 | Phase 7 | Complete |
 | LIVE-09 | Phase 7 | Complete |
-| LIVE-10 | Phase 7 | Pending |
+| LIVE-10 | Phase 7 | Complete |
 
 **External gates (not requirements, not mapped to a phase):**
 
