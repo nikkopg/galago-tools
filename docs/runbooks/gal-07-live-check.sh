@@ -19,7 +19,10 @@
 #   2. the STACK owner lock for $STACK_HOST:$STACK_PORT is free — probed through the pinned
 #      core's own endpoint_key/lock_path/default_lock_dir (honors STACK_MCP_LOCK_DIR) plus a
 #      non-blocking flock, never a re-implemented lock name; a held lock is refused with the
-#      StackOwnedError wording naming the holder record
+#      StackOwnedError wording naming the holder record, EXCEPT a holder with owner `galago`
+#      — the session's own STACK tool server, the expected single-owner state after a
+#      real-mode Configure — which is reported as an `ok:` line and does not block
+#      (owner `mcp`, stack-mcp, or an unknown/absent owner still blocks)
 #   3. the service venv holds stack_automation_layer pinned at
 #      934a621ece116a8b263897c1e9b62b57374f4ef3 — asserted from the distribution's
 #      direct_url.json vcs_info.commit_id
@@ -130,8 +133,17 @@ except BlockingIOError:
     try:
         obj = json.loads(raw.decode("utf-8").strip())
         holder = str(LockHolder(obj.get("owner"), obj.get("pid")))
+        owner = obj.get("owner")
     except Exception:
         holder = str(LockHolder(None, None))  # "an unknown process", the core's fallback
+        owner = None
+    # A holder record with owner `galago` is the session's own STACK tool server — the
+    # expected single-owner state after the runbook's real-mode Configure (Parts 2-3 run
+    # while the tool server is up). It passes as LOCK-FREE-equivalent; any other owner
+    # (mcp / stack-mcp / unknown / a record that will not parse) still blocks.
+    if owner == "galago":
+        print("GALAGO-OWNED", holder)
+        sys.exit(0)
     print(
         f"{host}:{port} is already owned by {holder}; only one front end may hold "
         "it at a time (stop the other owner first)"
@@ -144,7 +156,9 @@ STACK_LOCK_PROBE
   )"
   lock_probe_rc=$?
   if [ "$lock_probe_rc" -eq 0 ]; then
-    :
+    if [ "${lock_probe_out%% *}" = "GALAGO-OWNED" ]; then
+      echo "ok: the owner lock at $STACK_HOST_PORT:$STACK_PORT_PORT is held by ${lock_probe_out#GALAGO-OWNED } — the expected single-owner state (the session's own STACK tool server holds the lock; Galago permits itself)"
+    fi
   elif [ "$lock_probe_rc" -eq 3 ]; then
     echo "missing: an owner lock free at $STACK_HOST_PORT:$STACK_PORT_PORT — STACK manager $lock_probe_out"
     failed=1

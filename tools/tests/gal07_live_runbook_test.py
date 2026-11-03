@@ -225,6 +225,7 @@ class TestLiveGate(unittest.TestCase):
         credentials_mode: int = 0o600,
         credentials_assignments: int = 1,
         require_stack_env: bool = False,
+        holder_owner: str | None = "mcp",
         extra_env: dict[str, str] | None = None,
     ) -> Iterator[dict[str, str]]:
         """Every check's target is a fixture, so one gate run in the sandbox either passes or
@@ -270,11 +271,15 @@ class TestLiveGate(unittest.TestCase):
             if with_holder:
                 # The probe cannot see content without a live holder: the test process holds the
                 # non-blocking flock and the 256-byte holder record for the whole run below.
+                # holder_owner selects the recorded owner: "mcp" (another front end — blocked),
+                # "galago" (the session's own tool server — the expected single-owner state,
+                # PASSes), None (unknown owner — blocked).
                 path = _lock_file_path(lock_dir)
                 fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 record = json.dumps(
-                    {"owner": "mcp", "pid": os.getpid(), "endpoint": f"{LIVE_HOST}:{LIVE_PORT}"})
+                    {"owner": holder_owner, "pid": os.getpid(),
+                     "endpoint": f"{LIVE_HOST}:{LIVE_PORT}"})
                 data = record.ljust(256).encode("utf-8")
                 os.lseek(fd, 0, os.SEEK_SET)
                 os.write(fd, data)
@@ -416,6 +421,34 @@ class TestLiveGate(unittest.TestCase):
                 self.assertEqual(completed.returncode, 1, (label, completed.stdout))
                 self.assertTrue(lines[-1].startswith("BLOCKED:"), (label, lines[-1]))
                 self.assertIn(case["needle"], "\n".join(lines), (label, lines))
+
+    def test_gate_accepts_the_galago_owned_lock(self) -> None:
+        """A holder record with owner `galago` is the session's own STACK tool server — the
+        expected single-owner state after a real-mode Configure (seen live 2026-11-03T01:18Z:
+        `galago (pid 4004972)` holding 10.150.1.125:5005). The probe reports LOCK-FREE-
+        equivalent as an `ok:` line and the gate still ends PREFLIGHT OK, so Parts 2-3 can run
+        with the tool server up; a restart-to-reset is forbidden (D-11), so this must pass."""
+        with self._complete_env(with_holder=True, holder_owner="galago") as env:
+            completed = self._run(env)
+        lines = self._lines(completed)
+        self.assertEqual(completed.returncode, 0, completed.stdout)
+        self.assertEqual(lines[-1], "PREFLIGHT OK")
+        self.assertEqual(
+            [x for x in lines if x.startswith(("missing:", "forbidden:", "warn:"))], [], lines)
+        joined = "\n".join(lines)
+        self.assertEqual(len([x for x in lines if x.startswith("ok: the owner lock")]), 1, lines)
+        self.assertIn("held by galago", joined, lines)
+        self.assertIn("the expected single-owner state", joined, lines)
+
+    def test_gate_blocks_an_unknown_lock_owner(self) -> None:
+        """A holder record whose owner is absent/unknown is NOT the expected case — the probe
+        falls through to the core's unknown-process fallback and the gate still blocks."""
+        with self._complete_env(with_holder=True, holder_owner=None) as env:
+            completed = self._run(env)
+        lines = self._lines(completed)
+        self.assertEqual(completed.returncode, 1, completed.stdout)
+        self.assertTrue(lines[-1].startswith("BLOCKED:"), lines)
+        self.assertIn("only one front end may hold it", "\n".join(lines), lines)
 
     def test_gate_credential_env_is_advisory_when_unrequired(self) -> None:
         cases: dict[str, dict[str, Any]] = {
