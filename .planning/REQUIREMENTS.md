@@ -82,7 +82,7 @@ milestone; stack-automation-layer core gaps are fixed there via `/gsd-quick`. Re
   `galago-web`); stack-mcp closed during Galago runs; both front ends use the identical host string,
   lock dir and core state dir (same OS user, or the same `STACK_STATE_DIR`), so a galago <-> mcp hand-over
   shares the persisted failure latch; the state file is never deleted
-- [ ] **LIVE-09**: A supervised, runbook-gated live STACK Transfer reaches `ran` on `stack2-6` with the
+- [x] **LIVE-09**: A supervised, runbook-gated live STACK Transfer reaches `ran` on `stack2-6` with the
   user present
 - [ ] **LIVE-10**: A supervised live GAL-02 handoff runs STACK → F.A.S.T. → STACK to SUCCESS on hardware
 
@@ -140,7 +140,7 @@ milestone; stack-automation-layer core gaps are fixed there via `/gsd-quick`. Re
 | FLOW-03 | Phase 6 | Complete |
 | FLOW-04 | Phase 6 | Complete |
 | LIVE-08 | Phase 7 | Complete |
-| LIVE-09 | Phase 7 | Pending |
+| LIVE-09 | Phase 7 | Complete |
 | LIVE-10 | Phase 7 | Pending |
 
 **External gates (not requirements, not mapped to a phase):**
