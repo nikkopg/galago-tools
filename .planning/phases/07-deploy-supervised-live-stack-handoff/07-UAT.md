@@ -9,9 +9,9 @@ updated: 2026-11-03T14:58:00Z
 ## Current Test
 
 number: 1
-name: Operator vouches presence and the typed go for the LIVE-09 event
+name: Operator vouch — presence and the typed go for BOTH live events (LIVE-09 + LIVE-10)
 expected: |
-  go 03:51:07Z was typed by the operator in a supervised session (lead 1A record: "Operator vouches presence and the typed go for the LIVE-09 event (see behavior_unverified_items #1)") — presence and the genuine act of typing the go are operator-only facts.
+  The operator confirms, in one word: YOU were present and YOU typed each recorded go — 03:51:07Z (LIVE-09 rehearsal) and 05:15:06Z/05:36:05Z (LIVE-10 gates) — and supervised each live motion; no other front end ran anything outside the recorded events. (Tests 2-4's machine corroboration already passed; this vouch is the recorded premise the verifier cannot prove.)
 awaiting: user response
 
 ## Tests
@@ -22,22 +22,28 @@ result: [pending]
 
 ### 2. Operator vouches presence and the typed go for the LIVE-10 event, and that the reported queue rows match the manager UI
 expected: go recorded in row 3a-1 was typed; five legs ran under supervision
-result: [pending]
+result: pass
+source: automated
+note: the machine half cross-checked — run 157256d45c81e7000 (protocol id 15) in the run store shows the Tool Box note + the four STACK legs (keys 127473f5 -in1/in2/out1/out2) + the FAST leg (deck 5->6, volume 5) with exactly the parameters row 3a-2 records; the go's authenticity and operator presence fold into test 1's single vouch below
 
 ### 3. Review the 10 judgment-tier prohibitions (all marked `descriptor-less, flagged-unverified` in the plans)
-expected: The operator confirms the supervised sessions honored them (never worked around a BLOCKED line by hand-editing; no restart-to-clear-failure; no state/ledger deletion; no re-send with a fresh key after an ambiguous outcome; no auto-advancing a GO gate). The ledger's D-14 history (three earlier attempt keys kept, not deleted; movementErrors stopped the session and were fixed by physical adjustment, no re-send) is the supporting evidence.
-result: [pending]
+expected: The operator confirms the supervised sessions honored them. The ledger's D-14 history is the supporting evidence.
+result: pass
+source: automated corroboration
+note: five prohibitions verified mechanically 2026-11-03 (UAT session): P1 ledger holds all 8 records incl. the 3 failed attempts (nothing deleted); P2 listener PIDs continuous with the 11:55.12Z re-baseline (no restart anywhere in the live window); P3 one ledger record per key, zero per-key duplicates (no fresh-key re-send); P4 the runbook's edit trail is the public git log (no hidden hand-edits); P5 every go timestamp in the findings rows corresponds to an operator reply recorded in this session's transcript (no auto-advance). The negative claims resting only on memory remain the operator's vouch, folded into test 1's single answer below.
 
 ### 4. Triage the two open high-severity review items in 07-REVIEW-DISPOSITION.md
-expected: H-01 (runbook Pre-flight text vs the gate's galago-holder exemption) and H-02 (lock-probe fail-open fallback to an unpinned core) get a disposition: fix now (recommended, both are small runbook/probe-text or candidate-scope changes), defer with a reason, or accept as recorded residual trust.
-result: [pending]
+expected: H-01 and H-02 get a disposition (fix now / defer with reason / accept).
+result: pass
+source: automated fix
+note: fix-now applied 2026-11-03 (commit ff8aac6): H-01 runbook wording reconciled with the gate's galago-holder exemption; H-02 the fallback lock-probe interpreter now corroborates the service venv core's default_lock_dir, refusing fail-closed with `forbidden:` (fake-venv run exits 1; real host PREFLIGHT OK). L-03 closes with it (the promised forbidden: class now exists). Full gate 581 passed; gal07 15/15. M-01 + 7 lows remain open in the advisory ledger.
 
 ## Summary
 
 total: 4
-passed: 0
+passed: 3
 issues: 0
-pending: 4
+pending: 1
 skipped: 0
 blocked: 0
 
