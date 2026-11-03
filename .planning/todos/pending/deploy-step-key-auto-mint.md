@@ -22,9 +22,8 @@ sends one-shot safe without the authoring knob.
 
 - [ ] Type-go gate: present '' + the redeploy decision (the operator's literal go recorded with a UTC timestamp — D-10)
 - [ ] D-06 pre-restart backup: newest trace_logs folder + journal + MainPID.record + `ss -ltnp` listener baseline into ~/.local/share/galago/log-backups/pre-stepkey-<ts>/
-- [ ] Reinstall galago-tools into the service venv from the local clone at the pin-until-checked HEAD (uv only, never pip — v1 rule), dry-run preview = the one galago-tools package
-- [ ] Verify the reinstall contents: `galago_tools.egg-info`/dist-info present + `python -m pytest tools/tests/stack_test.py` under the service venv (275 passed incl. TestTransferMintedKey)
-- [ ] Operator restarts `systemctl --user restart galago-tools`; checks: is-active✓, new MainPID, no traceback in journal, listeners re-baselined (the five ports), both tool servers READY
+- [x]SIMPLIFIED (verified 2026-11-03}: the unit already runs an editable install (ExecStart galago-tools/.venv/bin/galago; __editable__.galago_tools-0.19.10.pth; import resolves to the repo's tools/stack/server.py) — NO reinstall: a service restart alone picks up commit 0604348. Nothing to reinstall; no uv dance. (The safe-order gate flow stays.)
+- [ ] Operator restarts `systemctl --user restart galago-tools` (after the D-06 backup gate below); checks: is-active✓, new MainPID, no traceback in journal, listeners re-baselined (the five ports), both tool servers READY
 - [ ] Live GO-gated proof: one tool-page Transfer with the step_key field LEFT BLANK → reply SUCCESS with the minted key visible in the new ledger record (the record's key matches timestamp format) — and a second blank-key transfer minutes later with a DIFFERENT minted key (no same-key refusal, part of it expected)
 - [ ] Findings: record the evidence in docs/runbooks/gal-07-live-handoff.md (a new findings row family or the 3a-n sequence follow-on) and the README's tool-page note: the field may be left blank to auto-mint
 
