@@ -26,7 +26,7 @@ See: .planning/PROJECT.md (updated 2026-11-02)
 **Core value:** An operator running an instrument step from Galago can always see what the instrument
 is doing and recover it themselves; no adapter code path pauses, resumes, aborts, cancels, retries or
 acknowledges on its own. For the STACK: a step never sends a second transfer.
-**Current focus:** Phase 07 — Deploy & Supervised Live STACK + Handoff
+**Current focus:** Planning next milestone (v2 archived 2026-11-04; candidates in PROJECT.md)
 
 ## Current Position
 
