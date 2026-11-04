@@ -7,7 +7,7 @@ audit-open / audit-uat / complete-milestone until it carries a `status:` field.
 
 - GAL-07 pre-flight owner-lock probe (docs/runbooks/gal-07-live-check.sh, check 2) blocks on the
   session's own galago tool server after Configure
-  **status:** open
+  **status:** done — fixed by 07-03 commit 9344957 (the probe treats a holder record with owner `galago` as the expected single-owner state; verified live at row 3a-1 and by the re-verification)
   **What:** the probe refuses `PREFLIGHT OK` whenever the lock at 10.150.1.125:5005 is held at
   all. Once the STACK tool is configured in real mode, its own tool server (galago owner,
   pid 4004972) holds that lock persistently — seen live 2026-11-03T01:18Z: `missing: an owner
