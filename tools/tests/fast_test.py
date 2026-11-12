@@ -63,6 +63,7 @@ try:
         CONTROL_COMMANDS,
         COMMAND_TO_SERVICE_METHOD,
         MOTION_LOCK_COMMANDS,
+        READ_COMMANDS,
         FastServer,
         _check_args,
         _message_for,
@@ -874,6 +875,101 @@ class _RealModeGrpcTestCase(unittest.TestCase):
         self.addCleanup(release.set)
         self.assertTrue(entered.wait(timeout=5))
         return release, thread, result
+
+
+def _plate(plate_id: int, description: str = "", row_count: int = 8, col_count: int = 12,
+           working_capacity: float = 200.0) -> types.SimpleNamespace:
+    """A duck-typed stand-in for fast_mcp.knowledge.PlateDef (the adapter reads
+    only these five attributes)."""
+    return types.SimpleNamespace(
+        id=plate_id, description=description, row_count=row_count,
+        col_count=col_count, working_capacity=working_capacity)
+
+
+class TestGetPlatesOverGrpc(_RealModeGrpcTestCase):
+    """The read-only get_plates command proves the READ_COMMANDS bypass on the
+    real base_server gate: sent over the gRPC stub while a blocked Transfer
+    holds the tool BUSY (a direct handler call would never reach the gate)."""
+
+    def _get_plates(self, **fields: Any) -> tool_base_pb2.ExecuteCommandReply:
+        return cast(tool_base_pb2.ExecuteCommandReply, self.stub.ExecuteCommand(
+            self._fast(get_plates=fast_pb2.Command.GetPlates(**fields))))
+
+    def test_get_plates_answers_while_a_transfer_holds_the_tool_busy(self) -> None:
+        self.service.plate_definitions.return_value = [
+            _plate(12, "Greiner 96 flat"), _plate(3, "Deep well", working_capacity=1000.0)]
+        release, thread, result = self._start_blocked_transfer()
+        self.assertEqual(self._health().status, BUSY)
+        self.assertTrue(self.server._motion_lock.locked())
+
+        reply = self._get_plates()
+
+        self.assertEqual(reply.response, SUCCESS, reply.error_message)
+        self.assertTrue(reply.return_reply)
+        plates = MessageToDict(reply.meta_data)["plates"]
+        self.assertEqual([p["id"] for p in plates], [3, 12])
+        self.service.plate_definitions.assert_called_once_with(refresh=False)
+        self.service.status.assert_not_called()
+        self.assertEqual(self._health().status, BUSY)
+        self.assertTrue(self.server._motion_lock.locked())
+        self.assertTrue(thread.is_alive())
+
+        release.set()
+        thread.join(10)
+        self.assertEqual(result["transfer"].response, SUCCESS)
+        self.service.run_transfer.assert_called_once()
+        self.assertEqual(self._health().status, READY)
+
+    def test_failing_get_plates_leaves_last_error_untouched_mid_transfer(self) -> None:
+        """WR-04: a get_plates read never clears or overwrites last_error (what
+        GetStatus reports as error_message while a Transfer runs)."""
+        release, thread, result = self._start_blocked_transfer()
+        self.server.last_error = "earlier failure"
+        self.service.plate_definitions.side_effect = httpx.ConnectError("refused")
+
+        reply = self._get_plates()
+
+        self.assertNotEqual(reply.response, SUCCESS)
+        self.assertNotIn("plates", MessageToDict(reply.meta_data))
+        self.assertEqual(self.server.last_error, "earlier failure")
+        self.assertEqual(self._health().error_message, "earlier failure")
+        self.assertEqual(self._health().status, BUSY)
+        release.set()
+        thread.join(10)
+        self.assertEqual(result["transfer"].response, SUCCESS)
+
+    def test_successful_get_plates_leaves_last_error_untouched_mid_transfer(self) -> None:
+        release, thread, result = self._start_blocked_transfer()
+        self.server.last_error = "earlier failure"
+        self.service.plate_definitions.return_value = [_plate(1)]
+
+        reply = self._get_plates()
+
+        self.assertEqual(reply.response, SUCCESS, reply.error_message)
+        self.assertEqual(self.server.last_error, "earlier failure")
+        self.assertEqual(self._health().error_message, "earlier failure")
+        release.set()
+        thread.join(10)
+        self.assertEqual(result["transfer"].response, SUCCESS)
+
+    def test_get_plates_exception_still_records_last_error_after_clearing_the_flag(self) -> None:
+        self.server.last_error = "earlier failure"
+        self.service.plate_definitions.side_effect = RuntimeError("boom")
+
+        reply = self._get_plates()
+
+        self.assertEqual(reply.response, DRIVER_ERROR)
+        self.assertEqual(self.server.last_error, "boom")
+        self.assertFalse(getattr(self.server._read_bypass, "active", False))
+
+    def test_control_commands_still_write_last_error(self) -> None:
+        """The suppression is for READ_COMMANDS only: a pause/resume/abort
+        bypass keeps writing last_error exactly as before."""
+        self.server.last_error = "earlier failure"
+        self.service.pause.return_value = {"errorCode": 0}
+        reply = self.stub.ExecuteCommand(self._fast(pause=fast_pb2.Command.Pause()))
+        self.assertEqual(reply.response, SUCCESS, reply.error_message)
+        self.assertEqual(self.server.last_error, "")
 
 
 class TestControlCommandsOverGrpc(_RealModeGrpcTestCase):
@@ -2623,6 +2719,7 @@ class TestOneToOneSurface(unittest.TestCase):
         service.pause.return_value = {"errorCode": 0}
         service.wait.return_value = Ran(
             outcome=RunOutcome(state="idle", done=True, percent=100))
+        service.plate_definitions.return_value = []
 
         calls = {
             "Transfer": (fast_pb2.Command.Transfer(**_ALL_TRANSFER_FIELDS),),
@@ -2635,6 +2732,7 @@ class TestOneToOneSurface(unittest.TestCase):
             "Abort": (fast_pb2.Command.Abort(return_liquid="no"),),
             "Resume": (fast_pb2.Command.Resume(is_tip_broken="no"),),
             "Pause": (fast_pb2.Command.Pause(),),
+            "GetPlates": (fast_pb2.Command.GetPlates(),),
         }
         self.assertEqual(set(calls), set(COMMAND_TO_SERVICE_METHOD))
         for command_name, args in calls.items():
@@ -3184,6 +3282,9 @@ _SCOPED_ATTRS: dict[str, frozenset[str]] = {
     "resume": frozenset({"Resume"}),
     "abort": frozenset({"Abort"}),
     "wait": frozenset({"Resume", "Transfer", "RunProtocol"}),
+    # The read-only plate list: confined to GetPlates (it never takes the
+    # motion lock and never reads status).
+    "plate_definitions": frozenset({"GetPlates"}),
 }
 # D-16: functions that may only record observed state -- no access to
 # .service, and no call naming a control or motion method. Plan 01-05 adds
@@ -3193,9 +3294,10 @@ _RECORD_ONLY_FUNCTIONS = frozenset(
 # D-14: the only functions allowed to call service.status().
 _STATUS_READERS = frozenset({"_get_status", "_build_run_state"})
 # D-08: functions on the control path, which must never compare against an
-# instrument-state string.
+# instrument-state string. GetPlates is here too: it is a bypassed read with
+# no idle check, so it can never gate on an instrument state.
 _CONTROL_PATH_FUNCTIONS = frozenset(
-    {"Pause", "Resume", "Abort", "ExecuteCommand", "_dispatchCommand"})
+    {"Pause", "Resume", "Abort", "GetPlates", "ExecuteCommand", "_dispatchCommand"})
 # Every service method and adapter method name that moves or queries the
 # instrument -- used by the record-only and status-only-reader rules below.
 _COMMANDING_NAMES = frozenset({
@@ -3286,7 +3388,7 @@ def _adapter_invariant_violations(tree: ast.Module) -> list[str]:
     # HTTPError.
     banned_attrs = {
         "verify_deck_layout", "active_tray",
-        "plate_definitions", "dispense_report", "start_run",
+        "dispense_report", "start_run",
     }
     allowed_nodes: dict[str, set[int]] = {}
     for attr, owners in _SCOPED_ATTRS.items():
@@ -3368,6 +3470,15 @@ def _adapter_invariant_violations(tree: ast.Module) -> list[str]:
                 violations.append(
                     f".status() call at line {node.lineno} is outside {readers_text}()")
 
+    # GetPlates never touches the motion lock: a read that answers during a
+    # run must not contend with the Transfer that holds it.
+    get_plates = function_defs.get("GetPlates")
+    if get_plates is not None:
+        for node in ast.walk(get_plates):
+            if isinstance(node, ast.Attribute) and node.attr == "_motion_lock":
+                violations.append(
+                    f"GetPlates() touches _motion_lock at line {node.lineno}")
+
     # D-08: no control-path function may compare against an instrument-state
     # string. _log_progress's `state == "running"` bookkeeping is deliberately
     # not covered -- it observes, it does not gate a command.
@@ -3437,6 +3548,8 @@ class TestAdapterInvariant(unittest.TestCase):
         cases = [
             ("Abort", "service.pause(hard=False)", ".pause"),
             ("Transfer", "service.abort(return_liquid=False)", ".abort"),
+            ("Transfer", "service.plate_definitions()", ".plate_definitions"),
+            (None, "def _peek(service):\n    service.plate_definitions()", ".plate_definitions"),
             ("Pause", "service.resume(is_tip_broken=False)", ".resume"),
             ("ScanTips", "service.wait(None)", ".wait"),
             (None, "def _auto_pause(service):\n    service.pause(hard=False)", ".pause"),
@@ -3470,6 +3583,7 @@ class TestAdapterInvariant(unittest.TestCase):
         for function, statement in [
             ("Pause", "service.pause(hard=False)"),
             ("Transfer", "service.wait(None)"),
+            ("GetPlates", "service.plate_definitions(refresh=True)"),
         ]:
             with self.subTest(function=function, statement=statement):
                 planted = _plant(self.tree, function, statement)
@@ -3485,6 +3599,8 @@ class TestAdapterInvariant(unittest.TestCase):
             ("Resume", "if state == \"paused\":\n    pass", "Resume"),
             ("simulate_pause", "self.service.pause(hard=False)", "simulate_pause"),
             ("_clear_pause", "self._dispatchCommand(None)", "_clear_pause"),
+            ("GetPlates", "self._motion_lock.acquire(blocking=False)", "_motion_lock"),
+            ("GetPlates", "if state == \"idle\":\n    pass", "GetPlates"),
         ]
         for function, statement, fragment in cases:
             with self.subTest(function=function, statement=statement):
