@@ -32,3 +32,8 @@ ignore_missing_imports = true
 [[tool.mypy.overrides]]
 module = ["fast_mcp", "fast_mcp.*"]
 ignore_missing_imports = true
+
+# stack_automation_layer ships no py.typed marker (core-only package, Phase 4 D-22).
+[[tool.mypy.overrides]]
+module = ["stack_automation_layer", "stack_automation_layer.*"]
+ignore_missing_imports = true

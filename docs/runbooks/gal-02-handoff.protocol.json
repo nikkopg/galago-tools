@@ -1,0 +1,234 @@
+{
+  "protocol": {
+    "name": "GAL-02 STACK to F.A.S.T. handoff",
+    "category": "GAL-02",
+    "description": "Moves a plate STACK to F.A.S.T. and back in three steps (STACK transfer in, F.A.S.T. transfer, STACK transfer out), minting one step key per STACK leg for every run; defaults are the PAC simulator lab names and hardware names are entered by the operator in Phase 7 (see docs/runbooks/gal-02-handoff.md).",
+    "mode": "script",
+    "scriptContent": "// GAL-02: STACK -> F.A.S.T. -> STACK plate handoff (STACK in, F.A.S.T. transfer, STACK out).\n// Every input is validated and all three parameter objects are built BEFORE the first\n// galago call, so a bad input throws with nothing queued. No fallback values live here:\n// defaults are the parameter defaults shown in the run form.\n// The F.A.S.T. rules below mirror _check_args in tools/fast/server.py (deck 1-6, ids / columns /\n// rows >= 1, 1-2 letter rows, volume > 0, tip_reuse fresh or reuse); keep the two in step.\nfunction text(name) {\n  var v = params[name];\n  return v === undefined || v === null ? \"\" : String(v).trim();\n}\nfunction need(name) {\n  var v = text(name);\n  if (v === \"\") { throw new Error(\"GAL-02: parameter '\" + name + \"' is required\"); }\n  return v;\n}\nfunction whole(name) {\n  var n = Number(need(name));\n  if (!isFinite(n) || Math.floor(n) !== n) { throw new Error(\"GAL-02: parameter '\" + name + \"' must be a whole number\"); }\n  if (n < -2147483648 || n > 2147483647) { throw new Error(\"GAL-02: parameter '\" + name + \"' must fit a 32-bit integer\"); }\n  return n;\n}\nfunction wholeBetween(name, min, max) {\n  var n = whole(name);\n  if (n < min || n > max) { throw new Error(\"GAL-02: parameter '\" + name + \"' must be a whole number from \" + min + \" to \" + max); }\n  return n;\n}\nfunction letters(name) {\n  var v = need(name);\n  var ok = v.length >= 1 && v.length <= 2;\n  for (var i = 0; ok && i < v.length; i++) { ok = \"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz\".indexOf(v.charAt(i)) >= 0; }\n  if (!ok) { throw new Error(\"GAL-02: parameter '\" + name + \"' must be one or two letters\"); }\n  return v;\n}\nfunction oneOf(name, allowed) {\n  var v = need(name);\n  if (allowed.indexOf(v) < 0) { throw new Error(\"GAL-02: parameter '\" + name + \"' must be one of \" + allowed.join(\", \")); }\n  return v;\n}\nfunction positive(name) {\n  var n = Number(need(name));\n  if (!isFinite(n) || n <= 0) { throw new Error(\"GAL-02: parameter '\" + name + \"' must be a number above 0\"); }\n  return n;\n}\n\n// Step key base: label (cut to 20 code points) + queue-time timestamp + 8 hex random.\n// Computed once per run; the two legs get -in and -out so they never merge.\nvar label = Array.from(need(\"batch_label\")).slice(0, 20).join(\"\");\nvar rand = (Math.random().toString(16) + \"00000000\").slice(2, 10);\nvar base = label + \"-\" + new Date().toISOString() + \"-\" + rand;\n\nfunction stackLeg(suffix, from, to) {\n  var p = {\n    step_key: base + suffix,\n    robot: need(\"robot\"),\n    labware_profile: need(\"labware_profile\"),\n    source_device: need(from + \"_device\"),\n    source_deck: need(from + \"_deck\"),\n    source_nest: need(from + \"_nest\"),\n    destination_device: need(to + \"_device\"),\n    destination_deck: need(to + \"_deck\"),\n    destination_nest: need(to + \"_nest\")\n  };\n  if (text(from + \"_transfer_profile\") !== \"\") { p.source_transfer_profile = text(from + \"_transfer_profile\"); }\n  if (text(to + \"_transfer_profile\") !== \"\") { p.destination_transfer_profile = text(to + \"_transfer_profile\"); }\n  if (text(\"stack_timeout_s\") !== \"\") { p.timeout_s = positive(\"stack_timeout_s\"); }\n  return p;\n}\n\nfunction fastStep() {\n  var p = {};\n  var decks = [\"source_deck\", \"dest_deck\"];\n  for (var d = 0; d < decks.length; d++) { p[decks[d]] = wholeBetween(\"fast_step_\" + decks[d], 1, 6); }\n  var ints = [\"source_plate_id\", \"dest_plate_id\", \"source_start_col\", \"dest_start_col\", \"num_rows\", \"num_cols\"];\n  for (var i = 0; i < ints.length; i++) { p[ints[i]] = wholeBetween(\"fast_step_\" + ints[i], 1, 2147483647); }\n  p.source_start_row = letters(\"fast_step_source_start_row\");\n  p.dest_start_row = letters(\"fast_step_dest_start_row\");\n  p.volume = positive(\"fast_step_volume\");\n  p.tip_reuse = oneOf(\"fast_step_tip_reuse\", [\"fresh\", \"reuse\"]);\n  if (text(\"fast_step_expected_tray_id\") !== \"\") { p.expected_tray_id = whole(\"fast_step_expected_tray_id\"); }\n  return p;\n}\n\nvar stackTool = need(\"stack_tool\");\nvar fastTool = need(\"fast_tool\");\nfunction toolKey(name) { return String(name || \"\").toLowerCase().replace(/[^a-z0-9]/g, \"\"); }\nif (toolKey(stackTool) === toolKey(fastTool)) { throw new Error(\"GAL-02: parameter 'fast_tool' must differ from 'stack_tool'\"); }\nif (need(\"source_device\") === need(\"fast_device\") && need(\"source_deck\") === need(\"fast_deck\") && need(\"source_nest\") === need(\"fast_nest\")) {\n  throw new Error(\"GAL-02: the F.A.S.T. side (fast_device, fast_deck, fast_nest) must differ from the source side (source_device, source_deck, source_nest)\");\n}\nvar legIn = stackLeg(\"-in\", \"source\", \"fast\");\nvar fastParams = fastStep();\nvar legOut = stackLeg(\"-out\", \"fast\", \"source\");\n\ngalago.note(\"GAL-02 key base \" + base);\ngalago.command(stackTool, \"transfer\", legIn);\ngalago.command(fastTool, \"transfer\", fastParams);\ngalago.command(stackTool, \"transfer\", legOut);\n",
+    "parameters": [
+      {
+        "name": "batch_label",
+        "label": "Batch label",
+        "type": "string",
+        "defaultValue": "GAL02",
+        "required": true,
+        "description": "Run label at the start of both STACK step keys; only its first 20 characters are used."
+      },
+      {
+        "name": "stack_tool",
+        "label": "STACK tool instance",
+        "type": "string",
+        "defaultValue": "STACK",
+        "required": true,
+        "description": "Name of the STACK tool instance in the workcell (exact case)."
+      },
+      {
+        "name": "fast_tool",
+        "label": "F.A.S.T. tool instance",
+        "type": "string",
+        "defaultValue": "FAST",
+        "required": true,
+        "description": "Name of the F.A.S.T. tool instance in the workcell (exact case)."
+      },
+      {
+        "name": "robot",
+        "label": "STACK robot",
+        "type": "string",
+        "defaultValue": "sim-arm-1",
+        "required": true,
+        "description": "STACK robot name used for both transfers."
+      },
+      {
+        "name": "labware_profile",
+        "label": "Labware profile",
+        "type": "string",
+        "defaultValue": "greiner 96 white",
+        "required": true,
+        "description": "STACK labware profile used for both transfers."
+      },
+      {
+        "name": "source_device",
+        "label": "Source device",
+        "type": "string",
+        "defaultValue": "sim-nest-a",
+        "required": true,
+        "description": "Where the plate starts and returns: STACK device."
+      },
+      {
+        "name": "source_deck",
+        "label": "Source deck",
+        "type": "string",
+        "defaultValue": "sim-deck-a",
+        "required": true,
+        "description": "Where the plate starts and returns: STACK deck."
+      },
+      {
+        "name": "source_nest",
+        "label": "Source nest",
+        "type": "string",
+        "defaultValue": "sim-A1",
+        "required": true,
+        "description": "Where the plate starts and returns: STACK nest."
+      },
+      {
+        "name": "source_transfer_profile",
+        "label": "Source transfer profile",
+        "type": "string",
+        "defaultValue": "",
+        "required": false,
+        "description": "Optional STACK transfer profile for the source location; blank sends none."
+      },
+      {
+        "name": "fast_device",
+        "label": "F.A.S.T.-side device",
+        "type": "string",
+        "defaultValue": "sim-nest-b",
+        "required": true,
+        "description": "STACK device that stands for the F.A.S.T. deck position."
+      },
+      {
+        "name": "fast_deck",
+        "label": "F.A.S.T.-side deck",
+        "type": "string",
+        "defaultValue": "sim-deck-b",
+        "required": true,
+        "description": "STACK deck that stands for the F.A.S.T. deck position."
+      },
+      {
+        "name": "fast_nest",
+        "label": "F.A.S.T.-side nest",
+        "type": "string",
+        "defaultValue": "sim-B1",
+        "required": true,
+        "description": "STACK nest that stands for the F.A.S.T. deck position."
+      },
+      {
+        "name": "fast_transfer_profile",
+        "label": "F.A.S.T.-side transfer profile",
+        "type": "string",
+        "defaultValue": "",
+        "required": false,
+        "description": "Optional STACK transfer profile for the F.A.S.T.-side location; blank sends none."
+      },
+      {
+        "name": "stack_timeout_s",
+        "label": "STACK timeout (s)",
+        "type": "number",
+        "defaultValue": "",
+        "required": false,
+        "description": "Optional wait budget in seconds for each STACK transfer; blank uses the adapter default."
+      },
+      {
+        "name": "fast_step_source_deck",
+        "label": "F.A.S.T. source deck",
+        "type": "number",
+        "defaultValue": "1",
+        "required": true,
+        "description": "F.A.S.T. transfer source_deck (deck slot number)."
+      },
+      {
+        "name": "fast_step_dest_deck",
+        "label": "F.A.S.T. destination deck",
+        "type": "number",
+        "defaultValue": "3",
+        "required": true,
+        "description": "F.A.S.T. transfer dest_deck (deck slot number)."
+      },
+      {
+        "name": "fast_step_source_plate_id",
+        "label": "F.A.S.T. source plate id",
+        "type": "number",
+        "defaultValue": "1",
+        "required": true,
+        "description": "F.A.S.T. transfer source_plate_id."
+      },
+      {
+        "name": "fast_step_dest_plate_id",
+        "label": "F.A.S.T. destination plate id",
+        "type": "number",
+        "defaultValue": "1",
+        "required": true,
+        "description": "F.A.S.T. transfer dest_plate_id."
+      },
+      {
+        "name": "fast_step_source_start_row",
+        "label": "F.A.S.T. source start row",
+        "type": "string",
+        "defaultValue": "A",
+        "required": true,
+        "description": "F.A.S.T. transfer source_start_row (one or two letters)."
+      },
+      {
+        "name": "fast_step_source_start_col",
+        "label": "F.A.S.T. source start column",
+        "type": "number",
+        "defaultValue": "1",
+        "required": true,
+        "description": "F.A.S.T. transfer source_start_col."
+      },
+      {
+        "name": "fast_step_dest_start_row",
+        "label": "F.A.S.T. destination start row",
+        "type": "string",
+        "defaultValue": "A",
+        "required": true,
+        "description": "F.A.S.T. transfer dest_start_row (one or two letters)."
+      },
+      {
+        "name": "fast_step_dest_start_col",
+        "label": "F.A.S.T. destination start column",
+        "type": "number",
+        "defaultValue": "1",
+        "required": true,
+        "description": "F.A.S.T. transfer dest_start_col."
+      },
+      {
+        "name": "fast_step_num_rows",
+        "label": "F.A.S.T. rows",
+        "type": "number",
+        "defaultValue": "8",
+        "required": true,
+        "description": "F.A.S.T. transfer num_rows."
+      },
+      {
+        "name": "fast_step_num_cols",
+        "label": "F.A.S.T. columns",
+        "type": "number",
+        "defaultValue": "1",
+        "required": true,
+        "description": "F.A.S.T. transfer num_cols."
+      },
+      {
+        "name": "fast_step_volume",
+        "label": "F.A.S.T. volume (uL)",
+        "type": "number",
+        "defaultValue": "10",
+        "required": true,
+        "description": "F.A.S.T. transfer volume in microlitres; must be above 0."
+      },
+      {
+        "name": "fast_step_tip_reuse",
+        "label": "F.A.S.T. tip reuse",
+        "type": "select",
+        "defaultValue": "fresh",
+        "required": true,
+        "description": "F.A.S.T. transfer tip_reuse mode.",
+        "options": [
+          "fresh",
+          "reuse"
+        ]
+      },
+      {
+        "name": "fast_step_expected_tray_id",
+        "label": "F.A.S.T. expected tray id",
+        "type": "number",
+        "defaultValue": "",
+        "required": false,
+        "description": "Optional F.A.S.T. transfer expected_tray_id; blank sends none."
+      }
+    ],
+    "commands": []
+  },
+  "exportedAt": "2026-11-02T03:21:05.786Z",
+  "version": "1.0"
+}

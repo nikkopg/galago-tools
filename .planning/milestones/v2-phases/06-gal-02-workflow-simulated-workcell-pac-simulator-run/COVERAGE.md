@@ -1,0 +1,1 @@
+No external API integration: adds a protocol JSON, fake-core tests, a read-only gate and a runbook; the STACK core surface is unchanged (Phase 5 COVERAGE.md), and galago-core import is an operator step.

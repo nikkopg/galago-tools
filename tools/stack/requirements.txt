@@ -1,0 +1,2 @@
+# STACK core only (no [mcp] extra), pinned to a stack-automation-layer commit SHA; bump deliberately (Phase 4 D-22)
+stack-automation-layer @ git+https://gitlab.formulatrix.com/nikkopg/stack-automation-layer.git@934a621ece116a8b263897c1e9b62b57374f4ef3

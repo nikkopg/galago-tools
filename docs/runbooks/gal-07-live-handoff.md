@@ -1,0 +1,409 @@
+# GAL-07 live handoff runbook: STACK -> F.A.S.T. -> STACK (live, supervised)
+| 3a-8 | 2026-11-03T09:35:00Z | LIVE-10 infra | Operator debrief conclusion (recorded, not built this cycle): the galago-core run queue keeps ONE global running-step slot - the F.A.S.T. liquid leg and a STACK motion cannot overlap inside a run ("already running; nothing was dispatched again"), even though the tool servers themselves are concurrency-ready (separate ports/locks/state files; the STACK motion lock is stack-only). The `advancedParameters.runAsynchronously` flag visible on run rows is written but never read - a dead flag today. The operator's want: {FAST liquid ∥ STACK goto-safe} overlapping inside the two-plate cycle (~10 s/cycle gain, cleaner dwell posture). Recorded as the pending feature candidate, now homed in the galago-core repo (".planning/todos/pending/scheduler-per-tool-concurrency-lanes.md", commit 7abb301) — self-contained, executable in a new galago-core session (galago-core lane split + fork/join protocol syntax + lane-aware variable/form handling + a NEW threat-model entry conditioning the ledger guarantee on per-lane motion, with both lanes freezing on any latched failure so the D-11 inspection never shares the physical space with a running carriage). Until that lands: the two-plate cycle stays fully sequential (its 13-row evidence built on the serial lanes exactly as-is) | PASS |
+
+This runbook is the one supervised live procedure for Phase 7: the safe-order deploy (Part 1,
+LIVE-08), the supervised live rehearsal `Transfer` on `stack2-6` (Part 2, LIVE-09) and the
+supervised live GAL-02 handoff STACK -> F.A.S.T. -> STACK on hardware (Part 3, LIVE-10). It sits
+beside the executable pre-flight gate `docs/runbooks/gal-07-live-check.sh`; the gate and this
+runbook are checked together by `tools/tests/gal07_live_runbook_test.py`. Every part's entry gate
+is a `PREFLIGHT OK` verdict from that script, re-run immediately before the part's typed GO gate.
+
+`docs/runbooks/gal-02-handoff.md` (the Phase 6 simulated-session runbook) is untouched by Phase 7
+and remains byte-identical; its refusal to target `10.150.1.125` or `stack-server` remains in force
+there. This runbook is the only file of the two that points at the live STACK.
+
+## Safety rules
+
+- The live manager is exactly 10.150.1.125 port 5005 on robot `stack2-6`. The tool-store config
+  host string must be byte-for-byte `10.150.1.125`: a different string (`stack-server`, a
+  trailing space) is, by core design, a different endpoint key with its own lock and state files,
+  and would silently split the single-owner guarantee (D-05).
+- stack-mcp is closed during Galago runs. The pre-flight's lock probe refuses the session whenever
+  another front end (`mcp` / `stack-mcp` / an unknown owner) holds the owner lock; the galago tool
+  server's own holder is the expected single-owner state while it is up and passes as the
+  LOCK-FREE-equivalent `ok:` case (the 9344957 exemption); the fallback lock-probe interpreter is
+  corroborated against the service venv's own core lock resolution, and an uncorroborated probe
+  refuses (D-05). The runbook does not stop stack-mcp, it only refuses to run while it is open.
+- A state file, a stack ledger file or a lock file is never deleted — not to clean up, not to
+  recover, not after a failure. A missing state file reads as a clean start and silently clears a
+  failure latch; a deleted ledger file defeats the no-second-transfer guarantee. Recovery is
+  acknowledge-after-inspection, never restart-to-reset (D-11).
+- A latched failure is cleared only after the operator has inspected the arm, from the
+  stack-manager UI at http://10.150.1.125:5005 (primary route, D-02), with the recorded guid and
+  the literal `"yes"` arm-inspected decision; the `AcknowledgeFailure` command from the STACK tool
+  page is the fallback. After a restart during a transfer the message reads
+  "tool restarted mid-transfer; inspect the arm; the core may not have latched this failure" —
+  the session stops, and the outcome is never replayed as SUCCESS.
+- Credentials (`STACK_USER`/`STACK_PASSWORD`) reach the tool server only through the operator's
+  0600 env file; they are never typed into this runbook, the Findings log, a findings row or
+  shell history, and every consistency check on them in this session is presence-only (D-06).
+- A manual re-send of a completed step copies the step key byte-for-byte from the run's stored
+  row and only inside the replay window (`REPLAY_WINDOW_S` is 600 s); a later refusal is expected
+  behaviour, never a defect.
+
+## Pre-flight
+
+Before any part of this runbook runs, from the galago-tools root:
+
+```bash
+bash docs/runbooks/gal-07-live-check.sh
+```
+
+- The last line must read `PREFLIGHT OK` (exit 0). Every check runs even when one fails, so all
+  pieces missing at once are visible in one run; the checks with issues print their own
+  `missing:`/`forbidden:`/`warn:` lines above the verdict. Check 1 requires the manager to answer
+  GET `/api/general/application` with productName `Stack manager`; check 2 refuses the session
+  when a foreign front end (owner `mcp` / `stack-mcp` / unknown) holds the owner lock for
+  `10.150.1.125:5005` — the galago tool server's own holder is the expected single-owner state and
+  passes, and the fallback lock-probe interpreter must corroborate the service venv's lock-dir
+  resolution or the check refuses (uncorroborated fail-closed).
+- Any `BLOCKED:` verdict (exit 1) stops the session. Never hand-edit a config, hand-write a store
+  entry or drive the queue another way to clear a `BLOCKED:` line; resolve the named piece
+  through this runbook's own operator steps and re-run the script.
+- Parts 2 and 3 additionally run the pre-flight with `GAL07_REQUIRE_STACK_ENV=1`, so a missing
+  credentials env file blocks instead of printing an advisory `warn:` line.
+
+## Part 1: deploy (LIVE-08)
+
+Part 1 lands the DEP-02 STACK lineage on forb01 in the safe order: the core into the service
+`.venv` first, the service restart second, the operator reconnect third, and `galago-web` rebuilt
+last. The order evidence is the four strictly increasing UTC timestamps in this part's evidence
+table. Nothing in this part works around the pre-flight.
+
+### Pre-deploy record (rollback anchors)
+
+Filled at execution time, before the GO gate (real values recorded 2026-11-02, before the
+Pre-deploy GO — the build context for these values is findings rows 1a-1..1a-4):
+
+- galago-web pre-deploy image ID (rollback anchor): `sha256:938217230697ed130db9794176628776c011b57cee483f7eabf9c4192a2ad27a`
+  — tagged `galago-core-galago-web:rollback-pre-gal07` immediately before the Step 3 rebuild
+  (the `latest` tag pointed at the same sha, so the tag anchors the running image; image built
+  2026-11-02 at 04:41:56Z — the plan's "pre-DEP-02 image from 2026-10-15" note had drifted: that
+  was an earlier container's build, not this pre-deploy one)
+- service `.venv` pre-deploy core (rollback target): `fast_mcp` at the v1 pin `b30b38d` — confirmed
+  by row G0's missing-core BLOCKED line (`stack_automation_layer` not in the venv at pre-deploy)
+- running adapter SHA (rollback target): `b7c6ab7` (post 07-01; the deploy added only docs
+  evidence commits `f13ec3d`, `f4c9f02`, `b9011f6`, which change no adapter code)
+
+### GO gate for Part 1 (D-10)
+
+- **Decision:** deploy the STACK tool now in the safe order of this part.
+- **Who:** The user (operator), in this session; no auto-advance passes this gate.
+- When: Session time, UTC — after the pre-flight's `PREFLIGHT OK` and the pre-deploy record
+  above; the reply's UTC timestamp is recorded in Findings row 1a-1.
+- Reply: literal go.
+
+### Step 1 — core into the service `.venv`
+
+Preview first, so only `stack_automation_layer` changes (uv only, never pip, never
+`bin/make deps` — the service `.venv` is uv-managed):
+
+```bash
+cd /home/formulatrix/data/nikko/galago-tools
+~/.local/bin/uv pip install --dry-run --python .venv/bin/python -r tools/stack/requirements.txt
+```
+
+The pinned `git+https://gitlab.formulatrix.com/...@934a621ece116a8b263897c1e9b62b57374f4ef3`
+install must authenticate with the user's GitLab credentials; an auth failure here is a hard
+stop. The resolution checkpoint (credentials, or the user's explicit D-04 waiver for a verified
+local-clone install) lives in plan 07-02, which executes this step — the resolution and both
+sides' verbatim reasons go into Findings row 1a-1. Never hand-edit the pin to make an install
+pass.
+
+```bash
+~/.local/bin/uv pip install --python .venv/bin/python -r tools/stack/requirements.txt
+.venv/bin/python -c "import importlib.metadata as m, json; d = json.loads(m.distribution('stack_automation_layer').read_text('direct_url.json')); assert d['vcs_info']['commit_id'] == '934a621ece116a8b263897c1e9b62b57374f4ef3'"
+.venv/bin/python -m unittest tools.tests.stack_test -v
+```
+
+**Do not continue unless** the direct_url commit assert and the unittest run both pass. If either
+fails: do not restart anything, record findings row 1a-2 as FAIL, stop the session, and reinstall
+only on the user's go-ahead (D-14).
+
+### Step 2 — credentials env file, log backup (D-06), restart
+
+1. The operator creates the credentials env file through an editor (never a heredoc, never a
+   printed value), exactly one assignment line per credential name:
+
+   ```bash
+   install -m 600 /dev/null ~/.config/galago-tools/stack.env   # then edit it as the operator
+   grep -c '^STACK_USER=' ~/.config/galago-tools/stack.env     # presence-only: prints 1
+   grep -c '^STACK_PASSWORD=' ~/.config/galago-tools/stack.env # presence-only: prints 1
+   stat -c '%a' ~/.config/galago-tools/stack.env               # prints 600
+   ```
+
+2. Wire it before the restart, then daemon-reload:
+
+   ```bash
+   systemctl --user edit galago-tools   # add: EnvironmentFile=%h/.config/galago-tools/stack.env
+   systemctl --user daemon-reload
+   ```
+
+3. Back up the logs before the restart (D-06) — a tool-server start truncates its log in place:
+
+   ```bash
+   TS=$(date -u +%Y%m%dT%H%M%SZ); BK=~/.local/share/galago/log-backups/pre-gal07-$TS
+   mkdir -p "$BK"
+   cp -a ~/.local/share/galago/trace_logs/$(ls -t ~/.local/share/galago/trace_logs/ | head -1) "$BK"/
+   journalctl --user -u galago-tools --since "@$(($(date +%s) - 86400))" --no-pager > "$BK/journal.log"
+   systemctl --user show galago-tools -p MainPID -p ActiveEnterTimestamp | tee "$BK/service.txt"
+   ss -ltnp | grep -E ':(40000|40001|40012|11010|8081)\b' | tee "$BK/listeners.txt"
+   ```
+
+4. Restart, then check (record findings rows 1a-3 and 1a-4):
+
+   ```bash
+   systemctl --user restart galago-tools
+   systemctl --user is-active galago-tools                 # active
+   systemctl --user show galago-tools -p MainPID           # differs from $BK/service.txt
+   journalctl --user -u galago-tools --since "<restart>" --no-pager | grep -iE 'traceback'
+   .venv/bin/python scripts/fast_status.py --port 40012    # NOT_CONFIGURED
+   ss -ltnp | grep -E ':(40000|40001|40012|11010|8081)\b'   # the listener-PID re-baseline
+   ```
+
+   Expected: `is-active` active, a new `MainPID`, no Python traceback in the journal, the STACK
+   tool server on :40012 answering `NOT_CONFIGURED`, and the newest `trace_logs` folder holding
+   `Stack.log`. The `ss` listener-PID re-baseline is the no-restart reference for the rest of the
+   session: the manager page on :8081 can restart a single tool server without changing
+   `MainPID`, so only the listener PIDs prove no tool restart.
+
+**Do not continue unless** all Step 2 checks pass.
+
+### Step 2b — operator reconnect, in the decided order
+
+The operator works from galago-web's tool pages (a `Configure` is a user click, never something
+an automated session sends):
+
+1. The F.A.S.T. tool is created and Configured **first**.
+2. The STACK tool is then Configured in **real mode LAST**, so the final store action before any
+   run is the STACK Configure (the planner decision per OQ-3, guarding the Phase 6 watch item
+   where reconfiguring one tool dropped the other's store entry — the failure modes were
+   "Tool ... not found in store. Must be configured first.").
+3. The stored STACK config is used unchanged: host `10.150.1.125`, port `5005`, snake_case keys,
+   empty `ledger_dir`. This closes the pre-flight's D-12 store gap: the `missing: a type fast
+   tool` and host lines disappear after this step, and check 6 now asserts the stored host is
+   byte-for-byte `10.150.1.125`.
+4. Expect exactly one restart-warning line in `Stack.log` at the STACK open (the D-09 latch
+   clause below). More than one, or a traceback, is a finding.
+5. Post-connect checks (record findings row 1a-5):
+
+   ```bash
+   .venv/bin/python scripts/fast_status.py --port 40012   # READY
+   ```
+
+   and from the STACK tool page: `GetRobotStates` lists `stack2-6 idle`; `GetManagerState` is
+   `automated` with recovery null.
+
+### Step 3 — rebuild galago-web (last)
+
+```bash
+docker tag galago-core-galago-web:latest galago-core-galago-web:rollback-pre-gal07
+cd /home/formulatrix/data/nikko/galago-core
+TOOLBOX_PORT=11010 docker compose up -d --build
+docker inspect galago-web --format='{{.Image}}'
+curl -sf http://localhost:3010/api/health
+docker exec galago-web grep -rl Command_Transfer /app/gen-interfaces | head -1
+```
+
+Expected: the running image ID differs from the `rollback-pre-gal07` anchor; `/api/health` and
+the runs page answer 200; `Command_Transfer` is present in the container bundle. Cache-hit STOP
+rule (v1 precedent): if the rebuilt image ID is byte-identical to the anchor, stop the session
+for a user decision — a cache hit never counts as "new". Record findings row 1a-6 and the four
+strictly increasing UTC timestamps in the evidence table.
+
+### Interrupted deploy
+
+If any step of Part 1 fails or is interrupted, stop the session where it stands, keep the partial
+state, never delete anything to retry, re-run `bash docs/runbooks/gal-07-live-check.sh`, and
+resume only after its `PREFLIGHT OK`. Rollback runs only on the user's go-ahead, in reverse
+order (galago-web, adapter, core) — never roll the core back while the new UI runs.
+
+### Part 1 evidence table (LIVE-08 order proof)
+
+| Step | UTC start | UTC end | Check output (one line summary) | Result |
+|------|-----------|---------|---------------------------------|--------|
+| Step 1 | 2026-11-02T11:17:41Z | 2026-11-02T11:20:00Z | uv install (git+file local clone at the pin per the D-04 waiver; dry-run preview: exactly one package stack-automation-layer); direct_url commit == 934a621e… OK; stack_test 271 OK | PASS |
+
+| 3a-9 | 2026-11-03T09:38:26Z | LIVE-10 infra | POST-PHASE image rebuild (the operator's typed go 09:38:26Z, D-10): the UI's fast/stack tool cards showed broken images - the tool types have no /tool_icons/<type>.png entries (the icon path is type-keyed: workcell.ts:609 / InventoryToolCard.tsx:109), and neither this fork nor upstream sciencecorp/galago-core carries icons for them (the types are fork additions; the instruments are in-house with no public imagery). Fix: two Apache-2.0 Material Symbols rendered 500x500 RGBA PNGs at the photo set's size - precision_manufacturing (STACK arm) + water_drop (F.A.S.T. liquid) - committed to galago-core 66da085. Rebuild event (1a-6 discipline): rollback anchor galago-core-galago-web:rollback-pre-icons = sha256:2f609032... (the 07-02 rebuild image, tagged byte-equal before the build); TOOLBOX_PORT=11010 docker compose up -d --build from galago-core a799627 + the icon commit -> new image sha256:dd4a14ff... (differs - no cache-hit STOP); /api/health ok; /tool_icons/stack.png and /tool_icons/fast.png both HTTP 200 image/png (12.6 KB each); the store intact (STACK2-6 + FA100056). The tool cards now render real icons after a browser hard refresh | PASS || Step 2 | 2026-11-02T11:21:00Z | 2026-11-02T11:26:00Z | env file 0600 (presence-only 1+1 lines) + unit drop-in EnvironmentFile + daemon-reload; backup pre-gal07-20261102T112327Z; operator restart 11:24:34Z: active, MainPID 1940146→3973399, no traceback, fast_status :40012 NOT_CONFIGURED, listeners re-baselined (:8081/3973399, :40012/3973422, :11010/3973421) | PASS |
+
+| 3a-10 | 2026-11-03T11:48:47Z | LIVE-10 infra | The icons became the OFFICIAL product images (the operator's typed go 11:48:47Z, D-10): both products are Formulatrix's own (F.A.S.T. = Flow Axial Seal Tip 96-channel liquid handler; STACK = the Intelligent Automation System) - their public product imagery replaces the interim glyphs: fast.png = the F.A.S.T. render (formulatrix.com og:image, fmlx.b-cdn.net 2024/07/FAST.png) and stack.png = the STACK platform thumbnail (2024/05/STACK-thumbnial-1.png), each wordmark-cropped, white background flood-fill-removed, padded to 500x500 RGBA (galago-core 7fdddba). Rebuild event: anchor rollback-pre-icons2 = sha256:dd4a14ff... (tagged byte-equal pre-build) -> new image sha256:fed47840... (differs); /api/health ok; both icon URLs HTTP 200 image/png (~97 KB); store intact (STACK2-6 + FA100056). Hard refresh renders the product photos on the tool cards | PASS || Step 2b | 2026-11-02T11:55:12Z | 2026-11-02T12:19:08Z | D-14 repair cycle (swapped ports → ECONNREFUSED 40001; F.A.S.T. moved to 192.168.0.26 via ssh tunnel to stack-server; manager relaunch 11:55:12Z; prod-page hard refresh); final: FAST Configure 12:18:17Z, STACK real-mode Configure LAST 12:18:28Z (one restart-warning in STACK2-6.log), both READY, reads GetRobotStates/GetManagerState 200 (stack2-6 idle; automated, recovery null) | PASS |
+| Step 3 | 2026-11-03T01:31:16Z | 2026-11-03T01:32:24Z | typed go 01:31:09Z (D-10); rollback anchor `docker tag galago-core-galago-web:latest galago-core-galago-web:rollback-pre-gal07` = sha256:93821723… (tag verified == running image before the build); TOOLBOX_PORT=11010 docker compose up -d --build from galago-core a799627 (vendor gitlink bcbbf8e) → new image sha256:2f609032… (differs from the anchor — no cache-hit STOP per Pitfall 3); /api/health 200 {"status":"ok"}; Command_Transfer in /app/gen-interfaces/tools/grpc_interfaces/stack.ts (also fast.ts, pf400.ts); container TCP-connects host.docker.internal:40012 (node net, control port 40099 → ECONNREFUSED as expected); store still holds stack STACK2-6 + fast FA100056 after the rebuild | PASS |
+
+The four `UTC start` values must be strictly increasing: it is the LIVE-08 order proof, and the
+two anchor facts (core install before the restart, restart before the rebuild) come from it.
+
+## Part 2: supervised live Transfer (LIVE-09)
+
+The rehearsal Transfer moves one plate on `stack2-6` with the user present. One command is in the
+blast radius: a single `Transfer` from the STACK tool page, nothing queued.
+
+1. Re-run the pre-flight immediately before the GO gate, both forms, each ending `PREFLIGHT OK`:
+
+   ```bash
+   bash docs/runbooks/gal-07-live-check.sh
+   GAL07_REQUIRE_STACK_ENV=1 bash docs/runbooks/gal-07-live-check.sh
+   ```
+
+2. GO gate (D-10):
+
+   - **Decision:** send exactly one supervised live Stack `Transfer` on hardware.
+   - **Who:** The user (operator), in this session; no auto-advance passes this gate.
+   - When: Session time, UTC — after the pre-flight re-run; the reply's UTC timestamp goes
+     into Findings row 2a-1.
+   - Reply: literal go.
+
+3. Reads-first parameter selection (never hardcode hardware params): from the STACK tool page
+   run `ListDevices`, `ListLabwareProfiles` and `GetLabwarePresence` for robot `stack2-6`, and
+   pick a device/deck/nest triple and a labware profile the presence read reports. The known
+   hardware nests are `nest-1/deck1/A1`, `orange-nest/deck1/A1` and `rack/l1/A1`; the source and
+   destination should be two different nests holding labware.
+
+4. The event: one single `Transfer` from the Stack tool page with a fresh per-event step key,
+   recorded with UTC times (start, reply) in findings row 2a-2. Expected duration 30-32 s (the
+   estimate runs about 1.7x conservative on hardware — compare `GetTransferEstimate` or the
+   tool's own estimate against the wall clock, and record both).
+
+5. Expected outcome (record findings row 2a-3): the transfer returns SUCCESS with result `ran`;
+   afterwards `stack2-6` is idle, `GetManagerState` is automated with recovery null, and no
+   failure latch is set (`GetFailureLatch` shows none). A step key is never reused across runs;
+   a forced re-send of this completed step (if the user asks for one) copies the step key
+   byte-for-byte from the run's stored row and only inside `REPLAY_WINDOW_S` (600 s).
+
+## Part 3: supervised live GAL-02 handoff (LIVE-10)
+
+1. Re-run both pre-flight forms as in Part 2. The pre-flight's check 6 is the pre-store check:
+   the store must hold a configured stack tool (host byte-for-byte `10.150.1.125`) and a fast
+   tool; a `missing: a type fast tool` line here is the Phase 6 watch item, resolved through the
+   operator's store steps, never through the run form.
+
+2. GO gate (D-10):
+
+   - **Decision:** run the supervised live GAL-02 handoff on hardware.
+   - **Who:** The user (operator), in this session; no auto-advance passes this gate.
+   - When: Session time, UTC — after the pre-flight re-run; the reply's UTC timestamp goes
+     into Findings row 3a-1.
+   - Reply: literal go.
+
+3. Live parameter mapping (from the queue form, no script edit): `stack_tool` is `Stack` (the
+   store's exact name), `fast_tool` is the real F.A.S.T. tool name from the store, `numberOfRuns`
+   stays at 1, and the nest triples come from the Part 2 reads (`source_*` from the nest chosen
+   as the plate's home, `fast_*` for the F.A.S.T.-side position; the F.A.S.T. step fields keep
+   the v1 config values). `batch_label` is a fresh per-run label.
+
+4. The run: the three legs complete in order (the Tool Box note, the STACK in leg, the F.A.S.T.
+   `transfer`, the STACK out leg) to overall SUCCESS (record findings row 3a-2). Fresh step keys
+   are minted per run; keys are read from the run's stored rows. Expected total wall time ≈ 35 s
+   + the F.A.S.T. transfer time + 35 s, plus queue overhead.
+
+5. Post-run (record findings row 3a-3): `stack2-6` idle and automated with recovery null; the
+   ledger at `~/.local/state/galago-tools/stack/` holds one done record per leg key; nothing was
+   deleted; no failure latch is set.
+
+### Parallel two-plate cycle (lanes, LIV-01)
+
+Added after LIV-01 passed (findings rows 3a-13 and 3a-14). It runs the same two-plate handoff with the F.A.S.T.
+liquid leg and one STACK maneuver overlapping on separate lanes. Do not run it before the prerequisites hold.
+
+1. Prerequisites: galago-web running with `GALAGO_PARALLEL_LANES=1` (on forb01 today the dev container
+   `galago-web-dev`, row 3a-11, the flag kept in the gitignored root `.env`) and `laneStatus` showing
+   `laneMode` true; the pre-flight run with `GAL07_WEB_CONTAINER` set to that container; a third calibrated
+   STACK-side nest (nest-3, deck1/A1) holding a third plate, besides plate 1 on nest-1 and plate 2 on nest-2.
+
+2. Placement rules (amended D-02, enforced by the protocol's guard): the overlap source is never a plate home
+   and never on fa100056; the overlap destination may be plate 1's home only (empty after in1 vacated it),
+   never plate 2's home and never fa100056; out1's destination equals the overlap source.
+
+3. The protocol: galago-core
+   `.planning/phases/09-supervised-live-two-tool-proof/protocols/09-live-lanes-event2.protocol.json`, imported
+   into the real workcell. Per run, type a fresh `batch_label`, the overlap source (`spare_a_*`), the overlap
+   destination (`spare_b_*`) and the out1 destination (`out1_dest_*`).
+
+4. The shape: in1 (nest-1 to tray1/5), in2 (nest-2 to tray1/6), then the F.A.S.T. leg on lane fast in parallel
+   with the STACK overlap move nest-3 to nest-1 on the primary lane, then out1 (tray1/5 to nest-3) after that
+   move and behind the barrier, then out2 (tray1/6 to nest-2). There is no return leg: the run ends with the
+   third plate on nest-1, plate 1 on nest-3 and plate 2 on nest-2, and the operator restores the rig by hand
+   before the next cycle.
+
+5. The gate: before the baseline, the operator reads `GetFailureLatch` (latched false), `GetRobotStates`
+   (idle) and `GetLabwarePresence` (gripper empty), and runs a nest-3 to nest-1 to nest-3 round trip that ends
+   done/ran after any re-teach. Then the same pre-flight, baselines and typed-go discipline (D-10) as this
+   Part, with a UTC time recorded, and the operator alone pressing Start.
+
+6. Failure handling: any failure halts both lanes (nothing is aborted); a failed in1 or overlap move halts
+   before out1, so no plate lands on an occupied nest. Handle it per the Recovery drill (D-11); only the
+   operator's Start re-arms the queue.
+
+7. Expected evidence: per-lane rows (judge by row status and `laneStatus`; the stored run record stays
+   CREATED in lanes mode), both tool logs showing their attempts in the same window, and one ledger record per
+   explicit step key (five). Record a findings row in the style of 3a-13 and 3a-14.
+
+## Recovery drill (D-11)
+
+Run this drill for any failed or ambiguous live outcome (`failed`, `timedOut`, `lost`, a
+restart during a transfer, a refusal whose reason is not self-explanatory), with the session
+stopped:
+
+1. Stop the session. No new commands are sent; nothing is re-queued.
+2. Read the ledger at `~/.local/state/galago-tools/stack/stack-ledger.json` (a plain read, never
+   a delete) and run `GetFailureLatch` from the STACK tool page — a zero-I/O read of the core's
+   injected latch, which shows the guid to acknowledge even after a restart.
+3. The operator inspects the arm physically. Nothing moves again until the operator says what
+   the arm is doing (or has done).
+4. Clear the latched failure from the stack-manager UI at `http://10.150.1.125:5005` (the
+   primary live recovery route, D-02): use the recorded guid and answer the arm-inspected
+   decision with the literal `yes`.
+5. The `AcknowledgeFailure` command from the STACK tool page is the fallback, with the same
+   guid and the same literal `yes` decision.
+6. Never delete the state file, a ledger file or a lock file (a missing state file reads as a
+   clean start and silently clears a latch), and never restart the tool server to clear a
+   failure: a restart during a transfer is announced as
+   "tool restarted mid-transfer; inspect the arm; the core may not have latched this failure",
+   and such an outcome is never replayed as SUCCESS. Recovery is acknowledge-after-inspection,
+   never restart-to-reset.
+7. A manual re-send of a completed step copies the step key byte-for-byte from the run's stored
+   row and only inside the replay window (`REPLAY_WINDOW_S` is 600 s). A re-send after the
+   window answers "step key already completed ... nothing was sent" — that refusal is expected
+   behaviour, never a defect.
+
+## Findings log
+
+Fill a row when its step is done. The Result is PASS or FAIL against the expectations above, and
+a FAIL stops the session (D-14: stop → fix → gate → redeploy → rerun, never silent pass). Never
+paste a credential or token.
+
+| Row | UTC timestamp | Requirement | Observation | Result |
+|-----|---------------|-------------|-------------|--------|
+| G0 | 2026-11-02T11:16:00Z | LIVE-08, LIVE-09, LIVE-10 | Pre-deploy pre-flight (07-02 Task 1 precondition): `bash docs/runbooks/gal-07-live-check.sh` on the real host — exit 1, last line a `BLOCKED:` remedy; the failing checks are exactly the two expected pre-deploy gaps, `missing: stack_automation_layer pinned at 934a621… in the service venv` and `missing: a type fast tool` in the :3010 store, plus one advisory `warn:` (no stack credentials env file yet). The fail-closed pre-deploy gate state matched the 07-01-verified expectation exactly, which is this row's pass criterion (the gate's later PREFLIGHT OK verdicts are recorded by rows 1a-2 and 3a-1, not here) | PASS |
+| 1a-1 | 2026-11-02T11:16:00Z | LIVE-08 | OQ-1 install source: dry-run probe (`uv pip install --dry-run` on the pinned git+https requirements.txt) requires GitLab browser authentication — the git-credential-oauth helper launched an interactive OAuth device flow (scopes read_repository/write_repository at gitlab.formulatrix.com) and stalled waiting for the operator (Pitfall 1 reproduced). User chose **local-clone-waiver**: an explicit, session-recorded waiver of D-04 for this deploy, after Claude verified the local clone /home/formulatrix/data/nikko/stack-automation-layer HEAD equals the pinned commit 934a621ece116a8b263897c1e9b62b57374f4ef3 (branch feat/initial-layer, clean except untracked uv.lock). Nothing was installed by this task; the install runs only after Task 2's typed-go gate | PASS |
+| 1a-2 | 2026-11-02T11:20:00Z | LIVE-08 | Step 1 per the user's local-clone-waiver (waiver re-verified at install time: local clone HEAD == pin 934a621ece116a8b263897c1e9b62b57374f4ef3). D-10 go recorded 2026-11-02T11:17:41Z. uv 0.11.2 only (never pip/bin/make deps): dry-run preview showed exactly one package (stack-automation-layer), then install into the service .venv from git+file:///home/formulatrix/data/nikko/stack-automation-layer@934a621… (install artifacts mtime 11:19:38Z). Discriminating check 1: direct_url.json vcs_info.commit_id == 934a621ece116a8b263897c1e9b62b57374f4ef3 — OK. Check 2: .venv/bin/python -m unittest tools.tests.stack_test -v — 271 tests OK | PASS |
+| 1a-3 | 2026-11-02T11:26:00Z | LIVE-08 | Credentials wiring (D-06/D-10): operator-created 0600 env file ~/.config/galago-tools/stack.env (presence-only: exactly 1 STACK_USER assignment line and 1 STACK_PASSWORD assignment line; mode 600; owner formulatrix; values never read or echoed). Wired as unit drop-in ~/.config/systemd/user/galago-tools.service.d/gal07-stack-env.conf (EnvironmentFile=%h/.config/galago-tools/stack.env — the exact end state of the runbook's systemctl --user edit step, created non-interactively at the operator's request) + systemctl --user daemon-reload; systemctl --user show-environment holds no STACK_ keys (credentials reach the tool server only via the unit env file). D-06 pre-restart backup: ~/.local/share/galago/log-backups/pre-gal07-20261102T112327Z/ holding the newest trace_logs folder (1792104444), journal.log, service.txt (MainPID=1940146, active since 2026-10-16) and listeners.txt (:8081 pid 1940146, :40000 pid 1940206, :11010 pid 1940245) | PASS |
+| 1a-4 | 2026-11-02T11:26:00Z | LIVE-08 | Operator restarted galago-tools at 2026-11-02T11:24:34Z: systemctl --user is-active → active; MainPID 1940146 → 3973399; journal shows Started Galago Tools Manager. at 11:24:34Z with no Python traceback (grep -ic traceback → 0); newest trace_logs folder 1793618675 holds Stack.log (stack server started, listening on 40012); scripts/fast_status.py --port 40012 → NOT_CONFIGURED; listener-PID re-baseline via ss -ltnp is the session no-restart reference: :8081 pid 3973399, :40012 pid 3973422, :11010 pid 3973421. Note: Pf400 (:40000, pid 1940206 pre-restart) was not relaunched — consistent with the current workcell config relaunching Stack + Tool Box only; Pf400 is not part of the GAL-07 chain | PASS |
+| 1a-5 | 2026-11-02T12:19:08Z | LIVE-08 | Operator reconnect, decided order (FAST Configure FIRST at 12:18:17Z, STACK real-mode Configure LAST at 12:18:28Z — OQ-3 held), after a D-14 repair cycle: (1) the initially created tools had swapped tool-server ports (STACK2-6@40001, FA100056@40000) so every tool-page command hit ECONNREFUSED 172.17.0.1:40001 (11:33:05Z); (2) the F.A.S.T. moved off the v1 host — 10.150.1.170 dead (ARP incomplete), instrument verified live at 192.168.0.26:5003 (stack-server's network, confirmed from stack-server: HTTP 200 Kestrel F.A.S.T. Control Panel) and bridged to forb01 via the operator's ssh tunnel (ssh -f -N -L 127.0.0.1:5003:192.168.0.26:5003 formulatrix@10.150.1.125, pid 4024004, HTTP 200 through forb01); (3) a manager relaunch at 18:55 WIB (11:55:12Z) restarted the tool servers under the new entry names (listener PIDs re-baselined: :40012 pid 4004972, :40001 pid 4004949 — session no-restart reference, MainPID unchanged); (4) tool-page Configures only reached the tools after a prod-page hard refresh (prior clicks never hit the relay). Final state: store holds FA100056 (host 127.0.0.1, port "5003", expected_tray_id "90") and STACK2-6 (host 10.150.1.125, port "5005", unchanged per A3); STACK2-6.log Received configuration 12:18:28Z with exactly one restart-warning line; both tools READY (fast_status :40001 idle via the instrument, :40012 READY); reads GetRobotStates (stack2-6 idle) and GetManagerState (automated, recovery null) both 200 at 12:18:46Z/12:19:08Z | PASS |
+| 1a-6 | 2026-11-03T01:32:24Z | LIVE-08 | Step 3 galago-web rebuild (third live event of Part 1), per the operator's typed go at 01:31:09Z (D-10): rollback anchor `docker tag galago-core-galago-web:latest galago-core-galago-web:rollback-pre-gal07` = sha256:93821723… (tag verified byte-equal to the running image before the build); `TOOLBOX_PORT=11010 docker compose up -d --build` from galago-core a799627 (vendor gitlink bcbbf8e) → new image sha256:2f609032… (differs from the anchor — no cache-hit STOP, Pitfall 3), container recreated and started; `/api/health` 200 {"status":"ok"}; `docker exec galago-web grep -rl Command_Transfer /app/gen-interfaces` finds stack.ts (also fast.ts, pf400.ts); the container TCP-connects `host.docker.internal:40012` (node net — control port 40099 answers ECONNREFUSED, as expected); the store still holds stack STACK2-6 + fast FA100056 after the rebuild. LIVE-08 safe-order proof — the four strictly-increasing UTC event times: install 2026-11-02T11:20:00Z, restart 2026-11-02T11:24:34Z, reconnect 2026-11-02T12:18:28Z (FAST Configure 12:18:17Z first, STACK real-mode Configure last, the per-row-1a-5 order; GetManagerState read at 12:19:08Z), rebuild 2026-11-03T01:31:16Z | PASS |
+| 2a-1 | 2026-11-03T03:54:19Z | LIVE-09 | Part 2 entry: PREFLIGHT OK both forms (plain + GAL07_REQUIRE_STACK_ENV=1, each exit 0, verdict at 2026-11-03T03:13:42Z) — the 9344957 fixed owner-lock probe prints `ok: ... held by galago (pid 4004972) — the expected single-owner state`. Operator's typed go recorded 2026-11-03T03:51:07Z for the re-gated event (D-10). Pre-event D-14 cycle, no motion ever sent, session stopped 03:15–03:47Z: robot stack2-6 showed `disconnected` in the manager (GetRobotStates 200), the manager refused GetLabwarePresence (400, `stackArmNotFound`; core fail-closed D-06) and GetTransferEstimate (400, `unhandledException` — the captured manager refusal family); after the operator re-established the robot connection (galago side verified healthy: MainPID 3973399, listeners :8081/3973399, :40001/4004949, :40012/4004972, :11010/4004971 unchanged; :40012 READY; journal traceback grep 0) and returned the manager from Manual mode to automated, reads answered: GetRobotStates stack2-6 idle, GetManagerState automated/recovery null, GetLabwarePresence robot=stack2-6 → {hasLabware:false}, ListDevices deviceTree (nest-1 deck1/A1, nest-2 "deck`"/A1, fa100056 tray1), ListLabwareProfiles (Default, greiner 96 white, 384), ListTransferProfiles (Default), GetTransferEstimate SUCCESS {estimatedTime 00:00:55, seconds 55, guid null, advisories:[]} — estimate ~1.7x conservative on hardware per validated facts, so expected hardware duration 30-32 s recorded as the observation baseline. Re-gate: PREFLIGHT OK both forms 2026-11-03T03:47:58Z. Fresh per-event step key GAL07-LIVE9-20261103T035107Z minted at the go (never submitted, never reused). Relayed Transfer fill (robot stack2-6; source nest-1/deck1/A1 + transfer profile Default; destination nest-2/"deck`"/A1 + transfer profile Default; timeout_s 300 within the 0<t<=3600 adapter bounds). At the operator's request the submission was handed to the main session before any Transfer was sent: baseline at hand-off 2026-11-03T03:53:19Z = STACK2-6 Transfer lines 0 (live log ~/.local/share/galago/trace_logs/1793618675/STACK2-6.log — the running STACK2-6 tool server's log; the plan's Stack.log glob names the pre-relaunch generic log, tracked as a Rule 3 deviation), ledger dir absent, listeners unchanged. Gate/reads evidence here; the transfer record goes to rows 2a-2/2a-3 | PASS |
+| 2a-2 | 2026-11-03T03:58:25Z | LIVE-09 | The event, exactly one submission (estimate, wall clock, and replay window comparison recorded): step key GAL07-LIVE9-20261103T035107Z submitted once against the recorded go 03:51:07Z; from the reads: robot stack2-6, labware_profile Default, source nest-1/deck1/A1 + transfer_profile Default, destination nest-2/"deck`"/A1 + transfer_profile Default, timeout_s 300; GetTransferEstimate read 55 s (estimatedTime 00:00:55 — the ~1.7x conservative factor matched: wall clock elapsed 27 s per ledger, expected hardware 30–32 s per the picked spec — duration slightly under the 30–32 s band, recorded as observed); submitted from the STACK tool page at 03:57:58Z (ledger createdAt), terminal reply 2026-11-03T03:58:25Z (ledger updatedAt; Stack log tail 10:58:25 local = 03:58:25 UTC); the tool server (pid 4004972) was not touched during the run; one submission only — baseline 0, no re-send, no restart | PASS |
+| 2a-3 | 2026-11-03T03:58:25Z | LIVE-09 | Reply verbatim: `ExecuteCommand Response: response: SUCCESS, key: "transfer"` (STACK2-6.log tail) — result `ran` (STK-07 mapping): ledger ~/.local/state/galago-tools/stack/stack-ledger.json version 1, record GAL07-LIVE9-20261103T035107Z state done, result.kind ran, task state completed / rawState completed, elapsed 00:00:27, errorCode errorName null, handle guid bea7d9f1-e5b0-490c-8856-999825d99001, fingerprint 92c5736d…; Transfer count STACK2-6.log (trace_logs/1793618675) = baseline(0)+1 = exactly 1 "Running command Transfer" line, no second submission (XFR-05 core rule); listener PIDs unchanged vs the 07-02 baseline (MainPID 3973399, :8081/3973399, :40001/4004949, :40012/4004972, :11010/4004971 — no tool-server restart, T-07-11 held); scripts/fast_status.py --port 40012 post-event: status READY, run_state null (no active run). Post-state tool-page reads (stack2-6 idle, GetManagerState automated, GetFailureLatch none) are Part 3's own entry reads, not re-queried here — the session rule was "no motion beyond the event" | PASS |
+| 3a-1 | 2026-11-03T05:36:05Z | LIVE-10 | Part 3 gate: PREFLIGHT OK both forms (exit 0, verdicts from 04:12Z onward; check 2 reports `ok: ... held by galago (pid 4004972) — the expected single-owner state`), pre-store check holds both STORE2-6 types (store: stack STACK2-6 + fast FA100056; /api/health ok). Deferred-GAP fix verified live: the owner-lock probe accepts the galago holder (9344957, 07-03). Stored-protocol D-14 corrections recorded here (all store changes, zero motion): (1) the operator's visual GAL02 (id 10) modelled the run with 2 stack legs/absent F.A.S.T. leg/fixed keys — its runs (04:16-04:53Z, 5 attempts) were refused by the manager pre-dispatch (`ERROR_FROM_TOOL, finding: invalidSource` — the manager's EIntegrationPlateTransferErrorCode:1) because leg1 sourced the now-empty nest-1 after the rehearsal moved the plate; the run-page queue rows were cleared by the operator (the RunStore rows are memory-only history; the 04:53:15Z row's own attempt later also refused, logged 04:53:16Z); (2) the Phase-6 docs protocol imported (id 11), replaced by the station-split build (id 12 — withdrawn: orphaned-throw syntax break, re-imported correctly as id 13); the corrected stack-side accounts (source nest-2/deck`/A1 = the plate's post-rehearsal home; FAST stations tray1/5≈deck 5 and tray1/6≈deck 6, per the ListDevices branch nests 1-6 with 4/5/6 calibrated); (3) the operator's live mapping revision, per the milestone's real workcell: a TWO-PLATE cycle (nest-1→tray1/5 AND nest-2→tray1/6 AND BACK with the F.A.S.T. liquid leg deck 5→6 between the seated plates) — protocol id 15 built, harness-verified, pre-filled; (4) typed go for the single-plate split #05:15:06Z (superseded pre-motion) and typed go for the two-plate cycle #05:36:05Z (the live event's gate — D-10). Baselines at the go: STACK2-6.log "Running command Transfer" lines=5, ledger done=1 (rehearsal), listeners unchanged, latch clear | PASS |
+| 3a-2 | 2026-11-03T05:43:31Z | LIVE-10 | The two-plate run (base GAL07-LIVE-20261103-…-127473f5, five legs all SUCCESS ran): in1 key …-in1 submitted 05:40:15-05:40:44Z (STACK2-6 nest-1/deck1/A1 → fa100056/tray1/5, 28s), in2 key …-in2 05:40:46-05:41:15Z (nest-2/deck`/A1 → fa100056/tray1/6, 28s), F.A.S.T. liquid leg 05:41:16-05:42:29Z (FA100056 tool log: Running command Transfer, fast run progress 0→100% polled, SUCCESS — instrument deck 5 → 6, volume 5 uL, tip fresh), out1 key …-out1 05:42:31-05:43:00Z (fa100056/tray1/5 → nest-1/deck1/A1, 28s), out2 key …-out2 05:43:02-05:43:31Z (fa100056/tray1/6 → nest-2/deck`/A1, 28s) — five legs in runbook order, the four STACK attempt starts strictly increasing (05:40:15 < 05:40:46 < 05:42:31 < 05:43:02), no motion outside the event. Pre-event D-11/D-14 cycle fully closed (hence still one PASS row): two queue attempts at 05:36:56Z (key 11fa0299-in1) and 05:38:55Z (7d0a8959-in1) each ended ledger-failed `movementError` (errorCode 9, 10s/8s) — the arm's reach collided on the first in1 path (the operator physically inspected the arm per D-11 step 3, re-established the nest position so the reach is clear, GetFailureLatch remained latched:false at 05:15Z and after the run, GetManagerState automated recovery null); corrected the reachable-headroom issue re-queued ONE run (this one); no re-send of any leg, no restart, no state deletion at any point | PASS |
+| 3a-3 | 2026-11-03T05:43:31Z | LIVE-10 | Post-run: ledger (never edited) holds 4 fresh per-run keys (…-in1/in2/out1/out2) all state done/ran — each STACK leg submitted exactly once (one ledger record + one log attempt each); the rehearsal key GAL07-LIVE9-…-T035107Z untouched; the two movementError-failed keys remain in the ledger as the recorded D-14 history (never deleted). STACK2-6.log attempt accounting: 16 "Running command Transfer" lines = 1 rehearsal + 5 invalidSource refusals (04:16/04:18/04:38/04:46/04:53Z — the visual-protocol runs, pre-dispatch, no ledger), + 1 pre-split attempt (05:19:28Z, failed 0s, manager refused), + 2 movementError queue attempts (05:36:59/05:38:55Z), + the 4 run legs (05:40:15/05:40:46/05:42:31/05:43:02Z); 2 additional short tool exchanges (05:36:41Z, 05:38:44Z) returned SUCCESS with NO ledger key and no polling loop — the replay-window/estimate-shaped "already completed, nothing was sent" reply class pinned in 07-01 (recorded as expected behavior, not motion; the operator's own manual probes between failed queue attempts). Listener PIDs unchanged after every motion (MainPID 3973399, :8081/3973399, :40001/4004949, :40012/4004972, :11010/4004971 — no restart in the whole LIVE-10 window, T-07-16 held); post-run reads: STACK2-6 READY idle, FA100056 READY idle (run_state {percent 100, idle, pause null}); operator-confirmed physical end state: plate 1 back at nest-1/deck1/A1, plate 2 back at nest-2/deck`/A1, F.A.S.T. tray stations empty; GetFailureLatch latched:false (zero-I/O). The two-plate LIVE-10 amendment (4 stack legs + 1 liquid leg replacing the plan's two-key/three-leg shape) is the recorded D-14 deviation on plan 07-04 (in the plan notes); the milestone's end-to-end proof stands on the live four-key/5-leg cycle | PASS |
+| 3a-4 | 2026-11-03T07:31:00Z | LIVE-10 | POST-PHASE reconciliation (recorded at the re-verification, outside the phase's recorded events): seven ledger records appeared between 06:58Z and 07:24Z under keys GAL07-LIVE-20261103-…-{7c17a721, 85bf4fa2, e46a27ec, d1626a4b} — operator-driven additional two-plate cycles queued directly against protocol id 15 (three failed in1 attempts at 06:58:14Z/07:11:40Z/07:14:43Z — posture/positioning trials, each FAIL, no re-send escalation), then the 07:22:06Z full cycle: in1 ran (28s), in2 ran (28s), out1 ran (29s), **out2 FAILED at 17 s (the reach again)** — the core latched the failure (guid 4f1c93e5…, errorName movementError-class). The core's fail-closed protection behaved exactly as designed (rejected the dangerous second attempt and latched). None of these seven keys carry a findings row or a go-gate record — reported by the re-verification as its one warning. Recorded here as the reconciliation, never edited into the LIVE-10 rows above | PASS |
+| 3a-5 | 2026-11-03T07:40:00Z | LIVE-10 | The 07:22:06Z cycle's out2 failure drilled D-11: the operator **acknowledged the failure through the manager UI** (goto 4f1c93e5… with the arm-inspected `yes`), then GetFailureLatch returned `{"latched": false}` (zero-I/O read; recorded at 07:40Z) — the physical recovery is acknowledge-after-inspection, exactly the runbook's D-11 step 4-5; no restart, no state/ledger deletion, never a re-send. Re-loop note: the runbook's Part 3 evidence above (the 05:40Z event) still stands as the LIVE-10 proof; these additional 07:xxZ records are practice cycles with их own evidence recorded here; any further live cycles MUST run through the same GO-gate + findings-row discipline (D-10) — never drive the queue outside a recorded session (the operator's next cycles would need their own rows: propose /gsd-quick or a new findings sheet, not silent records) | PASS |
+
+| 3a-6 | 2026-11-03T08:29:00Z | LIVE-10 | Visual-protocol repeatability: the double-run refusal was the step-key ledger rule (one valid submit per key outside the 600 s replay window; T-07-10/XFR-05), because visual protocols carry fixed literal step_keys (script protocols mint per-run). The operator's two visual fixes recorded: labware_profile -> Default and destination_transfer_profile -> blank (the exact shape the manager validates). Fix shipped as a new STORE protocol (id 18, "manual-live-test (repeatable)", visual): two Tool Box variable_assignment steps mint GAL07-MANUAL-<ts>-in/-out keys into workcell variables manual_key_in/manual_key_out (JS expressions evaluated at dispatch by the queue), the STACK transfer steps carry {{manual_key_in}}/{{manual_key_out}} whole-value substitution interpolated by tools.ts from the variables table (fail-closed on missing variable), undefined at the deployed galago-web image (galago-core a799627, no rebuild needed). The variables manual_key_in/manual_key_out pre-created (ids 49/50, string, workcell 1). Validation apture: visual preview returns "no commands" for visual mode (the preview path only executes scriptContent) - the run-store expansion is the visual behavior record. Repeatable from the ui for every future live test with the same GO-gate discipline | PASS |
+
+| 3a-7 | 2026-11-03T09:09:04Z | LIVE-10 infra | The step-key auto-mint went LIVE: unit galago-tools is an editable install of the repo (discovered during the deployment-true-up: __editable__.galago_tools-0.19.10.pth; import resolves tools/stack/server.py), so the deployment was ONE service restart, not the uv dance the todo had assumed (todo updated + committed). Gate chain: typed go 09:02:35Z (D-10); D-06 backup ~/.local/share/galago/log-backups/pre-stepkey-20261103T090245Z/ (trace folder 1793618675 20M, journal, service record MainPID=3973399, listeners.txt); the operator restarted at 16:05:02 WIB - new MainPID 1179280, journal Started line clean (grep -c traceback 0), listeners re-baselined (:8081/1179280, :40001/1179318, :40012/1179378, :11010/1179377): the tool servers relaunched under the manager; :40012 READY; :40001 NOT_CONFIGURED (the F.A.S.T. tool server restarts to pre-config state - row 1a-5's known shape; the operator re-Configures it through its tool page before any F.A.S.T. leg, per the runbook steps). THE MINTED-KEY PROOF (operator-driven blank-key transfers from the tool page right after the restart): ledger records 4 minted-format keys (<UTC ts microseconds>-<8 hex>, zero typed keys): two held pickupFailed (13 s and 14 s elapsed - the operator then resolved door/reach posture, D-11-class self-inspection) and then TWO SUCCESS transfers (09:08:04Z ran 31 s, 09:09:04Z ran 30 s) - two DIFFERENT minted keys, no same-key refusal, each attempt exactly one ledger record and one STACK2-6.log attempt line. The authoring knob is off: blank step_key now works everywhere (visual manual tests, tool-page sends, future protocols) while the ledger keeps its one-shot double-motion guard intact. The adapter change: commit 0604348 in galago-tools (mint at Transfer entry: UTC ts microseconds + 8 hex random, no prefix, per the operator's choice | PASS |
+| 3a-11 | 2026-11-17T08:33:20Z | LIV-01, LIV-02 infra (galago-core Phase 9) | Lanes-on deploy of galago-web (galago-core Phase 9, D-13 as amended by decision B). The plan's production rebuild could not run: this host has no `galago-web` container and no `galago-core-galago-web` image (only the dev container `galago-web-dev` from docker-compose.dev.yml, image `galago-core-galago-web-dev` id a331fa4d812a, bind-mounted `./controller`, store controller/data/app.db), and both pre-flight forms at 05:18:40Z ended BLOCKED (`missing: Command_Transfer under /app/gen-interfaces in container galago-web`). Nothing was tagged, built, started or stopped; the session stopped and the user decided (reply B, 2026-11-17): turn lanes on by recreating `galago-web-dev` with GALAGO_PARALLEL_LANES=1, no build, so there is no `rollback-pre-lanes` image anchor (rollback = recreate with the flag off, `env -u GALAGO_PARALLEL_LANES docker compose -f docker-compose.dev.yml up -d --no-build galago-web-dev`, and delete the root .env). Typed go (the operator typed `Go env`, the go with the ENV persistence option, after the four-point checklist: latch cleared and arm idle, plates on nest-1/2/3, no run in progress, OK to restart galago-web-dev), acted on at 2026-11-17T08:33:06Z. Command (galago-core 486cf09, controller tree identical to 63d61e4, no production change since d09a047): `GALAGO_PARALLEL_LANES=1 docker compose -f docker-compose.dev.yml up -d --no-build galago-web-dev` printed Recreate/Recreated/Starting/Started at 08:33:15Z; container 18b8638fc1c8 -> 855c334135eb, image id unchanged (a331fa4d812a, `--no-build`); `printenv GALAGO_PARALLEL_LANES` in the container prints 1; /api/health ok at 08:33:20Z; laneStatus laneMode true, halted false, queueBusy false (was laneMode false before); the store lists STACK2-6 + FA100056; PREFLIGHT OK both forms (plain and GAL07_REQUIRE_STACK_ENV=1, with GAL07_WEB_CONTAINER=galago-web-dev), STACK owner lock held by galago (pid 7491), the expected single-owner state; post-deploy baseline vs pre-deploy: listener PIDs 8081/11010/40012/40001 = 6872/7490/7491/2320808 unchanged (no tool-server restart), STACK2-6.log 12 Transfer lines and ledger sha256 5de43c84...670b (9 records) unchanged, /api/runs count 0. Flag persistence: root .env holding only the feature flag line (gitignored, never committed, not a credential) so a later compose start keeps lanes on. galago-tools d53da53 (0604348 ancestor), auto-mint: on (not exercised). Nothing sent to STACK2-6 or FA100056. Evidence: galago-core .planning/phases/09-supervised-live-two-tool-proof/09-LIVE-EVIDENCE.md (Deploy section) | PASS |
+| 3a-12 | 2026-11-17T10:02:21Z | LIV-02 (galago-core Phase 9) | LIV-02 lanes freeze drill, run on the lanes-on `galago-web-dev` (row 3a-11) in an isolated `uat-sim` workcell (created for the drill; Claude set up the sim rig at the user's request, a narrow D-18 amendment recorded in galago-core 09-CONTEXT.md, while Start, Freeze and every recovery control stayed with the operator) against two simulated tool servers, SIM-STACK on 40091 and SIM-FAST on 40092 (placeholder instrument hosts 192.0.2.1 and 192.0.2.2, both Configured with simulate on, so no manager or instrument was dialed); the drill protocol refuses a real tool name. Typed go `go` at 2026-11-17T09:24:03Z. Scenario 1 (09:36-09:42Z): the sim STACK server stopped mid-`d-x1` while SIM-FAST ran its 80 s step: SIM-FAST finished COMPLETED (never aborted), `d-out1` stayed CREATED, laneStatus halted true (haltReason failure), and the operator's Start retried `d-x1` and finished the run. Scenario 2 (09:50-09:54Z): the sim F.A.S.T. server stopped mid-step while `d-x1` ran: `d-x1` finished COMPLETED, `d-out1` stayed CREATED, halted (failure); this one took two operator Starts, because a retry ran before SIM-FAST was re-Configured and failed once more with ECONNREFUSED (never reached the server, no extra send), then the Start after the Configure finished the run. Scenario 3 (09:55-09:57Z): operator Freeze lanes mid-overlap: both running rows finished COMPLETED, none aborted, `d-out1` stayed CREATED, halted with haltReason freeze and no failure, and the operator's single Start finished the run. Across all three: the other lane's running row ended COMPLETED, later rows stayed CREATED, only the operator Start re-armed (one send per queueId plus one per operator-retried row, none during a halt, from the sim server logs). Real tools untouched: listener PIDs 8081/11010/40012/40001 = 6872/7490/7491/2320808, STACK2-6.log 12 Transfer lines, FA100056.log 1 Transfer line, ledger sha256 5de43c84...670b (9 records) all unchanged; the only FA100056.log growth is GET /status polls from the web app after the workcell switch-back (no POST, no command). Left clean: sims stopped, `test` selected, laneStatus clean, no latch, no run RUNNING, both pre-flight forms PREFLIGHT OK. Follow-ups, not LIV-02 clauses: lanes-mode run records stay CREATED after all rows COMPLETE (row status is the evidence; flagged for a fix). Evidence: galago-core .planning/phases/09-supervised-live-two-tool-proof/09-LIVE-EVIDENCE.md (Freeze drill, LIV-02 verdict) and evidence/. LIV-02 verdict | PASS |
+| 3a-13 | 2026-11-17T10:45:03Z | LIV-01 (galago-core Phase 9) | LIV-01 event 1, the STACK estimate overlapping the F.A.S.T. liquid leg on the lanes-on `galago-web-dev` (row 3a-11), protocol id 9 imported into the real `test` workcell. Readiness: the operator read the failure latch (latched false), the robot state (stack2-6 idle) and the gripper (empty), and ran a nest-3 to nest-1 to nest-3 round trip from the STACK tool page, both Transfers done/ran (10:29:45Z and 10:30:31Z, each about 29 s; auto-minted tool-page keys outside the run). Pre-flight: both forms `PREFLIGHT OK` with `GAL07_WEB_CONTAINER=galago-web-dev` (10:32:40Z). Typed go recorded 2026-11-17T10:37:49Z (D-10), the operator alone pressed Start. Key base `LIV01-E1-2026-11-17T10:40:52.652Z-5f3509d4` with four explicit keys `-in1`, `-in2`, `-out1`, `-out2` (in1 nest-1 to fa100056 tray1/5, in2 nest-2 to tray1/6, F.A.S.T. leg deck 5 to 6 on lane fast, out1 tray1/5 back to nest-1, out2 tray1/6 to nest-2). The overlap step was a `get_transfer_estimate` nest-3 to nest-1 on the primary lane: window 10:42:16.623-10:42:16.789 inside the F.A.S.T. row 10:42:16.425-10:43:28.134 (D-05 clauses all hold, 166 ms intersection; the 1 s log resolution puts both log lines in the same second, the row milliseconds order them). Counts: STACK2-6.log "Running command Transfer" +4 and F.A.S.T. +1, one GetTransferEstimate; four ledger records, each done/ran, none other. galago-tools SHA 034867c (docs-only above d53da53, tool code unchanged), auto-mint: on (not exercised), all keys explicit. Rows all COMPLETED, laneStatus halted false (the stored run record stays CREATED in lanes mode, see 3a-14). Evidence: galago-core .planning/phases/09-supervised-live-two-tool-proof/09-LIVE-EVIDENCE.md (Live event 1) and evidence/. Event 1 verdict | PASS |
+| 3a-14 | 2026-11-17T11:13:42Z | LIV-01 (galago-core Phase 9) | LIV-01 event 2, a moving STACK transfer overlapping the F.A.S.T. liquid leg, protocol id 10. Readiness: fresh latch, robot-state and gripper reads (latched false, idle, empty), then a fresh nest-3 to nest-1 to nest-3 round trip, both Transfers done/ran (10:57:53Z-10:58:24Z and 10:58:39Z-10:59:09Z; an earlier attempt at 10:55Z did not run the round trip and the plan stopped, nothing moved); pre-flight both forms `PREFLIGHT OK` (11:00Z). Typed go accepted 2026-11-17T11:07:01Z (D-10), the operator alone pressed Start. Key base `LIV01-E2-2026-11-17T11:08:44.895Z-abf060a9`, five explicit keys `-in1`, `-in2`, `-x1`, `-out1`, `-out2`. The -x1 step moved the third plate nest-3 to nest-1 (into plate 1's home after in1 vacated it) on the primary lane while the F.A.S.T. leg ran: -x1 11:09:58.493-11:10:29.196 inside the F.A.S.T. row 11:09:57.309-11:11:08.787 (D-05 clauses all hold, 30703 ms intersection). out1 tray1/5 to nest-3 started 11:11:09.712, 925 ms after the F.A.S.T. row completed and 40 s after -x1 (barrier held); out2 tray1/6 to nest-2 after out1; no return leg (amended D-03), no `-x2`. End state, operator-reported: third plate on nest-1, plate 1 on nest-3, plate 2 on nest-2, restored by hand after the capture was committed. Counts: STACK2-6.log "Running command Transfer" 20 to 25 (+5), F.A.S.T. 2 to 3 (+1); ledger 17 to 22, five new records, each done/ran, no `-x2`. galago-tools SHA 034867c, auto-mint: on (not exercised), all keys explicit. Rows 70-76 all COMPLETED, laneStatus halted false. Follow-ups, not clauses: the lanes-mode run record stays CREATED after every row COMPLETEs (judge by row status and laneStatus); FA100056.log grows from the web UI's status polling (count "Running command" lines, not total lines); nest-3 to nest-1 moves were unreliable earlier that day (3 of 5 operator test moves failed before the round trips succeeded), so the round-trip gate stays. Evidence: galago-core .planning/phases/09-supervised-live-two-tool-proof/09-LIVE-EVIDENCE.md (Live event 2, LIV-01 verdict) and evidence/. Event 2 and LIV-01 verdict | PASS |
+| 3a-15 | 2026-11-17T11:20:19Z | LIV-03 (galago-core Phase 9) | The parallel two-plate cycle was added to Part 3 as the subsection `### Parallel two-plate cycle (lanes, LIV-01)`, only after LIV-01 had a recorded PASS (rows 3a-13 and 3a-14; the LIV-02 drill is row 3a-12). It runs the galago-core protocol `09-live-lanes-event2.protocol.json` with the amended placement rules and no return leg. Docs-only change; no tool-server restart, no redeploy, no vendor re-pin. Evidence pointer: galago-core .planning/phases/09-supervised-live-two-tool-proof/09-LIVE-EVIDENCE.md (LIV-01 verdict, LIV-03 records) | PASS |
+
+Row guidance: G0 is the entry pre-flight verdict for each part (exit code and last line; one
+commit of evidence per part or one line per run). 1a-1 records the OQ-1 core-install decision and
+the Part 1 GO reply timestamp; 1a-2 the Step 1 install and its discriminating checks; 1a-3 the
+credentials wiring and the pre-restart backup (paths and counts only); 1a-4 the restart checks
+including the listener-PID re-baseline; 1a-5 the reconnect order and the post-connect reads;
+1a-6 the galago-web rebuild (image IDs, health, bundle) and the four strictly increasing UTC
+timestamps. 2a-1 the Part 2 pre-flight, reads and GO reply timestamp; 2a-2 the rehearsal Transfer
+(keys, outcome, wall time); 2a-3 the post-run state. 3a-1 the Part 3 pre-flight, pre-store check
+and GO reply timestamp; 3a-2 the three-leg run; 3a-3 the post-run ledger and counts.

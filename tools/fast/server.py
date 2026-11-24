@@ -81,6 +81,13 @@ MOTION_LOCK_COMMANDS = frozenset({"Transfer", "RunProtocol", "ScanTips", "EjectT
 # status bracket (D-01, D-02).
 CONTROL_COMMANDS = frozenset({"pause", "resume", "abort"})
 
+# More fast.Command oneof field names that FastServer.ExecuteCommand routes
+# past base_server's readiness gate and status bracket. They are read-only,
+# never take the motion lock, and answer while a motion command holds the tool
+# BUSY. This mirrors tools/stack/server.py READ_COMMANDS (STACK D-13). Unlike
+# CONTROL_COMMANDS, a read here also never overwrites last_error (STACK WR-04).
+READ_COMMANDS = frozenset({"get_plates"})
+
 # The commands that own an instrument run, so their run is "in flight" for
 # run_state (D-12, D-19; design section 5.2 names exactly these two). Named
 # separately from CONTROL_COMMANDS (D-06): ScanTips and EjectTray also take
@@ -98,6 +105,7 @@ COMMAND_TO_SERVICE_METHOD = {
     "Abort": "abort",
     "Resume": "resume",
     "Pause": "pause",
+    "GetPlates": "plate_definitions",
 }
 
 # The physical decision each recovery command must carry explicitly. A
@@ -388,6 +396,26 @@ def _transport_error_reply(exc: Exception) -> ExecuteCommandReply:
     return _reply(ERROR_FROM_TOOL, message=message)
 
 
+def _plate_rows(plates: Any) -> list[dict[str, Any]]:
+    """The GetPlates meta rows, one per plate definition, sorted ascending by
+    id. Field names and meanings mirror fast_mcp/mcp/server.py
+    list_plate_definitions: id, description, rowCount, colCount and
+    workingCapacity (uL). Duck-typed attribute access, so no fast_mcp.knowledge
+    import."""
+    rows = [
+        {
+            "id": int(p.id),
+            "description": p.description,
+            "rowCount": p.row_count,
+            "colCount": p.col_count,
+            "workingCapacity": p.working_capacity,
+        }
+        for p in plates
+    ]
+    rows.sort(key=lambda row: row["id"])
+    return rows
+
+
 def _accepted(result: "dict | Refused") -> bool:
     """WR-01: the single definition of "the instrument accepted the
     command" -- True only when `result` is a dict whose `errorCode` is the
@@ -468,6 +496,29 @@ class FastServer(ToolServer):
         self._active_runs = 0
         self._run_record: dict[str, Any] = {
             "state": "running", "percent": None, "pause": None, "operator_abort": False}
+        # Per thread: True while a bypassed read is running (see last_error).
+        self._read_bypass = threading.local()
+
+    @property
+    def last_error(self) -> Optional[str]:
+        value: Optional[str] = self.__dict__.get("_last_error", "")
+        return value
+
+    @last_error.setter
+    def last_error(self, value: Optional[str]) -> None:
+        """Mirrors tools/stack/server.py (WR-04). GetStatus.error_message is
+        the operator's view of the tool's last failure, so a bypassed read
+        (get_plates) must not clear or overwrite it while a Transfer runs: base
+        _dispatchCommand writes it on every reply. Writes made on a thread that
+        is inside a bypassed read are dropped; the read's own outcome is in its
+        reply. Thread-local, so a motion command's write on another thread is
+        never suppressed. The pause/resume/abort bypass never sets the flag, so
+        its last_error writes are unchanged. The one write a read still makes is
+        the bypass's own exception handler."""
+        bypass = self.__dict__.get("_read_bypass")  # absent while base __init__ runs
+        if bypass is not None and getattr(bypass, "active", False):
+            return
+        self.__dict__["_last_error"] = value
 
     def _dispatchCommand(self, command: "message.Message") -> ExecuteCommandReply:
         """Override of ToolServer._dispatchCommand (RESEARCH Pattern 1, D-15).
@@ -522,8 +573,11 @@ class FastServer(ToolServer):
         finally (:254). A control command (pause/resume/abort) must reach
         the run that an in-flight Transfer/RunProtocol owns and must not
         flip its status, so this override bypasses those three for
-        CONTROL_COMMANDS only -- it still checks the tool type and still
-        runs _check_args through _dispatchCommand. Never calls isReady,
+        CONTROL_COMMANDS and READ_COMMANDS -- the two bypassing sets. A read
+        (get_plates) must answer during a run and, unlike a control command,
+        leaves last_error untouched (see the last_error setter). It still
+        checks the tool type and still runs _check_args through
+        _dispatchCommand. Never calls isReady,
         parseCommand or setStatus on this path: a BUSY tool stays BUSY and a
         READY tool stays READY. Every other request (a non-fast
         tool_command, a fast request with no command set, any non-control
@@ -541,6 +595,22 @@ class FastServer(ToolServer):
                     logging.error(f"Error on Tool ={self.toolId}")
                     self.last_error = str(e)
                     return ExecuteCommandReply(response=DRIVER_ERROR, error_message=str(e))
+            if field_name in READ_COMMANDS:
+                command = getattr(fast_command, field_name)
+                # last_error writes are dropped on this thread for the whole
+                # read (see the last_error setter).
+                self._read_bypass.active = True
+                try:
+                    logging.info(f"Running command {command.__class__.__name__}")
+                    return self._dispatchCommand(command)
+                except Exception as e:
+                    logging.error(f"Error on Tool ={self.toolId}")
+                    # The one write a bypassed read still makes.
+                    self._read_bypass.active = False
+                    self.last_error = str(e)
+                    return ExecuteCommandReply(response=DRIVER_ERROR, error_message=str(e))
+                finally:
+                    self._read_bypass.active = False
         return super().ExecuteCommand(request, context)
 
     def _configure(self, config: Config) -> None:
@@ -827,6 +897,23 @@ class FastServer(ToolServer):
             return _transport_error_reply(exc)
         return _result_reply(result)
 
+    def GetPlates(self, params: "Command.GetPlates") -> ExecuteCommandReply:
+        """Read-only: the plate definitions registered on the instrument, as
+        meta {"plates": [{id, description, rowCount, colCount, workingCapacity}]}
+        sorted ascending by id (an empty list is SUCCESS). refresh=true bypasses
+        fast_mcp's knowledge cache. Never takes the motion lock and never reads
+        status (no idle check), so it answers while a Transfer runs. A failure
+        replies with no plates key."""
+        service = self.service
+        if service is None:
+            return _reply(NOT_READY, message=_NOT_CONNECTED_MESSAGE)
+        try:
+            plates = service.plate_definitions(refresh=bool(params.refresh))
+        except (InstrumentHTTPError, httpx.HTTPError) as exc:
+            return _transport_error_reply(exc)
+        rows = _plate_rows(plates)
+        return _reply(SUCCESS, meta={"plates": rows})
+
     def ScanTips(self, params: "Command.ScanTips") -> ExecuteCommandReply:
         service = self.service
         if service is None:
@@ -987,6 +1074,9 @@ class FastServer(ToolServer):
         return EST_READ_S
 
     def EstimateGetTipStatus(self, params: "Command.GetTipStatus") -> int:
+        return EST_READ_S
+
+    def EstimateGetPlates(self, params: "Command.GetPlates") -> int:
         return EST_READ_S
 
     def EstimateScanTips(self, params: "Command.ScanTips") -> int:

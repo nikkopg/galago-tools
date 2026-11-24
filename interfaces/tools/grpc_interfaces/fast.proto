@@ -14,6 +14,7 @@ message Command {
     Abort abort = 8;
     Resume resume = 9;
     Pause pause = 10;
+    GetPlates get_plates = 11;
   }
 
   message Transfer {
@@ -70,6 +71,14 @@ message Command {
   // (design D5), so it carries no hard/soft choice; the core refuses it
   // unless the instrument is running.
   message Pause {}
+
+  // Read-only: lists the plate definitions registered on the instrument. It
+  // never takes the motion lock and is safe to send while a transfer is
+  // running. refresh=true bypasses fast_mcp's knowledge cache and re-reads the
+  // definitions from the instrument.
+  message GetPlates {
+    optional bool refresh = 1;
+  }
 }
 
 message Config {
