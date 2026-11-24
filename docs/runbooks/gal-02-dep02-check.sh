@@ -12,7 +12,7 @@
 #   1. a galago-core checkout exists (controller/ directory)
 #   2. ToolType.stack inside the ToolType enum of controller/gen-interfaces/controller.ts
 #   3. generated controller/gen-interfaces/tools/grpc_interfaces/stack.ts exporting Command_Transfer
-#   4. commandFields.stack has the `transfer` key itself (controller/components/tools/constants.ts);
+#   4. commandFields.stack has the `transfer` key itself (controller/utils/commandFields.ts);
 #      list_transfer_profiles / get_transfer_estimate do not count
 #   5. commandFields.stack does NOT expose acknowledge_failure (forbidden in any protocol)
 #   6. vendored stack.proto is byte-equal to this repo's frozen interfaces/.../stack.proto
@@ -50,7 +50,7 @@ echo "galago-core HEAD: $head_sha"
 
 CONTROLLER_TS="$GC/controller/gen-interfaces/controller.ts"
 STACK_TS="$GC/controller/gen-interfaces/tools/grpc_interfaces/stack.ts"
-CONSTANTS_TS="$GC/controller/components/tools/constants.ts"
+CONSTANTS_TS="$GC/controller/utils/commandFields.ts"
 VENDORED_PROTO="$GC/vendor/galago-tools/interfaces/tools/grpc_interfaces/stack.proto"
 FROZEN_PROTO="$GT/interfaces/tools/grpc_interfaces/stack.proto"
 
@@ -104,12 +104,12 @@ if [ -f "$CONSTANTS_TS" ]; then
   ' "$CONSTANTS_TS" 2>/dev/null)"
 fi
 if [ "$stack_open" -eq 0 ]; then
-  echo "missing: commandFields.stack block in controller/components/tools/constants.ts"
+  echo "missing: commandFields.stack block in controller/utils/commandFields.ts"
   failed=1
 elif ! printf '%s\n' "$stack_block" | grep -qE '^    transfer[[:space:]]*:'; then
   # The key itself, at the block's own indent: list_transfer_profiles / get_transfer_estimate and
   # nested field names must not satisfy it.
-  echo "missing: commandFields.stack.transfer in controller/components/tools/constants.ts"
+  echo "missing: commandFields.stack.transfer in controller/utils/commandFields.ts"
   failed=1
 fi
 if printf '%s\n' "$stack_block" | grep -q 'acknowledge'; then

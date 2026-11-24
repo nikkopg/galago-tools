@@ -103,7 +103,7 @@ def _make_core_tree(
     if stack_ts:
         (gen / "tools" / "grpc_interfaces" / "stack.ts").write_text(stack_ts_text, encoding="utf-8")
 
-    components = root / "controller" / "components" / "tools"
+    components = root / "controller" / "utils"
     components.mkdir(parents=True)
     constants = [
         "export const commandFields: CommandFields = {",
@@ -123,7 +123,7 @@ def _make_core_tree(
             constants.append("    acknowledge_failure: [],")
         constants.append("  },")
     constants.append("};")
-    (components / "constants.ts").write_text("\n".join(constants) + "\n", encoding="utf-8")
+    (components / "commandFields.ts").write_text("\n".join(constants) + "\n", encoding="utf-8")
 
     vendored = root / "vendor" / "galago-tools" / "interfaces" / "tools" / "grpc_interfaces"
     if proto != "missing":
@@ -233,7 +233,7 @@ class TestDep02Gate(unittest.TestCase):
                 self.assertEqual(
                     [x for x in out if x.startswith("missing:")],
                     ["missing: commandFields.stack.transfer in "
-                     "controller/components/tools/constants.ts"], out)
+                     "controller/utils/commandFields.ts"], out)
 
     def test_dep02_gate_accepts_the_transfer_key_with_decoys_and_a_one_line_block(self) -> None:
         cases: dict[str, list[str]] = {
@@ -263,7 +263,7 @@ class TestDep02Gate(unittest.TestCase):
         self.assertEqual(completed.returncode, 1, completed.stdout)
         self.assertEqual(
             [x for x in out if x.startswith("missing:")],
-            ["missing: commandFields.stack block in controller/components/tools/constants.ts"], out)
+            ["missing: commandFields.stack block in controller/utils/commandFields.ts"], out)
 
     def test_dep02_gate_scopes_tooltype_to_its_own_enum(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
